@@ -1,0 +1,25 @@
+[package]
+name = "cheers-test-support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-process test fixtures for cheers — turso :memory: backed stores, session + edge-verify helpers. Dev/test only; never ship to production."
+publish = false
+
+[lib]
+name = "cheers_test_support"
+path = "src/lib.rs"
+
+[dependencies]
+cheers-core = { path = "../cheers-core", version = "0.0.1" }
+cheers-server = { path = "../cheers-server", version = "0.0.1" }
+cheers-verify = { path = "../cheers-verify", version = "0.0.1" }
+
+async-trait = "0.1"
+turso = { workspace = true }
+
+[dev-dependencies]
+cheers-server = { path = "../cheers-server", version = "0.0.1" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

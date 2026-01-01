@@ -1,0 +1,23 @@
+{
+  "subclassId": "bundle-anthropic-warrior-primary",
+  "name": "Steady Hand",
+  "class": "Warrior",
+  "runner": "claude_cli",
+  "connectionId": "",
+  "auth": "subscription",
+  "model": "claude-opus-4-7",
+  "thinkingBudget": "medium",
+  "fallbacks": [
+    {
+      "when": {
+        "metric": {
+          "kind": "session_usage_pct"
+        },
+        "op": "gt",
+        "threshold": 50.0
+      },
+      "useSubclass": "bundle-anthropic-warrior-golden-cloak"
+    }
+  ],
+  "source": "preroll"
+}

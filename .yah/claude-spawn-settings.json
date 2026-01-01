@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "yah": {
+      "args": [
+        "mcp",
+        "/Users/user/ss/yah/external/cheers"
+      ],
+      "command": "/Applications/yah.app/Contents/MacOS/yah"
+    }
+  }
+}

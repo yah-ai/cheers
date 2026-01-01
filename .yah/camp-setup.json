@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "steps": [
+    {
+      "id": "git-init",
+      "status": "done",
+      "completed_at": "2026-05-15T00:19:26.438Z"
+    },
+    {
+      "id": "provider",
+      "status": "skipped",
+      "skipped_at": "2026-05-15T00:28:27.620Z"
+    },
+    {
+      "id": "characters",
+      "status": "done",
+      "completed_at": "2026-05-15T00:28:29.435Z"
+    },
+    {
+      "id": "claude-cli",
+      "status": "skipped",
+      "skipped_at": "2026-05-15T15:55:07.053Z"
+    },
+    {
+      "id": "claude-dir",
+      "status": "done",
+      "completed_at": "2026-05-15T16:02:23.742Z"
+    }
+  ]
+}

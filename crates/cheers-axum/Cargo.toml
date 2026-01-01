@@ -1,0 +1,132 @@
+[package]
+name = "cheers-axum"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "axum 0.8 route handlers for cheers — OIDC login/callback (Google, Apple), passkey, magic-link wiring into a SessionAuthority."
+keywords = ["auth", "axum", "oidc", "session", "cheers"]
+categories = ["authentication", "web-programming"]
+
+[lib]
+name = "cheers_axum"
+path = "src/lib.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+
+# The HTTP-route home for cheers. Composes cheers (providers) + cheers-server
+# (SessionAuthority + UserStore) into ready-to-mount axum Routers. Products
+# (yah-platform when it materializes) just wire concrete store impls from
+# cheers-sqlx / cheers-redis underneath and call `cheers_axum::google::router(...)`
+# etc. This crate stays product-agnostic — no cookie domain hardcoding,
+# no DATABASE_URL, no warden coupling.
+[dependencies]
+cheers-core = { path = "../cheers-core", version = "0.0.1" }
+cheers-server = { path = "../cheers-server", version = "0.0.1" }
+# Optional — only pulled in under the `google`/`apple` features.
+cheers = { path = "../cheers", version = "0.0.1", default-features = false, optional = true }
+
+# axum 0.8 (hyper 1 / http 1) — dedupes against reqwest's hyper 1 in the tree.
+# default = ["json", "tokio", "http1", "matched-path", "original-uri", "form", "query", "tracing"] is
+# fine for our needs; we don't strip default features.
+axum = { version = "0.8", default-features = false, features = [
+    "json",
+    "query",
+    "form",
+    "http1",
+    "tokio",
+    "matched-path",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+# Used by the OIDC handlers to generate a fresh `device_id` per login attempt
+# (16 random bytes -> b64url). Same crate cheers-server uses for `jti`.
+getrandom = { version = "0.3", optional = true }
+# base64 is unconditional — the admin routes (R020-T17) base64url-encode the
+# one-shot service-principal secret in the response body, and the OIDC /
+# passkey / email features all need it too.
+base64 = "0.22"
+# Used by the JWKS route (R020-F11) to compute a strong ETag over the serialized
+# JWK set so a conditional GET returns 304 without re-fetching the payload.
+# Transitively present via webauthn-rs / openidconnect already; calling it out
+# here keeps the unconditional /.well-known/jwks.json path self-contained.
+sha2 = { version = "0.10", default-features = false }
+# Re-exported `openidconnect::reqwest` is what the providers' `finish` calls
+# take. We hold a `reqwest::Client` in the route state; reqwest is already in
+# the tree via cheers's openidconnect dep.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"], optional = true }
+# uuid (passkey only) — webauthn-rs uses `Uuid` as the WebAuthn user-handle
+# type; we derive a stable v5 handle from cheers's `UserId` so the same user
+# always reaches the same handle without a UserId↔Uuid table. webauthn-rs
+# pulls uuid transitively but doesn't enable v5, so we name the feature here.
+uuid = { version = "1", default-features = false, features = ["v5"], optional = true }
+
+[dev-dependencies]
+# axum's `into_make_service` + `serve` for the round-trip tests; we drive the
+# router via tower's `Service::call` directly so a full tokio server isn't
+# needed. `body` reads/writes axum::body::Body.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+http = "1"
+wiremock = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# p256 (dev only) — deterministic P-256 PKCS#8 PEM generation for the Apple
+# `client_secret` JWT in the apple integration tests. Same trick the upstream
+# cheers Apple tests use; no per-run keygen cost.
+p256 = "0.13"
+# webauthn-authenticator-rs (dev only) — its SoftPasskey drives a real
+# registration/authentication ceremony end-to-end against the passkey routes,
+# the canonical way to exercise a webauthn-rs server flow without a real
+# browser/authenticator. Shares webauthn-rs-core with the production dep.
+webauthn-authenticator-rs = { version = "0.5", default-features = false, features = [
+    "softpasskey",
+] }
+pollster = "0.4"
+# ed25519-compact (dev only) — used in camps::tests to sign a UserDelegation
+# end-to-end against the bootstrap route. Same crate cheers-server's camp
+# module uses; the workspace dedupes against pasetors's transitive dep.
+ed25519-compact = { version = "2", default-features = false }
+
+[features]
+default = []
+# Wire the Google OIDC login + callback handlers.
+google = [
+    "dep:cheers",
+    "dep:reqwest",
+    "dep:openidconnect",
+    "dep:getrandom",
+    "cheers/google",
+]
+# Wire the Apple Sign-In form-post handlers.
+apple = [
+    "dep:cheers",
+    "dep:reqwest",
+    "dep:openidconnect",
+    "dep:getrandom",
+    "cheers/apple",
+]
+# Wire the passkey (WebAuthn) register + authenticate handlers. Pulls in
+# cheers's `passkey` feature (webauthn-rs) which is MPL-2.0 + openssl — see
+# the workspace `deny.toml` exception list.
+passkey = [
+    "dep:cheers",
+    "dep:getrandom",
+    "dep:uuid",
+    "cheers/passkey",
+]
+# Wire the magic-link request + verify handlers. The trait-only `email`
+# feature on cheers gives us MagicLinkProvider + Mailer + MagicLinkEmail
+# without dragging in lettre/SMTP — products that want SMTP transport enable
+# `cheers/email-lettre` separately.
+email = [
+    "dep:cheers",
+    "dep:getrandom",
+    "cheers/email",
+]

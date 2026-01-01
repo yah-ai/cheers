@@ -1,0 +1,23 @@
+{
+  "subclassId": "bundle-anthropic-wizard-primary",
+  "name": "Sage of the Cloud",
+  "class": "Wizard",
+  "runner": "claude_cli",
+  "connectionId": "",
+  "auth": "subscription",
+  "model": "claude-opus-4-7",
+  "thinkingBudget": "extra_high",
+  "fallbacks": [
+    {
+      "when": {
+        "metric": {
+          "kind": "session_usage_pct"
+        },
+        "op": "gt",
+        "threshold": 50.0
+      },
+      "useSubclass": "bundle-anthropic-wizard-golden-cloak"
+    }
+  ],
+  "source": "preroll"
+}

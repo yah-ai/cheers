@@ -1,0 +1,11 @@
+{
+  "subclassId": "bundle-anthropic-warrior-golden-cloak",
+  "name": "Golden Cloak — Anthropic API",
+  "class": "Warrior",
+  "runner": "claude_cli",
+  "connectionId": "",
+  "auth": "subscription",
+  "model": "claude-opus-4-7",
+  "thinkingBudget": "medium",
+  "source": "preroll"
+}

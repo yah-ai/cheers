@@ -1,0 +1,27 @@
+[package]
+name = "cheers-verify"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Verify-only surface for cheers — PasetoV4PublicVerifier (Ed25519 public key), RevocationReader, and the EdgeVerifier facade. Holds no minter, so it is edge-safe."
+keywords = ["auth", "session", "token", "paseto", "edge"]
+categories = ["authentication"]
+
+[lib]
+name = "cheers_verify"
+path = "src/lib.rs"
+
+# The capability boundary is the DAG, not a feature: cheers-verify depends on
+# cheers-core and pasetors, but NOT on any minter type. "The edge cannot mint" is
+# realized as "the edge's crate has no path to a minter." cheers-server depends on
+# THIS crate, never the reverse. See .yah/docs/working/edge-verifiable-auth.md.
+[dependencies]
+cheers-core = { path = "../cheers-core", version = "0.0.1" }
+pasetors = "0.7"
+serde_json = "1"
+async-trait = "0.1"
+
+[dev-dependencies]
+pollster = "0.4"

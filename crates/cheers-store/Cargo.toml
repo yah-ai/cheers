@@ -1,0 +1,81 @@
+[package]
+name = "cheers-store"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Device-tier credential storage (OS keyring, encrypted file) implementing cheers-core's CredentialStore — no token crypto."
+readme = "README.md"
+keywords = ["auth", "keyring", "credential", "keychain"]
+categories = ["authentication"]
+
+[lib]
+name = "cheers_store"
+path = "src/lib.rs"
+
+# docs.rs builds every feature so the page covers all backends.
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+# The device tier depends on cheers-core's keyless contract surface: identity
+# types + the CredentialStore trait, with none of the codec/refresh/session
+# machinery. Post-R019-F6 that boundary is enforced by the crate DAG (the codec
+# impls live in cheers-verify/cheers-server, not behind a cheers-core feature),
+# so a device target that only acquires and stores an opaque credential never
+# compiles pasetors/hmac/sha2/…
+cheers-core = { path = "../cheers-core", version = "0.0.1" }
+
+async-trait = { version = "0.1", optional = true }
+serde_json = { version = "1", optional = true }
+
+# age (R015-T2) — EncryptedFileStore. Pure-Rust authenticated file encryption
+# (ChaCha20-Poly1305 payload, X25519 recipient stanzas); no openssl, no TLS, so
+# the device tier stays openssl-free. default-features=false drops the CLI /
+# ASCII-armor / plugin / ssh machinery a library embedder doesn't need — the
+# x25519 recipient + identity types are always available.
+age = { version = "0.11", default-features = false, optional = true }
+
+# keyring (R015-T1) — KeyringStore over the OS secret store. The `keyring`
+# crate's v3 line carries the classic unified `keyring::Entry` API; v4 split
+# into `keyring-core` + per-platform store crates and the umbrella crate became
+# a CLI/sample (pulls clap/rpassword) — wrong shape for a library dep (tracked
+# in the keyring.rs cleanup note). The backend is picked per target so a build
+# only links the platform store it can use: Apple Security framework on
+# macOS/iOS, Credential Manager on Windows, the D-Bus Secret Service on Linux.
+# `crypto-rust` keeps the Linux secret-service backend on RustCrypto AES so this
+# crate stays openssl-free.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { version = "3", default-features = false, features = [
+    "apple-native",
+], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = [
+    "windows-native",
+], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = [
+    "sync-secret-service",
+    "crypto-rust",
+], optional = true }
+
+[dev-dependencies]
+# pollster drives the async CredentialStore methods in tests without a full
+# async runtime — matches cheers-core's store-trait tests.
+pollster = "0.4"
+# tempfile gives EncryptedFileStore tests a throwaway dir for the data + key
+# files; test-only, never linked into the library.
+tempfile = "3"
+
+[features]
+default = []
+# KeyringStore over the OS secret store. async-trait for the #[async_trait]
+# impl; serde_json encodes the Credential blob. No crypto.
+keyring = ["dep:keyring", "dep:async-trait", "dep:serde_json"]
+# EncryptedFileStore over an age-encrypted file, for headless hosts with no OS
+# keyring (the rpi case). age supplies the at-rest encryption; serde_json
+# encodes the credential map; async-trait for the impl.
+headless = ["dep:age", "dep:async-trait", "dep:serde_json"]

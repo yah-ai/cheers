@@ -1,0 +1,4 @@
+# Schemas are a derived artifact — the yah binary embeds them and writes
+# them on every local desktop attach (scaffold_camp_skeleton). Re-sync with
+# `yah schema sync --force` if they drift from a newer yah version.
+/schema/

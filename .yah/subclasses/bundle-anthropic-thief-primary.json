@@ -1,0 +1,23 @@
+{
+  "subclassId": "bundle-anthropic-thief-primary",
+  "name": "Quick Hand",
+  "class": "Thief",
+  "runner": "claude_cli",
+  "connectionId": "",
+  "auth": "subscription",
+  "model": "claude-haiku-4-5-20251001",
+  "thinkingBudget": "low",
+  "fallbacks": [
+    {
+      "when": {
+        "metric": {
+          "kind": "session_usage_pct"
+        },
+        "op": "gt",
+        "threshold": 50.0
+      },
+      "useSubclass": "bundle-anthropic-thief-golden-cloak"
+    }
+  ],
+  "source": "preroll"
+}

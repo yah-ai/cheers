@@ -1,0 +1,10 @@
+{
+  "subclassId": "bundle-ollama-local-warrior-primary",
+  "name": "Local Hand",
+  "class": "Warrior",
+  "runner": "claude_cli",
+  "connectionId": "",
+  "auth": "subscription",
+  "model": "qwen3.5",
+  "source": "preroll"
+}

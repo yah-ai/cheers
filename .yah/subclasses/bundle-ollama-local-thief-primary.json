@@ -1,0 +1,10 @@
+{
+  "subclassId": "bundle-ollama-local-thief-primary",
+  "name": "Local Swift",
+  "class": "Thief",
+  "runner": "claude_cli",
+  "connectionId": "",
+  "auth": "subscription",
+  "model": "gemma4",
+  "source": "preroll"
+}

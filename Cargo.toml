@@ -1,0 +1,29 @@
+# cheers is its own Cargo workspace — it lives under yah/external/ during early
+# iteration but is intended to move to its own repo. yah's `.gitignore`
+# excludes `external/`, so this tree carries independent git history.
+[workspace]
+members = [
+    "crates/cheers-core",
+    "crates/cheers-verify",
+    "crates/cheers-server",
+    "crates/cheers",
+    "crates/cheers-store",
+    "crates/cheers-sqlx",
+    "crates/cheers-redis",
+    "crates/cheers-axum",
+    "crates/cheers-test-support",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+authors = ["yah Dev <human@yah.dev>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yah-ai/cheers"
+
+[workspace.dependencies]
+# Turso pin — lockstep with yah root workspace (0.6.1). `turso` is the async
+# wrapper; `turso_core` is the raw engine (turso depends on it internally).
+# features=[] for minimal binary size (no replication, no encryption at rest).
+turso = { version = "0.6.1", features = [] }

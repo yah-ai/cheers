@@ -1,0 +1,133 @@
+# cargo-deny policy for the cheers workspace.
+#
+# Run with: cargo deny check
+#
+# cheers ships under permissive licenses (MIT / BSD / Apache-2.0 / ISC /
+# Unicode / Zlib / MPL-2.0). Copyleft (GPL / LGPL / AGPL / SSPL) is rejected
+# outright. MPL-2.0 is permitted because webauthn-rs (P7) and the
+# authenticator crate are MPL-2.0; file-level copyleft is compatible with
+# this workspace's dual MIT / Apache-2.0 license as long as MPL files
+# aren't modified in place.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "0BSD",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+]
+exceptions = []
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = [
+    # native-tls stays banned: cheers is an all-rustls workspace (matching xlb),
+    # and native-tls is a TLS backend we never want.
+    { name = "native-tls" },
+    # openssl / openssl-sys are deliberately NOT banned — but only because the
+    # `passkey` feature (P7) pulls webauthn-rs, whose webauthn-rs-core →
+    # webauthn-attestation-ca chain hard-depends on openssl for COSE-key and
+    # X.509 *attestation* crypto (not for TLS). openssl is unreachable unless a
+    # build opts into `passkey`; the default bundle and the native-client
+    # features (P8/P9) stay rustls-only. The cost is a C-toolchain build dep on
+    # the server side, accepted because no pure-Rust server-side WebAuthn RP is
+    # mature enough yet to carry security-critical attestation crypto.
+    #
+    # Long-term: track https://github.com/marirs/passkey-auth-rs — a pure-Rust,
+    # no-openssl server-side WebAuthn RP. It's a one-maintainer repo today, so
+    # adopting it would likely mean forking or co-maintaining. If it matures (or
+    # a future webauthn-rs drops openssl for rust-crypto), re-ban openssl here.
+]
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Advisories
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack" timing sidechannel in the `rsa` crate
+    # when performing *private-key* operations (signing / decryption). cheers
+    # is an OIDC *relying party*: it verifies ID-token signatures using the
+    # provider's public key (Google/Apple's JWKS) and never holds the
+    # corresponding private key. The `rsa` dep arrives transitively through
+    # `openidconnect`'s `CoreRsaPrivateSigningKey` path that we don't compile
+    # — verification-only consumers aren't on the attack path. Re-evaluate if
+    # cheers ever ships an OP/IdP role.
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2024-0436 — `paste` crate marked unmaintained (no security
+    # vulnerability, the upstream is archived). Reachable only via
+    # xlb-net → netwatch → netlink-packet-core, which uses `paste` for the
+    # netlink type macros on Linux network discovery. No remote-input parsing
+    # path; the unmaintained status is a maintenance signal, not an exploit.
+    # Re-evaluate when netlink-packet-core drops `paste` (likely on its next
+    # major) or migrates to `pastey`.
+    "RUSTSEC-2024-0436",
+    # RUSTSEC-2025-0134 — `rustls-pemfile` marked unmaintained (not a CVE).
+    # The upstream tells consumers to migrate to `rustls-pki-types::PemObject`,
+    # which is the same code under a different surface. Reaches us via three
+    # paths none of which we own: testcontainers→bollard (cheers-sqlx /
+    # cheers-redis dev tests), the `redis` crate, and rustls-native-certs.
+    # Drop this ignore once those crates cut releases on the new API.
+    "RUSTSEC-2025-0134",
+    # RUSTSEC-2025-0111 — `tokio-tar` PAX/ustar header confusion. tokio-tar is
+    # unmaintained; the fix lives in the `astral-tokio-tar` fork but
+    # `testcontainers` 0.23 hasn't migrated. cheers only reaches tokio-tar as
+    # a `[dev-dependency]` of `cheers-sqlx` + `cheers-redis` (via
+    # `testcontainers` → `bollard` → `tokio-tar`), exclusively during the
+    # `pg-integration` / `redis-integration` tests that boot a throwaway
+    # Docker container. The tar-handling code path runs only against Docker
+    # daemon responses on localhost in a developer/CI environment — no
+    # untrusted tar input reaches it, and tokio-tar never compiles into a
+    # shipped binary (the production stores use sqlx / redis directly). Drop
+    # this ignore once `testcontainers` cuts a release on `astral-tokio-tar`.
+    "RUSTSEC-2025-0111",
+]
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

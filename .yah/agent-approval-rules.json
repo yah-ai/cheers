@@ -1,0 +1,84 @@
+{
+  "version": "1",
+  "rules": [
+    {
+      "scope": {
+        "kind": "subclass",
+        "id": "bundle-anthropic-warrior-primary"
+      },
+      "kind": "tool_path",
+      "name": "Edit",
+      "glob": "/Users/user/ss/yah/external/cheers/crates/cheers-store/src/**"
+    },
+    {
+      "kind": "tool_path",
+      "name": "Edit",
+      "glob": "/Users/user/ss/yah/external/cheers/crates/cheers-store/**"
+    },
+    {
+      "kind": "tool_path",
+      "name": "Edit",
+      "glob": "/Users/user/ss/yah/external/cheers/crates/cheers/**"
+    },
+    {
+      "kind": "tool_path",
+      "name": "Read",
+      "glob": "/Users/user/ss/yah/external/**"
+    },
+    {
+      "scope": {
+        "kind": "subclass",
+        "id": "sc:bundle-anthropic-miravel:1779408577615"
+      },
+      "kind": "bash_cmd_pattern",
+      "cmd": "ls",
+      "args": [
+        {
+          "kind": "any"
+        }
+      ]
+    },
+    {
+      "scope": {
+        "kind": "subclass",
+        "id": "sc:bundle-anthropic-miravel:1779408577615"
+      },
+      "kind": "tool_path",
+      "name": "Write",
+      "glob": "/Users/user/ss/yah/external/cheers/crates/cheers/src/store/**"
+    },
+    {
+      "kind": "bash_cmd_pattern",
+      "cmd": "ls",
+      "args": [
+        {
+          "kind": "any"
+        }
+      ]
+    },
+    {
+      "scope": {
+        "kind": "subclass",
+        "id": "bundle-anthropic-warrior-primary"
+      },
+      "kind": "tool_path",
+      "name": "Edit",
+      "glob": "/Users/user/ss/yah/external/cheers/.yah/docs/working/**"
+    },
+    {
+      "kind": "tool_path",
+      "name": "Edit",
+      "glob": "/Users/user/ss/yah/external/cheers/crates/cheers-core/src/**"
+    },
+    {
+      "kind": "tool_path",
+      "name": "Edit",
+      "glob": "/Users/user/ss/yah/external/cheers/crates/cheers-server/src/**"
+    },
+    {
+      "kind": "tool_path",
+      "name": "Edit",
+      "glob": "/Users/user/ss/yah/external/cheers/crates/cheers-axum/**"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+[package]
+name = "cheers-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Contract surface for cheers — identity types, error hierarchy, CredentialStore, and the keyless TokenMinter/TokenVerifier traits. No crypto, no I/O."
+readme = "README.md"
+keywords = ["auth", "session", "token", "paseto"]
+categories = ["authentication"]
+
+[lib]
+name = "cheers_core"
+path = "src/lib.rs"
+
+# No crypto deps live here (R019-F6): cheers-core is the keyless contract surface
+# the whole DAG shares. The mint/verify machinery — and everything that pulls
+# pasetors/hmac/getrandom — lives in cheers-verify (verify-only) and cheers-server
+# (mint + stores). See the Crate topology section of
+# .yah/docs/working/edge-verifiable-auth.md.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+# base64 is used to encode raw 32-byte pubkeys and 64-byte signatures on the
+# wire (UserDelegation). Pure encoding, no crypto — a small dep the client
+# tier (cheers-android / cheers-apple) needs once it starts producing these
+# payloads via the W122 signing flow.
+base64 = "0.22"
+
+[dev-dependencies]
+pollster = "0.4"

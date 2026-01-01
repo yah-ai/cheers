@@ -1,0 +1,11 @@
+{
+  "subclassId": "bundle-anthropic-cleric-golden-cloak",
+  "name": "Golden Cloak — Anthropic API",
+  "class": "Cleric",
+  "runner": "claude_cli",
+  "connectionId": "",
+  "auth": "subscription",
+  "model": "claude-sonnet-4-6",
+  "thinkingBudget": "medium",
+  "source": "preroll"
+}

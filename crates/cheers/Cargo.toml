@@ -1,0 +1,222 @@
+[package]
+name = "cheers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Identity providers (OIDC, Apple Sign In, passkey, email magic-link, password, LAN-pair) and native credential stores built on cheers-core."
+readme = "README.md"
+keywords = ["auth", "oidc", "passkey", "webauthn", "magic-link"]
+categories = ["authentication"]
+
+[lib]
+name = "cheers"
+path = "src/lib.rs"
+
+# docs.rs builds with every feature enabled so the rendered page covers all
+# providers and transports, not just the default bundle.
+[package.metadata.docs.rs]
+all-features = true
+
+# Examples
+# - argon_gen: regenerates the KNOWN_GOOD_PHC fixture used in
+#   email::password's tests. Hidden behind the `password` feature so it
+#   doesn't fail the default-feature build.
+[[example]]
+name = "argon_gen"
+required-features = ["password"]
+
+[[example]]
+name = "native_passkey"
+required-features = ["macos", "passkey"]
+
+[dependencies]
+cheers-core = { path = "../cheers-core", version = "0.0.1" }
+
+# email (P3) — magic-link codec, mailer trait. PASETO v4.local for token shape.
+pasetors = { version = "0.7", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+thiserror = { version = "2", optional = true }
+async-trait = { version = "0.1", optional = true }
+getrandom = { version = "0.3", optional = true }
+base64 = { version = "0.22", optional = true }
+
+# email-lettre (P3) — concrete SMTP transport. Sub-feature of `email` so the
+# trait-only consumer doesn't pull lettre + tokio + rustls.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "tokio1-rustls-tls",
+    "builder",
+    "hostname",
+], optional = true }
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
+
+# password (P4) — Argon2id hashing + verify + rehash-on-login.
+argon2 = { version = "0.5", optional = true }
+
+# password-hibp (P4) — Concrete HIBP HTTP client (k-anonymity SHA-1 prefix).
+# Sub-feature of `password` so the trait-only consumer doesn't pull reqwest +
+# tokio. SHA-1 lives here too — it's only used for the HIBP prefix.
+sha1 = { version = "0.10", default-features = false, optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+], optional = true }
+
+# google (P5) — OIDC infrastructure. openidconnect ships its own reqwest+rustls
+# AsyncHttpClient impl; we re-enable just those two features (default = false
+# would drop both). url is re-exported through openidconnect so we don't
+# declare it directly.
+openidconnect = { version = "4", default-features = false, features = [
+    "reqwest",
+    "rustls-tls",
+], optional = true }
+
+# apple (P6) — Apple Sign In needs an ES256 `client_secret` JWT signed with
+# the developer's P-256 `.p8` private key. jsonwebtoken pulls `ring` (already
+# in the tree via openidconnect+reqwest) and accepts the PKCS#8 EC PEM Apple
+# ships from the developer console verbatim.
+jsonwebtoken = { version = "9", optional = true }
+
+# lan-pair (P10) — xlb-net transport for LAN-based credential bootstrap.
+# Path dep during development; will become a versioned dep once xlb-net
+# cuts a stable tag. Kept optional so most cheers consumers don't pull
+# in the iroh/QUIC dependency graph.
+xlb-net = { path = "../../../xlb/crates/xlb-net", optional = true }
+
+# passkey (P7) — WebAuthn server-side registration + authentication ceremonies.
+# webauthn-rs is MPL-2.0 (allowed in deny.toml). `danger-allow-state-
+# serialisation` makes the in-flight registration/authentication state serde-
+# encodable so it can be stashed server-side between the start and finish HTTP
+# requests — single-use + confidential, the same contract as the OIDC flow store.
+webauthn-rs = { version = "0.5", default-features = false, features = [
+    "danger-allow-state-serialisation",
+], optional = true }
+# webauthn-rs-proto — protocol types only (RegisterPublicKeyCredential, etc.).
+# No openssl dep. Used standalone by the `ios` feature so iOS cross-compile
+# doesn't need the full webauthn-rs (which pulls openssl via webauthn-rs-core).
+# When `passkey` is also enabled (e.g. macos + passkey), webauthn-rs already
+# carries this transitively; Cargo deduplicates. Listed explicitly so `ios`
+# can depend on it without pulling the full `passkey` stack.
+webauthn-rs-proto = { version = "0.5", optional = true }
+
+# native Apple passkey UI (P9) — objc2 bindings for ASAuthorizationServices.
+# Pinned per plan.md §P9 cleanup note; re-audit on version bumps.
+objc2 = { version = "0.5", optional = true }
+objc2-foundation = { version = "0.2", optional = true }
+# Each ObjC class/protocol is a separate crate feature; list only what P9 needs.
+objc2-authentication-services = { version = "0.2", optional = true, features = [
+    "ASAuthorization",
+    "ASAuthorizationController",
+    "ASAuthorizationPlatformPublicKeyCredentialAssertion",
+    "ASAuthorizationPlatformPublicKeyCredentialAssertionRequest",
+    "ASAuthorizationPlatformPublicKeyCredentialDescriptor",
+    "ASAuthorizationPlatformPublicKeyCredentialProvider",
+    "ASAuthorizationPlatformPublicKeyCredentialRegistration",
+    "ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest",
+    "ASAuthorizationPublicKeyCredentialAssertion",
+    "ASAuthorizationPublicKeyCredentialRegistration",
+] }
+
+[dev-dependencies]
+pollster = "0.4"
+# rt-multi-thread is required for #[tokio::test(flavor = "multi_thread")] used
+# in the lan-pair tests (iroh/QUIC spawns background tasks that need a
+# multi-threaded runtime). time enables tokio::time::sleep in test helpers.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+# xlb-net (dev) — drives two in-process Endpoints for the lan-pair integration
+# test. Mirrors the path dep in [dependencies] so versions stay in sync.
+xlb-net = { path = "../../../xlb/crates/xlb-net" }
+serde_json = "1"
+# wiremock + chrono drive the google.rs (P5 R012-T2) round-trip tests — stand up
+# a fake OIDC IdP serving discovery/JWKS/token and mint RS256 id_tokens via
+# openidconnect's own signing types. Test-only; production code never references
+# either.
+wiremock = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# p256 (dev only) — deterministic PKCS#8/SPKI keypair generation for the
+# Apple `client_secret` JWT tests. The same scalar bytes every run so signed
+# tokens decode against a known public PEM with no OS RNG involvement.
+p256 = "0.13"
+# webauthn-authenticator-rs (dev only) — its SoftPasskey drives a real
+# registration/authentication ceremony end-to-end against PasskeyRelyingParty
+# (P7), the canonical way to exercise a webauthn-rs server flow with no browser
+# or hardware token. Shares webauthn-rs-core with the production `passkey` dep,
+# so it adds no shipped code. softpasskey-only — no USB/NFC/BLE transports.
+webauthn-authenticator-rs = { version = "0.5", default-features = false, features = [
+    "softpasskey",
+] }
+
+# Feature gates: P3 — email is the first to wire deps. P4..P10 stay inert
+# until each phase lands its impl (P4 password, P5 google/oidc, P6 apple,
+# P7 passkey, P8 keyring/headless, P9 macos/ios, P10 lan-pair).
+#
+# Default bundles the four production identity providers that have shipped
+# (email magic-link, password+argon2, Google OIDC, Apple Sign In). Concrete
+# transports stay opt-in: `email-lettre` pulls SMTP, `password-hibp` pulls
+# reqwest+SHA-1 just for the HIBP k-anonymity check. Disable with
+# `default-features = false` and pick à la carte for minimal builds.
+[features]
+default = ["email", "password", "google", "apple"]
+email = [
+    "dep:pasetors",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:async-trait",
+    "dep:getrandom",
+    "dep:base64",
+]
+email-lettre = ["email", "dep:lettre", "dep:tokio"]
+password = ["email", "dep:argon2"]
+password-hibp = ["password", "dep:sha1", "dep:reqwest", "dep:tokio"]
+google = [
+    "dep:openidconnect",
+    "dep:async-trait",
+    "dep:thiserror",
+]
+apple = [
+    "dep:jsonwebtoken",
+    "dep:openidconnect",
+    "dep:async-trait",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+]
+passkey = ["dep:webauthn-rs", "dep:thiserror", "dep:serde_json"]
+keyring = ["dep:async-trait"]
+headless = ["dep:async-trait"]
+# macos / ios (P9) — pull in passkey (server-side) + the objc2 stack for
+# ASAuthorizationController. `base64` encodes ceremony bytes into the JSON
+# shapes that webauthn-rs's RegisterPublicKeyCredential / PublicKeyCredential
+# expect, bridging native attestation/assertion blobs to the server-side verify.
+macos = [
+    "passkey",
+    "dep:base64",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-authentication-services",
+]
+ios = [
+    # No `passkey` here — webauthn-rs pulls openssl which can't cross-compile
+    # to aarch64-apple-ios without a pre-built iOS OpenSSL sysroot. The native
+    # bridge only needs the protocol types from webauthn-rs-proto (no openssl).
+    # Server-side verification (PasskeyRelyingParty) runs on the macOS/Linux
+    # server, not on the iOS client.
+    "dep:webauthn-rs-proto",
+    "dep:base64",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-authentication-services",
+    "dep:thiserror",
+    "dep:serde_json",
+]
+lan-pair = [
+    "dep:xlb-net",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:async-trait",
+    "dep:getrandom",
+]

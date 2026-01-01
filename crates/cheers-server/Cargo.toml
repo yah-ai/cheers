@@ -1,0 +1,41 @@
+[package]
+name = "cheers-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Origin-side surface for cheers — secret-key minter, symmetric codecs, UserStore/RefreshStore, refresh rotation, RevocationWriter, and the SessionAuthority facade."
+keywords = ["auth", "session", "token", "paseto"]
+categories = ["authentication"]
+
+[lib]
+name = "cheers_server"
+path = "src/lib.rs"
+
+# The origin tier. Depends on cheers-verify (so it reuses PasetoV4PublicVerifier +
+# the pasetors error mapper, and so the load-bearing arrow points
+# cheers-server -> cheers-verify -> cheers-core, never the reverse) and pulls all
+# the crypto. A verify-only consumer never depends on this crate, so it never gets
+# a minter. See .yah/docs/working/edge-verifiable-auth.md (Crate topology).
+[dependencies]
+cheers-core = { path = "../cheers-core", version = "0.0.1" }
+cheers-verify = { path = "../cheers-verify", version = "0.0.1" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+pasetors = "0.7"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2"
+getrandom = "0.3"
+# Raw Ed25519 sign/verify for UserDelegation. pasetors already pulls
+# ed25519-compact transitively (its V4 codec is Ed25519), so adding it as a
+# direct dep here doesn't grow the build tree.
+ed25519-compact = { version = "2", default-features = false }
+
+[dev-dependencies]
+pollster = "0.4"
+proptest = "1"

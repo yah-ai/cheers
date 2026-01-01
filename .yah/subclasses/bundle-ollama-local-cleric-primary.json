@@ -1,0 +1,11 @@
+{
+  "subclassId": "bundle-ollama-local-cleric-primary",
+  "name": "Local Sage",
+  "class": "Cleric",
+  "runner": "claude_cli",
+  "connectionId": "ollama-cloud",
+  "auth": "key",
+  "model": "kimi-k2.6:cloud",
+  "thinkingBudget": "medium",
+  "source": "camp_local"
+}

@@ -1,0 +1,52 @@
+[package]
+name = "cheers-redis"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "redis-backed RefreshStore and Revocation impls for cheers — the TTL hot-path tier."
+keywords = ["auth", "session", "redis", "kv"]
+categories = ["authentication", "caching"]
+
+[lib]
+name = "cheers_redis"
+path = "src/lib.rs"
+
+# Hot-path TTL data only — identity + passkey credentials stay in cheers-sqlx
+# (relational, indexed). cheers-redis is the optimization tier: refresh chains
+# and the revocation kill list, where redis's KV + TTL semantics fit the access
+# pattern. NEVER the primary for cross-cutting queries (use SQL for those).
+[dependencies]
+cheers-core = { path = "../cheers-core", version = "0.0.1" }
+cheers-server = { path = "../cheers-server", version = "0.0.1" }
+cheers-verify = { path = "../cheers-verify", version = "0.0.1" }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# `redis` 0.27 (current stable) with the tokio + rustls connection pool. The
+# `connection-manager` feature provides reconnect-on-failure, which is what
+# every production redis client wants — bare `MultiplexedConnection` drops
+# under network blips. `tls-rustls` keeps the workspace's all-rustls stance
+# (deny.toml bans native-tls).
+[dependencies.redis]
+version = "0.27"
+default-features = false
+features = [
+    "tokio-rustls-comp",
+    "connection-manager",
+]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["redis"] }
+
+[features]
+default = []
+# Opt-in CI/dev flag: enables the redis-backed integration tests that need
+# Docker. Off by default so plain `cargo test` works without Docker.
+redis-integration = []

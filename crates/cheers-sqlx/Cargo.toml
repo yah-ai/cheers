@@ -1,0 +1,103 @@
+[package]
+name = "cheers-sqlx"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "sqlx-backed UserStore / PasskeyCredentialStore / RefreshStore / Revocation impls for cheers — Postgres and SQLite backends."
+keywords = ["auth", "session", "sqlx", "postgres", "sqlite"]
+categories = ["authentication", "database"]
+
+[lib]
+name = "cheers_sqlx"
+path = "src/lib.rs"
+
+# docs.rs builds every feature so the page covers all backends.
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+# Identity types + StoreError live in cheers-core; the persistence traits live
+# in cheers-server. cheers-sqlx is the relational-DB home for both layers.
+cheers-core = { path = "../cheers-core", version = "0.0.1" }
+cheers-server = { path = "../cheers-server", version = "0.0.1" }
+# RevocationReader (the edge-readable half) is re-exported from cheers-verify;
+# our pg/sqlite Revocation impls supply both sides.
+cheers-verify = { path = "../cheers-verify", version = "0.0.1" }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# OS CSPRNG for default user_id / token id generation. Matches the version
+# pulled by cheers-server's refresh.rs so no extra version in the workspace.
+getrandom = "0.3"
+# base64url for the cred_id index column on passkey_credentials (the WebAuthn
+# CredentialID is opaque bytes; we store the b64url string so a SQL query can
+# look it up).
+base64 = "0.22"
+
+# sqlx with the tokio + rustls runtime to match the workspace's all-rustls
+# stance (deny.toml bans native-tls). `macros` opt-in is for FromRow derives;
+# all queries use the runtime `sqlx::query`/`query_as` builders so the crate
+# compiles without DATABASE_URL set or sqlx-cli prepared metadata. `migrate`
+# carries the migration runner; `json` and `chrono` are needed by the JSON
+# columns (passkey material) and TIMESTAMPTZ columns (sqlite stores as TEXT).
+[dependencies.sqlx]
+version = "0.8"
+default-features = false
+features = [
+    "runtime-tokio-rustls",
+    "macros",
+    "migrate",
+    "json",
+    "chrono",
+]
+
+[dependencies.chrono]
+version = "0.4"
+default-features = false
+features = ["clock", "serde"]
+
+[dev-dependencies]
+# Drives the async store traits in tests.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Throwaway sqlite files for sqlite-backend tests.
+tempfile = "3"
+# pg-backend tests stand up a real Postgres in Docker via testcontainers-rs.
+# Tests that require it are gated behind the integration target — `cargo test
+# -p cheers-sqlx --features pg-integration` runs them; bare `cargo test` skips.
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+# libSQL HTTP/Hrana client — used by the libsql-integration tests to drive a
+# real ghcr.io/tursodatabase/libsql-server container. Dev-only, so it never
+# reaches downstream consumers; the `libsql-integration` feature gates the
+# test module itself, not this dep.
+# `remote` carries the HTTP/Hrana client; `tls` adds the hyper-rustls
+# connector libsql's remote builder requires at runtime. We deliberately
+# skip the default `replication`/`core` features — the test path is a
+# pure-remote client against a libsql-server container.
+libsql = { version = "0.6", default-features = false, features = ["remote", "tls"] }
+
+[features]
+default = []
+# Postgres backend — pulls sqlx's postgres driver.
+pg = ["sqlx/postgres"]
+# SQLite backend — pulls sqlx's sqlite driver.
+sqlite = ["sqlx/sqlite"]
+# Compile the PasskeyCredentialStore impls. Off by default because passkey
+# material is large (each row is a serde_json'd webauthn-rs Passkey) and not
+# every deployment uses passkeys.
+passkey = []
+# Opt-in CI/dev flag: enables the pg-backend integration tests that need
+# Docker. Off by default so `cargo test` in a Docker-free sandbox still works.
+pg-integration = ["pg"]
+# Opt-in CI/dev flag: enables the libSQL-backend integration tests that need
+# Docker (ghcr.io/tursodatabase/libsql-server). The libSQL path doesn't link
+# the typed Sqlite*Store impls — sqlx has no libsql driver — so the harness
+# applies the SQLite migrations via the raw libsql HTTP/Hrana client and
+# smoke-tests the schema (CHECK / FK CASCADE / partial-index behavior) against
+# a real libsql-server. Off by default so plain `cargo test` works without
+# Docker. Honors CHEERS_LIBSQL_URL to bypass the container.
+libsql-integration = ["sqlite"]
