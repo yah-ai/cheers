@@ -105,6 +105,8 @@ pub mod revocation;
 pub mod ownership_store;
 #[cfg(any(feature = "pg", feature = "sqlite"))]
 pub mod service_principal_store;
+#[cfg(any(feature = "pg", feature = "sqlite"))]
+pub mod audit_store;
 #[cfg(all(feature = "passkey", any(feature = "pg", feature = "sqlite")))]
 pub mod passkey_store;
 
@@ -128,6 +130,10 @@ pub use ownership_store::SqliteOwnershipStore;
 pub use service_principal_store::PgServicePrincipalStore;
 #[cfg(feature = "sqlite")]
 pub use service_principal_store::SqliteServicePrincipalStore;
+#[cfg(feature = "pg")]
+pub use audit_store::PgAuditStore;
+#[cfg(feature = "sqlite")]
+pub use audit_store::SqliteAuditStore;
 #[cfg(all(feature = "passkey", feature = "pg"))]
 pub use passkey_store::PgPasskeyCredentialStore;
 #[cfg(all(feature = "passkey", feature = "sqlite"))]

@@ -6,7 +6,9 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use cheers_core::Scope;
-use cheers_server::{CampAuthorityError, OwnershipValidationError, ServicePrincipalError};
+use cheers_server::{
+    AuditValidationError, CampAuthorityError, OwnershipValidationError, ServicePrincipalError,
+};
 use serde::Serialize;
 
 /// What can go wrong inside a cheers-axum route handler.
@@ -140,6 +142,15 @@ pub enum RouteError {
     #[error("unknown ownership")]
     UnknownOwnership,
 
+    /// `POST /audit/ingest` body parsed as JSON but a record violated an
+    /// [`AuditRecord`] invariant (e.g. empty `aud`, non-positive `at`). 400
+    /// — distinct from 401/403 so constable can tell auth failure from a
+    /// well-formed-but-invalid batch (do not retry as-is).
+    ///
+    /// [`AuditRecord`]: cheers_server::AuditRecord
+    #[error("audit_invalid: {0}")]
+    AuditInvalid(#[from] AuditValidationError),
+
     /// `POST /admin/service-principals` collided with an existing principal
     /// id. 409 — same shape as a database unique-key conflict.
     #[error("already exists: {0}")]
@@ -201,6 +212,7 @@ impl RouteError {
             }
             RouteError::OwnershipInvalid(_) => (StatusCode::BAD_REQUEST, "ownership_invalid"),
             RouteError::UnknownOwnership => (StatusCode::NOT_FOUND, "unknown_ownership"),
+            RouteError::AuditInvalid(_) => (StatusCode::BAD_REQUEST, "audit_invalid"),
             RouteError::AlreadyExists(_) => (StatusCode::CONFLICT, "already_exists"),
             RouteError::UnknownPrincipal(_) => (StatusCode::NOT_FOUND, "unknown_principal"),
             RouteError::NotOperator => (StatusCode::FORBIDDEN, "not_operator"),

@@ -22,6 +22,7 @@
 //! This crate depends on `cheers-verify` (and through it `cheers-core`); the
 //! reverse never holds, which is what keeps the edge minter-free.
 
+pub mod audit;
 pub mod bundles;
 pub mod camp;
 pub mod codec;
@@ -34,6 +35,7 @@ pub mod service_principal;
 pub mod session;
 pub mod store;
 
+pub use audit::{AuditRecord, AuditRow, AuditStore, AuditValidationError, MemoryAuditStore};
 pub use bundles::{
     BundleExpansionError, BundleName, BundleStore, MemoryBundleStore, ScopeOrBundle,
     expand_scopes,

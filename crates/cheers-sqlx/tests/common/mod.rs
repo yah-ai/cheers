@@ -9,6 +9,7 @@ use cheers_core::{
     Credential, DeviceBinding, DeviceId, Principal, PrincipalId, PrincipalStatus, StoreError,
     UserId,
 };
+use cheers_server::audit::{AuditRecord, AuditStore};
 use cheers_server::ownership::{NewOwnership, OwnershipStore};
 use cheers_server::store::{
     NewUser, PasskeyCredentialStore, ProviderKey, RefreshStore, RefreshTokenRecord, UserStore,
@@ -601,3 +602,78 @@ pub async fn service_principal_check_constraint_rejects_bad_status_directly<F>(
         other => panic!("expected Backend (CHECK failure), got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// AuditStore (R020-F13)
+// ---------------------------------------------------------------------------
+
+fn fixture_audit(at: i64, sub: PrincipalId, method: &str, request_id: &str) -> AuditRecord {
+    use cheers_core::Scope;
+    AuditRecord::new(
+        at,
+        sub,
+        None,
+        Some("camp-a".into()),
+        "https://constable.example",
+        method,
+        vec![Scope::CloudDeploy, Scope::CloudRead],
+        "allow",
+        request_id,
+    )
+    .expect("fixture record validates")
+}
+
+pub async fn audit_store_batch_insert_round_trip<A: AuditStore + ?Sized>(store: &A) {
+    use cheers_core::{Actor, PrincipalId, Scope};
+
+    let alice = PrincipalId::user("alice");
+    let warden = PrincipalId::service("warden");
+
+    // Empty batch is a no-op (matches the trait contract).
+    let zero = store.insert_batch(&[], 9_000).await.unwrap();
+    assert!(zero.is_empty());
+
+    // 100-record batch — every record present, ids unique, ingested_at stamped.
+    let batch: Vec<AuditRecord> = (0..100)
+        .map(|i| fixture_audit(1_700_000_000 + i, alice.clone(), "POST /deploy", &format!("rid-{i}")))
+        .collect();
+    let rows = store.insert_batch(&batch, 1_800_000_000).await.unwrap();
+    assert_eq!(rows.len(), 100);
+    let ids: std::collections::HashSet<_> = rows.iter().map(|r| r.id.clone()).collect();
+    assert_eq!(ids.len(), 100, "ids must be unique within a batch");
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row.ingested_at, 1_800_000_000);
+        assert_eq!(row.record.request_id, format!("rid-{i}"));
+        assert_eq!(row.record.sub, alice);
+        assert_eq!(row.record.scope, vec![Scope::CloudDeploy, Scope::CloudRead]);
+        assert_eq!(row.record.camp_id.as_deref(), Some("camp-a"));
+    }
+
+    // act-bearing record (agent-on-behalf-of) round-trips with the act column.
+    let agent = PrincipalId::service("agent-claude");
+    let with_act = AuditRecord::new(
+        1_700_001_000,
+        alice.clone(),
+        Some(Actor::new(agent.clone())),
+        None,
+        "https://sage.example",
+        "POST /tasks/create",
+        vec![],
+        "deny",
+        "rid-act",
+    )
+    .unwrap();
+    // Also exercise a service-principal-sub row to confirm sub vocabulary.
+    let svc_call = fixture_audit(1_700_002_000, warden.clone(), "POST /ownership", "rid-svc");
+    let rows = store
+        .insert_batch(&[with_act.clone(), svc_call.clone()], 1_800_000_500)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].record.act.as_ref().map(|a| &a.sub), Some(&agent));
+    assert_eq!(rows[0].record.camp_id, None);
+    assert_eq!(rows[0].record.scope, Vec::<Scope>::new());
+    assert_eq!(rows[1].record.sub, warden);
+    assert_eq!(rows[1].record.method, "POST /ownership");
+}
+

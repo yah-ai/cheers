@@ -25,7 +25,7 @@ mod common;
 use cheers_core::{DeviceId, UserId};
 use cheers_server::store::{NewUser, UserStore};
 use cheers_sqlx::{
-    SqliteOwnershipStore, SqliteRefreshStore, SqliteRevocationStore,
+    SqliteAuditStore, SqliteOwnershipStore, SqliteRefreshStore, SqliteRevocationStore,
     SqliteServicePrincipalStore, SqliteUserStore, SQLITE_MIGRATIONS,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -214,6 +214,13 @@ async fn service_principal_check_constraint_rejects_bad_status() {
         .map_err(|e| cheers_core::StoreError::Backend(e.to_string()))
     })
     .await;
+}
+
+#[tokio::test]
+async fn audit_store_batch_insert_round_trip() {
+    let pool = fresh_pool().await;
+    let store = SqliteAuditStore::new(pool);
+    common::audit_store_batch_insert_round_trip(&store).await;
 }
 
 #[cfg(feature = "passkey")]

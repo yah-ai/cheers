@@ -9,7 +9,8 @@ mod common;
 use cheers_core::{DeviceId, UserId};
 use cheers_server::store::{NewUser, UserStore};
 use cheers_sqlx::{
-    PgOwnershipStore, PgRefreshStore, PgRevocationStore, PgServicePrincipalStore, PgUserStore,
+    PgAuditStore, PgOwnershipStore, PgRefreshStore, PgRevocationStore, PgServicePrincipalStore,
+    PgUserStore,
     PG_MIGRATIONS,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -201,6 +202,13 @@ async fn service_principal_check_constraint_rejects_bad_status() {
         .map_err(|e| cheers_core::StoreError::Backend(e.to_string()))
     })
     .await;
+}
+
+#[tokio::test]
+async fn audit_store_batch_insert_round_trip() {
+    let fx = fresh_pg().await;
+    let store = PgAuditStore::new(fx.pool.clone());
+    common::audit_store_batch_insert_round_trip(&store).await;
 }
 
 #[cfg(feature = "passkey")]

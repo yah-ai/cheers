@@ -265,6 +265,7 @@
 #![warn(unreachable_pub)]
 
 pub mod admin;
+pub mod audit;
 pub mod camps;
 pub mod cookie;
 pub mod discovery;
@@ -290,6 +291,7 @@ pub mod magic_link;
 pub use admin::{
     AdminAuthState, CreateServicePrincipalBody, OperatorPolicy, ProvisionResponse,
 };
+pub use audit::{AuditIngestBody, AuditIngestResponse, AuditState};
 pub use camps::{CampAdminState, CampBootstrapResponse, CreateCampBootstrapBody};
 pub use cookie::CsrfCookieConfig;
 pub use discovery::{
