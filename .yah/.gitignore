@@ -1,4 +1,13 @@
-# Schemas are a derived artifact — the yah binary embeds them and writes
-# them on every local desktop attach (scaffold_camp_skeleton). Re-sync with
-# `yah schema sync --force` if they drift from a newer yah version.
-/schema/
+/sessions
+/cache
+/jit
+/cloud
+/db
+/forms
+/operator-state.json
+/clipboard/
+/pending-payloads/
+/claude-spawn-settings.json
+/working-set
+.DS_Store
+/summaries/summary-*.md
