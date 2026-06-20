@@ -20,11 +20,11 @@ all-features = true
 [dependencies]
 # Identity types + StoreError live in cheers-core; the persistence traits live
 # in cheers-server. cheers-sqlx is the relational-DB home for both layers.
-cheers-core = { path = "../cheers-core", version = "0.0.1" }
-cheers-server = { path = "../cheers-server", version = "0.0.1" }
+cheers-core = { path = "../cheers-core", version = "0.8.13" }
+cheers-server = { path = "../cheers-server", version = "0.8.13" }
 # RevocationReader (the edge-readable half) is re-exported from cheers-verify;
 # our pg/sqlite Revocation impls supply both sides.
-cheers-verify = { path = "../cheers-verify", version = "0.0.1" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.13" }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

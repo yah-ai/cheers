@@ -25,7 +25,7 @@ all-features = true
 # impls live in cheers-verify/cheers-server, not behind a cheers-core feature),
 # so a device target that only acquires and stores an opaque credential never
 # compiles pasetors/hmac/sha2/…
-cheers-core = { path = "../cheers-core", version = "0.0.1" }
+cheers-core = { path = "../cheers-core", version = "0.8.13" }
 
 async-trait = { version = "0.1", optional = true }
 serde_json = { version = "1", optional = true }
