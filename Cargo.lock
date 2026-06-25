@@ -1181,6 +1181,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cheers-test-identity"
+version = "0.8.14"
+dependencies = [
+ "axum",
+ "cheers",
+ "cheers-axum",
+ "cheers-server",
+ "cheers-sqlx",
+ "http 1.4.0",
+ "http-body-util",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "cheers-test-support"
 version = "0.8.14"
 dependencies = [

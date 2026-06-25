@@ -12,6 +12,7 @@ members = [
     "crates/cheers-redis",
     "crates/cheers-axum",
     "crates/cheers-test-support",
+    "crates/cheers-test-identity",
 ]
 resolver = "2"
 

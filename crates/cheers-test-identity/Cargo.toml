@@ -1,0 +1,46 @@
+[package]
+name = "cheers-test-identity"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Supported test-identity surface for cheers — a deterministic, SQLite-backed magic-link auth server for E2E / registration harnesses. Dev/test only; never wired into a production service graph."
+keywords = ["auth", "cheers", "testing", "magic-link"]
+categories = ["authentication", "development-tools::testing"]
+# A dev/test harness surface, not a published product crate. The promotion of
+# cheers-axum's old `magic_link_sqlite` example into a supported binary +
+# reusable router builder (R513-T8, W207 Gap #3).
+publish = false
+
+[lib]
+name = "cheers_test_identity"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cheers-test-identity"
+path = "src/main.rs"
+
+[dependencies]
+# email feature gives MagicLinkProvider / CapturingMailer / MagicLinkEmail and
+# the magic-link route handlers, with no lettre/SMTP transport pulled in.
+cheers = { path = "../cheers", version = "0.8.14", default-features = false, features = ["email"] }
+cheers-axum = { path = "../cheers-axum", version = "0.8.14", features = ["email"] }
+cheers-server = { path = "../cheers-server", version = "0.8.14" }
+cheers-sqlx = { path = "../cheers-sqlx", version = "0.8.14", features = ["sqlite"] }
+axum = { version = "0.8", default-features = false, features = ["json", "query", "http1", "tokio"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+# Drive the router in-process via tower's `Service::call` for the round-trip
+# test — no real TCP server needed. A temp sqlite file gives the registration
+# flow a real, shared store across requests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+http = "1"
+tempfile = "3"
