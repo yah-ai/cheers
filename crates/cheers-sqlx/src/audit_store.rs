@@ -4,7 +4,7 @@
 //! `on_behalf_of`) land alongside F14 atop the same schema.
 //!
 //! Each batch runs inside a single transaction so a mid-batch DB failure
-//! leaves the table untouched — constable's bounded-backoff retry sees a
+//! leaves the table untouched — kamaji's bounded-backoff retry sees a
 //! clean 4xx/5xx, never a partial commit.
 
 use async_trait::async_trait;

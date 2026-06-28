@@ -1,8 +1,8 @@
 -- Centralized audit table — append-only durable copy of every MCP-mediated
--- action constable observes (the cheers-side half of W159 §Audit journal).
+-- action kamaji observes (the cheers-side half of W159 §Audit journal).
 --
 -- See .yah/docs/working/mcp-auth-and-ownership.md §Audit ingest for the
--- ingest contract this backs (constable retains the local JSONL with bounded
+-- ingest contract this backs (kamaji retains the local JSONL with bounded
 -- backoff; cheers's responsibility ends at "accepted and durable on cheers's
 -- side").
 --
@@ -17,7 +17,7 @@
 
 CREATE TABLE audit (
     id            TEXT PRIMARY KEY,
-    -- Constable's local clock at the time of the action.
+    -- Kamaji's local clock at the time of the action.
     at            BIGINT NOT NULL,
     -- "user:<id>" | "svc:<id>" | "camp:<id>" — the verified token's sub.
     sub           TEXT NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE audit (
     -- Outcome string ("allow" | "deny" | "error" by convention; cheers does
     -- not constrain the vocabulary — it's append-only durable storage).
     result        TEXT NOT NULL,
-    -- Correlator into constable's local JSONL.
+    -- Correlator into kamaji's local JSONL.
     request_id    TEXT NOT NULL,
     -- Cheers's server clock at ingest time. Distinct from `at` so an operator
     -- can see ingest latency without joining clocks at query time.

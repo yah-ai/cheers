@@ -32,7 +32,7 @@ name = "native_passkey"
 required-features = ["macos", "passkey"]
 
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.15" }
+cheers-core = { path = "../cheers-core", version = "0.8.16" }
 
 # email (P3) — magic-link codec, mailer trait. PASETO v4.local for token shape.
 pasetors = { version = "0.7", optional = true }
@@ -83,7 +83,7 @@ jsonwebtoken = { version = "9", optional = true }
 # Path dep during development; will become a versioned dep once xlb-net
 # cuts a stable tag. Kept optional so most cheers consumers don't pull
 # in the iroh/QUIC dependency graph.
-xlb-net = { path = "../../../xlb/crates/xlb-net", version = "0.8.15", optional = true }
+xlb-net = { path = "../../../xlb/crates/xlb-net", version = "0.8.16", optional = true }
 
 # passkey (P7) — WebAuthn server-side registration + authentication ceremonies.
 # webauthn-rs is MPL-2.0 (allowed in deny.toml). `danger-allow-state-
@@ -127,7 +127,7 @@ pollster = "0.4"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 # xlb-net (dev) — drives two in-process Endpoints for the lan-pair integration
 # test. Mirrors the path dep in [dependencies] so versions stay in sync.
-xlb-net = { path = "../../../xlb/crates/xlb-net", version = "0.8.15" }
+xlb-net = { path = "../../../xlb/crates/xlb-net", version = "0.8.16" }
 serde_json = "1"
 # wiremock + chrono drive the google.rs (P5 R012-T2) round-trip tests — stand up
 # a fake OIDC IdP serving discovery/JWKS/token and mint RS256 id_tokens via

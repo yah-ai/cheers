@@ -4,7 +4,7 @@
 //! See `.yah/docs/working/mcp-auth-and-ownership.md` §Scope vocabulary,
 //! §JWT claim schema, and §Scope vocabulary and composition rules. The
 //! shapes here are the producer side of the verbatim wire contract yah's
-//! constable consumes (W159 §The wire / §Layer 2 / §Layer 3).
+//! kamaji consumes (W159 §The wire / §Layer 2 / §Layer 3).
 //!
 //! Three pieces:
 //!
@@ -219,7 +219,7 @@ impl Actor {
 }
 
 /// The `owns` claim — embedded ownership cheers bakes into the token at mint
-/// time. Per W159 §Layer 2, this is what lets constable check resource
+/// time. Per W159 §Layer 2, this is what lets kamaji check resource
 /// membership locally with no per-call cheers round-trip.
 ///
 /// Open-ended: explicit fields for the resource kinds cheers currently writes
@@ -544,7 +544,7 @@ mod tests {
     fn sample_claims() -> McpClaims {
         McpClaims::new(
             "https://cheers.example",
-            "https://constable.camp.example",
+            "https://kamaji.camp.example",
             PrincipalId::user("alice"),
             1000,
             1300,
@@ -580,7 +580,7 @@ mod tests {
         let c = McpClaims::new(
             "iss",
             "aud",
-            PrincipalId::service("warden"),
+            PrincipalId::service("yubaba"),
             1000,
             1300,
             "jti-2",

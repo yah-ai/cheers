@@ -4,7 +4,7 @@
 //! module is the origin-side implementation of the doc's mint flow #2
 //! provisioning step:
 //!
-//! 1. Warden (authenticated as its service principal) calls
+//! 1. Yubaba (authenticated as its service principal) calls
 //!    `POST /admin/camps/bootstrap` with a [`NewCampPrincipal`] + a
 //!    [`UserDelegation`] (a payload signed by user U via the yah-side W122
 //!    flow). The HTTP layer lives in `cheers-axum`.
@@ -22,7 +22,7 @@
 //!
 //! The crate-direction invariant from R019 still holds: this module is
 //! origin-only (it verifies a signed delegation and persists a credential).
-//! `cheers-verify` consumers (constable, CF Worker) never depend on this
+//! `cheers-verify` consumers (kamaji, CF Worker) never depend on this
 //! crate — they verify the MCP-call tokens minted via path #2, not the
 //! bootstrap credential itself.
 
@@ -213,7 +213,7 @@ impl NewCampPrincipal {
 
 /// The output of a successful [`CampAuthority::provision`] call — the camp
 /// principal record and the long-lived bootstrap credential the caller hands
-/// to warden.
+/// to yubaba.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProvisionedCamp {
@@ -1188,7 +1188,7 @@ mod tests {
         let (authority, _, _) = rig();
         block_on(async {
             let err = authority
-                .revoke_user_cascade(&PrincipalId::service("warden"), 1_000)
+                .revoke_user_cascade(&PrincipalId::service("yubaba"), 1_000)
                 .await
                 .unwrap_err();
             match err {

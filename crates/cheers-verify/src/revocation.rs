@@ -5,7 +5,7 @@
 //!
 //! - [`RevocationReader`] — the **hot path**, run at the edge on every request.
 //!   A point membership check (`is_revoked(jti)`) against a locally-replicated,
-//!   read-mostly set (CF KV / a Warden gossip replica).
+//!   read-mostly set (CF KV / a Yubaba gossip replica).
 //! - The **cold path** writer (`RevocationWriter`) lives in `cheers-server` —
 //!   keeping it out of this crate means a verify-only edge consumer can check
 //!   revocation without holding the power to revoke anyone else's sessions, the

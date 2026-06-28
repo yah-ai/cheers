@@ -67,7 +67,7 @@ impl std::fmt::Display for PrincipalKind {
 /// Typed `sub`-claim shape — a principal kind paired with an opaque id.
 ///
 /// Wire format is the single string `<prefix>:<id>` (e.g. `user:alice`,
-/// `svc:warden-1`, `camp:abc`). [`Serialize`] writes that string;
+/// `svc:yubaba-1`, `camp:abc`). [`Serialize`] writes that string;
 /// [`Deserialize`] / [`FromStr`](std::str::FromStr) parse it back and reject
 /// unprefixed input.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -264,7 +264,7 @@ mod tests {
     fn principal_id_display_and_parse() {
         let cases = [
             (PrincipalId::user("alice"), "user:alice"),
-            (PrincipalId::service("warden-1"), "svc:warden-1"),
+            (PrincipalId::service("yubaba-1"), "svc:yubaba-1"),
             (PrincipalId::camp("camp-xyz"), "camp:camp-xyz"),
         ];
         for (pid, wire) in cases {
@@ -334,7 +334,7 @@ mod tests {
     fn try_new_camp_rejects_non_user_bound_to() {
         let err = Principal::try_new(
             PrincipalId::camp("c-1"),
-            Some(PrincipalId::service("warden")),
+            Some(PrincipalId::service("yubaba")),
             PrincipalStatus::Active,
             100,
         )
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(err, PrincipalError::NonCampHasBoundTo(PrincipalKind::User));
 
         let err = Principal::try_new(
-            PrincipalId::service("warden"),
+            PrincipalId::service("yubaba"),
             Some(PrincipalId::user("alice")),
             PrincipalStatus::Active,
             100,
@@ -379,7 +379,7 @@ mod tests {
         )
         .unwrap();
         Principal::try_new(
-            PrincipalId::service("warden"),
+            PrincipalId::service("yubaba"),
             None,
             PrincipalStatus::Active,
             100,
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn deserializing_camp_with_service_bound_to_fails() {
-        let json = r#"{"id":"camp:c-1","bound_to":"svc:warden","status":"active","created_at":1}"#;
+        let json = r#"{"id":"camp:c-1","bound_to":"svc:yubaba","status":"active","created_at":1}"#;
         let err = serde_json::from_str::<Principal>(json).unwrap_err();
         assert!(
             err.to_string().contains("bound_to must be a user"),

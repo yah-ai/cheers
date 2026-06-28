@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # realized as "the edge's crate has no path to a minter." cheers-server depends on
 # THIS crate, never the reverse. See .yah/docs/working/edge-verifiable-auth.md.
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.15" }
+cheers-core = { path = "../cheers-core", version = "0.8.16" }
 pasetors = "0.7"
 serde_json = "1"
 async-trait = "0.1"

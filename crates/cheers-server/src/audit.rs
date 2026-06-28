@@ -1,7 +1,7 @@
 //! Centralized audit table — the [`AuditStore`] trait.
 //!
 //! Cheers's audit table is the durable, queryable copy of every MCP-mediated
-//! action constable observes on its host. Constable retains a local JSONL as
+//! action kamaji observes on its host. Kamaji retains a local JSONL as
 //! the source of truth and forwards batches here via `POST /audit/ingest`;
 //! cheers's responsibility ends at "accepted and durable on cheers's side"
 //! (see `.yah/docs/working/mcp-auth-and-ownership.md` §Audit ingest).
@@ -12,7 +12,7 @@
 //!
 //! Record shape per W159 §Audit journal: `{ at, sub, act, camp_id, aud,
 //! method, scope, result, request_id }`. The wire and storage shapes match
-//! one-to-one — cheers doesn't repackage what constable sends, it just
+//! one-to-one — cheers doesn't repackage what kamaji sends, it just
 //! durably appends. The only field cheers contributes is the row `id` and
 //! the `ingested_at` server timestamp.
 
@@ -28,7 +28,7 @@ use cheers_core::{Actor, PrincipalId, Scope, StoreError};
 ///
 /// The HTTP layer surfaces these as `400 audit_invalid`. They are the
 /// "forbidden shape" the F13 verify item calls out — a malformed batch is
-/// rejected wholesale so constable's bounded-backoff retry sees a clean
+/// rejected wholesale so kamaji's bounded-backoff retry sees a clean
 /// 4xx, not a partial commit.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuditValidationError {
@@ -58,7 +58,7 @@ pub enum AuditValidationError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AuditRecord {
-    /// Unix-seconds timestamp the action happened (constable's local clock).
+    /// Unix-seconds timestamp the action happened (kamaji's local clock).
     pub at: i64,
     /// Acting principal — the `sub` claim from the verified token.
     pub sub: PrincipalId,
@@ -69,20 +69,20 @@ pub struct AuditRecord {
     /// Target resource URI (the verified token's `aud`).
     pub aud: String,
     /// Free-form method identifier (`POST /cloud/deploy`, `mcp.tools/call`, …)
-    /// — constable supplies a stable string per call shape.
+    /// — kamaji supplies a stable string per call shape.
     pub method: String,
     /// Scope list the call presented. Stored as a typed `Vec<Scope>` so a
     /// future wildcard or unknown-scope ingest is rejected at parse time
     /// (per composition rule 1 — no wildcards on the wire).
     #[serde(default)]
     pub scope: Vec<Scope>,
-    /// Outcome string constable produced (`allow` | `deny` | `error` is the
+    /// Outcome string kamaji produced (`allow` | `deny` | `error` is the
     /// usual taxonomy, but cheers does not constrain it — see audit-reader
     /// docs in F14 for the canonical vocabulary). Cheers is durable storage,
     /// not the source of result semantics.
     pub result: String,
-    /// Correlator into constable's local JSONL — same id appears in both
-    /// places so an operator can match a cheers row to constable's source.
+    /// Correlator into kamaji's local JSONL — same id appears in both
+    /// places so an operator can match a cheers row to kamaji's source.
     pub request_id: String,
 }
 
@@ -147,7 +147,7 @@ pub struct AuditRow {
     pub id: String,
     pub record: AuditRecord,
     /// Unix-seconds timestamp cheers received and durably appended the row.
-    /// Distinct from `record.at` (constable's clock) — having both lets an
+    /// Distinct from `record.at` (kamaji's clock) — having both lets an
     /// operator see ingest latency without joining clocks at query time.
     pub ingested_at: i64,
 }
@@ -166,7 +166,7 @@ impl AuditRow {
 ///
 /// Only one mutation method — [`insert_batch`](Self::insert_batch). A batch
 /// is rejected wholesale if any record fails [`AuditRecord::validate`]; no
-/// partial commits, so constable's retry-with-backoff sees a clean 4xx.
+/// partial commits, so kamaji's retry-with-backoff sees a clean 4xx.
 ///
 /// Read APIs (paged by `on_behalf_of` + filters) land alongside F14.
 #[async_trait]
@@ -255,7 +255,7 @@ mod tests {
             PrincipalId::user("alice"),
             None,
             Some("camp-a".into()),
-            "https://constable.example",
+            "https://kamaji.example",
             method,
             vec![Scope::CloudDeploy],
             "allow",

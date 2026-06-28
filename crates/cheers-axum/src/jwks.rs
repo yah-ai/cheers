@@ -24,15 +24,15 @@
 //! body. A conditional GET (`If-None-Match: "<etag>"`) returns `304 Not Modified`
 //! with the same `Cache-Control` / `ETag` headers and an empty body.
 //!
-//! ## Constable kid coordination
+//! ## Kamaji kid coordination
 //!
-//! Constable matches incoming MCP tokens by `kid` and falls back to a one-shot,
+//! Kamaji matches incoming MCP tokens by `kid` and falls back to a one-shot,
 //! rate-limited refresh of this endpoint on unknown values. The `kid` format is
 //! the rotation handle and MUST stay stable: service-principal kids come from
 //! cheers-server's `mint_kid` (a 128-bit opaque value, base64url-no-pad
 //! encoded). Platform kids should follow the same shape. Don't introduce
 //! structured prefixes / numeric generations without coordinating with the
-//! constable refresh path (R020-F11 §gotcha).
+//! kamaji refresh path (R020-F11 §gotcha).
 //!
 //! ## Wiring
 //!
@@ -133,7 +133,7 @@ impl<S> std::fmt::Debug for JwksState<S> {
 /// `kty` / `crv` / `use` are conceptually constants for this codepath (cheers
 /// only mints Ed25519 sig-use keys), but the fields are `String` so the type
 /// also round-trips through `serde_json::from_slice` — handy for tests and
-/// for consumers (constable, products) that want to parse a fetched JWKS into
+/// for consumers (kamaji, products) that want to parse a fetched JWKS into
 /// this same struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -366,7 +366,7 @@ mod tests {
         let (app, authority) = rig(vec![], OverlapPolicy::DEFAULT_OVERLAP_SECONDS);
 
         let provisioned = authority
-            .provision(NewServicePrincipal::new("warden-1"), now())
+            .provision(NewServicePrincipal::new("yubaba-1"), now())
             .await
             .unwrap();
 
@@ -396,7 +396,7 @@ mod tests {
         let (app, authority) = rig(vec![], 24 * 60 * 60);
         let now0 = now();
         let first = authority
-            .provision(NewServicePrincipal::new("warden-r"), now0)
+            .provision(NewServicePrincipal::new("yubaba-r"), now0)
             .await
             .unwrap();
         let second = authority.rotate(&first.principal.id, now0).await.unwrap();
@@ -420,7 +420,7 @@ mod tests {
         let (app2, authority2) = rig(vec![], 0);
         let now1 = now();
         let one = authority2
-            .provision(NewServicePrincipal::new("warden-rd"), now1)
+            .provision(NewServicePrincipal::new("yubaba-rd"), now1)
             .await
             .unwrap();
         let two = authority2.rotate(&one.principal.id, now1).await.unwrap();
@@ -449,7 +449,7 @@ mod tests {
         let (app, authority) = rig(platform.clone(), OverlapPolicy::DEFAULT_OVERLAP_SECONDS);
 
         let svc = authority
-            .provision(NewServicePrincipal::new("warden-mix"), now())
+            .provision(NewServicePrincipal::new("yubaba-mix"), now())
             .await
             .unwrap();
 
@@ -475,7 +475,7 @@ mod tests {
         let (app, authority) = rig(vec![], OverlapPolicy::DEFAULT_OVERLAP_SECONDS);
 
         authority
-            .provision(NewServicePrincipal::new("warden-et"), now())
+            .provision(NewServicePrincipal::new("yubaba-et"), now())
             .await
             .unwrap();
 
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(etag1, etag2, "ETag must be stable for the same JWKS body");
 
         authority
-            .provision(NewServicePrincipal::new("warden-et-2"), now())
+            .provision(NewServicePrincipal::new("yubaba-et-2"), now())
             .await
             .unwrap();
         let etag3 = {
@@ -520,7 +520,7 @@ mod tests {
     async fn conditional_get_returns_304_on_matching_if_none_match() {
         let (app, authority) = rig(vec![], OverlapPolicy::DEFAULT_OVERLAP_SECONDS);
         authority
-            .provision(NewServicePrincipal::new("warden-cg"), now())
+            .provision(NewServicePrincipal::new("yubaba-cg"), now())
             .await
             .unwrap();
 
@@ -572,7 +572,7 @@ mod tests {
 
         let (app, authority) = rig(vec![], OverlapPolicy::DEFAULT_OVERLAP_SECONDS);
         let provisioned = authority
-            .provision(NewServicePrincipal::new("warden-e2e"), now())
+            .provision(NewServicePrincipal::new("yubaba-e2e"), now())
             .await
             .unwrap();
         let target_kid = provisioned.signing_key.kid.clone();
@@ -602,14 +602,14 @@ mod tests {
         owns.service = vec!["svc-prod".into()];
         let claims = McpClaims::new(
             "https://cheers.example",
-            "https://constable.example",
-            PrincipalId::service("warden-e2e"),
+            "https://kamaji.example",
+            PrincipalId::service("yubaba-e2e"),
             1_000,
             1_600,
             "jti-jwks-e2e",
             vec![Scope::OwnershipWrite],
         )
-        .with_act(Actor::new(PrincipalId::service("warden-e2e")))
+        .with_act(Actor::new(PrincipalId::service("yubaba-e2e")))
         .with_owns(owns)
         .with_auth_strength(AuthStrength::Bootstrap);
         let token = minter.mint_mcp(&claims).unwrap();

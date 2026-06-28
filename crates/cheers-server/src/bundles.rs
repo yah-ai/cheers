@@ -367,7 +367,7 @@ mod tests {
 
         let claims = McpClaims::new(
             "https://cheers.example",
-            "https://constable.camp.example",
+            "https://kamaji.camp.example",
             PrincipalId::user("alice"),
             1000,
             1300,

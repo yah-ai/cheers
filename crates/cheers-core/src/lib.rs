@@ -55,7 +55,7 @@
 //! @yah:next("Land foundation tickets (principal kinds, scope vocab, ownership table) in cheers-core/cheers-server before mint paths.")
 //! @yah:next("Mint paths, admin endpoints, JWKS, audit can ship in parallel once the foundation is in.")
 //! @yah:verify("cargo test -p cheers-core && cargo test -p cheers-server && cargo test -p cheers-verify")
-//! @yah:gotcha("This relay PRODUCES the wire contract that yah's constable consumes. Any wire-shape change here is a coordinated change with yah's R426/R427/R428 — flag the yah-side relay in any handoff.")
+//! @yah:gotcha("This relay PRODUCES the wire contract that yah's kamaji consumes. Any wire-shape change here is a coordinated change with yah's R426/R427/R428 — flag the yah-side relay in any handoff.")
 //! @yah:gotcha("ownership:write and audit:write are kind=service ONLY. The grant API must reject (principal_kind=user, scope=ownership:write|audit:write) at write time, not just at mint.")
 //! @yah:assumes("R019-F5/F6 crate split is effectively landed (in review) — MCP-token mint paths bolt onto cheers-server's signer; cheers-verify verifies them unchanged.")
 //! @yah:assumes("yah-side consumer spec (W159) keeps the wire claim shapes verbatim with this doc (act, owns, camp_id, auth_strength).")

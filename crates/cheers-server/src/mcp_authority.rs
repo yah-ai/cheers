@@ -149,7 +149,7 @@ impl From<McpMintError> for Error {
 /// Generic (not `dyn`) so the assembled capability set is visible in the
 /// type. The matching edge-side verifier is
 /// [`PasetoV4PublicVerifier`](cheers_verify::PasetoV4PublicVerifier) +
-/// `verify_mcp_at`; the verify-only consumer (constable) never depends on
+/// `verify_mcp_at`; the verify-only consumer (kamaji) never depends on
 /// this crate.
 pub struct McpAuthority<B, G, O> {
     minter: PasetoV4SecretMinter,
@@ -283,7 +283,7 @@ where
 
     /// **Mint path 2** — bootstrapped camp, autonomous (R020-F7).
     ///
-    /// For warden-hosted camps operating without a live user session: the
+    /// For yubaba-hosted camps operating without a live user session: the
     /// camp's bootstrap credential authenticates upstream of this call, and
     /// the verified camp principal is what arrives here. Returns a token
     /// bearing
@@ -645,7 +645,7 @@ mod tests {
     fn mint_user_fresh_signs_token_verifiable_at_edge() {
         let (authority, verifier) = rig();
         let user = PrincipalId::user("alice");
-        let aud = "https://constable.camp.example";
+        let aud = "https://kamaji.camp.example";
         put_simple_grant(
             &authority,
             user.clone(),
@@ -685,7 +685,7 @@ mod tests {
         // change without rewriting the grant.
         let (authority, _verifier) = rig();
         let user = PrincipalId::user("bob");
-        let aud = "https://constable.example";
+        let aud = "https://kamaji.example";
         put_simple_grant(
             &authority,
             user.clone(),
@@ -738,7 +738,7 @@ mod tests {
                 "service",
                 "svc-a",
                 "owns",
-                PrincipalId::service("warden"),
+                PrincipalId::service("yubaba"),
                 Some(user.clone()),
             )
             .unwrap();
@@ -749,7 +749,7 @@ mod tests {
                 "arch_doc",
                 "doc-1",
                 "owns",
-                PrincipalId::service("warden"),
+                PrincipalId::service("yubaba"),
                 Some(user.clone()),
             )
             .unwrap();
@@ -833,7 +833,7 @@ mod tests {
         pollster::block_on(async {
             let err = authority
                 .mint_user_fresh(
-                    PrincipalId::service("warden"),
+                    PrincipalId::service("yubaba"),
                     None,
                     None,
                     "https://aud.example",
@@ -896,7 +896,7 @@ mod tests {
     fn mint_bootstrap_signs_token_verifiable_at_edge() {
         let (authority, verifier) = rig();
         let camp = PrincipalId::camp("c-xyz");
-        let aud = "https://constable.camp.example";
+        let aud = "https://kamaji.camp.example";
         put_simple_grant(
             &authority,
             camp.clone(),
@@ -961,7 +961,7 @@ mod tests {
                 "service",
                 "svc-a",
                 "owns",
-                PrincipalId::service("warden"),
+                PrincipalId::service("yubaba"),
                 Some(user.clone()),
             )
             .unwrap();
@@ -972,7 +972,7 @@ mod tests {
                 "arch_doc",
                 "doc-1",
                 "owns",
-                PrincipalId::service("warden"),
+                PrincipalId::service("yubaba"),
                 Some(user.clone()),
             )
             .unwrap();
@@ -1083,7 +1083,7 @@ mod tests {
             // Same for a service principal.
             let err = authority
                 .mint_bootstrap(
-                    PrincipalId::service("warden"),
+                    PrincipalId::service("yubaba"),
                     "https://aud.example",
                     1_000,
                 )
@@ -1166,7 +1166,7 @@ mod tests {
         let (authority, verifier) = rig();
         let user = PrincipalId::user("alice");
         let camp = PrincipalId::camp("c-multi");
-        let aud = "https://constable.camp.example";
+        let aud = "https://kamaji.camp.example";
 
         // User holds CloudDeploy + CloudRead for this aud; camp holds the
         // same. Requested scope is a subset.
@@ -1196,7 +1196,7 @@ mod tests {
                 "service",
                 "svc-prod",
                 "owns",
-                PrincipalId::service("warden"),
+                PrincipalId::service("yubaba"),
                 Some(user.clone()),
             )
             .unwrap();
@@ -1389,7 +1389,7 @@ mod tests {
             let err = authority
                 .mint_token_exchange(
                     PrincipalId::user("alice"),
-                    PrincipalId::service("warden"),
+                    PrincipalId::service("yubaba"),
                     None,
                     "https://aud.example",
                     vec![],

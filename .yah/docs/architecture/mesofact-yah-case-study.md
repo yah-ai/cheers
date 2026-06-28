@@ -3,7 +3,7 @@
 > **Status**: design draft, 2026-05-14. Three different yah services
 > — yah-marketing, yah-platform, and yah-remote-camp — deploying as
 > three mesofact instances on a shared substrate
-> (warden + mesofact + appliances). Companion to
+> (yubaba + mesofact + appliances). Companion to
 > [mesofact-noisetable-case-study.md](./mesofact-noisetable-case-study.md).
 >
 > **The framing**: these are *separate services*, not facets of one
@@ -21,13 +21,13 @@
 | **yah-remote-camp** | `camp.yah.dev` | Mode 2 + 3 | `r2` (camp roster) + `rpc` (per-camp data) + `pg` (membership) | `rpc` adapter, R2-as-roster, post-hydration mesh handoff |
 
 Each runs as its own mesofact instance: own `manifest.json`, own
-`mesofact.config.toml`, own R2 publish target, own warden-managed
+`mesofact.config.toml`, own R2 publish target, own yubaba-managed
 deployment. They are not collapsed into one process and not
 collapsed into one route table.
 
 ## What the substrate gives them for free
 
-The shared substrate — warden (orchestration), mesofact (the
+The shared substrate — yubaba (orchestration), mesofact (the
 rendering binary + `@mesofact/runtime` adapters that wrap
 **appliances** — the backend-service tier: sqlite, pg, R2, …),
 and the **release** packaging convention layered above — means a
@@ -39,14 +39,14 @@ not to its operational shape.
    compiled in. A new service is a new manifest + source config, not
    a new build of mesofact.
 
-2. **Warden deploys all three identically.** Each service is a
-   warden workload of the same kind (`mesofact-instance`): build →
+2. **Yubaba deploys all three identically.** Each service is a
+   yubaba workload of the same kind (`mesofact-instance`): build →
    upload to R2 → SIGHUP the proxy. yah-marketing's pipeline and
    yah-remote-camp's pipeline differ only in their input artifacts.
 
 3. **Cross-instance SSO via cookie domain.** All three instances'
    `CookieSessionResolver` reads `yah_session` from `.yah.dev` with
-   the warden-injected HMAC key. yah-platform mints the cookie at
+   the yubaba-injected HMAC key. yah-platform mints the cookie at
    OAuth callback; yah-remote-camp (and any future `*.yah.dev`
    service) decodes it without coordination. See
    [§"Auth & session contract"](./mesofact.md#auth--session-contract)
@@ -60,7 +60,7 @@ not to its operational shape.
    lobby cards reuse it without per-service plumbing.
 
 5. **Release packaging.** Each service is published as a versioned
-   **release** — manifest + source config + warden workload spec
+   **release** — manifest + source config + yubaba workload spec
    bundled — so deploying yah.com staging is the same gesture as
    deploying yah.dev. The release format sits above mesofact's
    manifest schema; mesofact doesn't need to know how releases are
@@ -119,8 +119,8 @@ Sources: `pg` (account_db: users, invoices, camp_ownership) + `r2`
 **Three things this exercises that the others don't**:
 
 1. **yah-platform is the identity provider for the family.** OAuth
-   handler is a warden endpoint (not a mesofact route). On
-   successful login, warden mints `yah_session` on `.yah.dev`.
+   handler is a yubaba endpoint (not a mesofact route). On
+   successful login, yubaba mints `yah_session` on `.yah.dev`.
    Every other `*.yah.dev` mesofact instance decodes that cookie
    with the same HMAC key. mesofact stays out of the OAuth
    handshake — the right boundary.
@@ -136,7 +136,7 @@ Sources: `pg` (account_db: users, invoices, camp_ownership) + `r2`
    two adapters, picked by access pattern.
 
 3. **Stripe → pg → tag invalidation runs the main doc's spec
-   verbatim.** Webhook handler (warden-hosted) writes to pg, pg
+   verbatim.** Webhook handler (yubaba-hosted) writes to pg, pg
    `LISTEN/NOTIFY` emits `pg:account_db:invoices:<user>`, mesofact
    publisher subscribes per
    [§"Publisher tag-subscription"](./mesofact.md#publisher-tag-subscription),
@@ -162,7 +162,7 @@ without a coordinator. That's the URL.
 
 1. **A camp's data plane lives on the camp, not in regional
    replicas.** Tickets, sessions, party roster, mesh state all live
-   in `.yah/` on the camp's own warden node, served today by
+   in `.yah/` on the camp's own yubaba node, served today by
    `yah-camp` over a Unix-domain JSON-RPC socket
    ([`app/yah/cli/src/bin/yah-camp.rs`](../../../../app/yah/cli/src/bin/yah-camp.rs)).
    No replica. One node. The mesofact `sqlite` adapter doesn't fit
@@ -172,13 +172,13 @@ without a coordinator. That's the URL.
    *paired* roster source.
 
 2. **Mode 3 hydration punches out over Tailscale.** Browser →
-   mesofact shell from R2 → hydrate → `https://<camp-host>.<warden-tailnet>/api/...`
-   over Tailscale-userspace WireGuard (or warden's public tunnel).
+   mesofact shell from R2 → hydrate → `https://<camp-host>.<yubaba-tailnet>/api/...`
+   over Tailscale-userspace WireGuard (or yubaba's public tunnel).
    mesofact is **out** after hydration. The shell-vs-live split
    from the main doc's Mode 3 spec, demonstrated against a private
    mesh rather than a public API.
 
-3. **The slug → home-warden lookup is the only T0-shape need.**
+3. **The slug → home-yubaba lookup is the only T0-shape need.**
    noisetable needs Cockroach for T0 because billing + org + routing
    share an ACID surface. yah doesn't. The roster is small,
    append-mostly, read-heavy, 30s staleness fine — an R2-stored
@@ -192,25 +192,25 @@ without a coordinator. That's the URL.
 
 The three services above are user-facing products. There's also a
 **fourth yah mesofact consumer** that runs as a *system service*
-alongside warden / Headscale / cloudflared — bundled with the yah
+alongside yubaba / Headscale / cloudflared — bundled with the yah
 install, deployed per-rig, reachable only on the mesh by default:
 
 - **yah-rig-dashboard** — the "kubernetes-dashboard / Headlamp"
-  equivalent for warden-managed rigs. One mesofact instance,
+  equivalent for yubaba-managed rigs. One mesofact instance,
   multi-rig fan-out via the `rpc` adapter and a rig roster.
   Modes 1+2+3. Routes parameterized on `(rig?, camp?)`; watchtower
   is the cell view at the rig × camp intersection.
 
 Full design lives at
 [`yah/.yah/docs/working/yah-rig-dashboard.md`](../../../../.yah/docs/working/yah-rig-dashboard.md)
-— it's primarily a yah-architecture doc (warden integration,
+— it's primarily a yah-architecture doc (yubaba integration,
 system-service deployment taxonomy, bootstrap/CLI fallback) rather
 than a mesofact-substrate doc, so it lives in yah's tree.
 
 **Why it matters for this case study set**: it's the **second
 `rpc`-adapter consumer** (yah-remote-camp was first), which is what
 the main doc said we needed — proof that the adapter abstraction
-holds at a second real backend (warden's HTTP API, vs. yah-camp's).
+holds at a second real backend (yubaba's HTTP API, vs. yah-camp's).
 Same `generation_from = "<roster>"` pattern; same paired-roster
 shape. The adapter is right.
 
@@ -240,11 +240,11 @@ dashboard-side framing.
 |---|---|---|
 | yah-platform → yah-remote-camp | New camp written to `camp_ownership` pg → projected manifest pushed to R2 | yah-platform's publisher emits per-camp `camps/<id>.json` |
 | yah-platform → yah-remote-camp | Logged-in user → camp.yah.dev page sees session | shared `yah_session` cookie on `.yah.dev` |
-| yah-remote-camp → camp host | SPA fetches live data | direct over warden's tailnet, mesofact not in path |
+| yah-remote-camp → camp host | SPA fetches live data | direct over yubaba's tailnet, mesofact not in path |
 | yah-platform → yah-remote-camp | Per-user attestation tokens for camp auth gates | minted by yah-platform, embedded in `__MESOFACT_STATE__`, presented by SPA to camp's HTTP bridge |
 
 None of these are in the mesofact request path. yah-platform writes
-pg + R2; warden runs the publisher; yah-remote-camp reads what's
+pg + R2; yubaba runs the publisher; yah-remote-camp reads what's
 there. The substrate doesn't need a service-to-service protocol —
 the protocol is "share the storage tier."
 
@@ -257,8 +257,8 @@ the protocol is "share the storage tier."
 | Camp ownership index | `pg` | global | platform | same `pg` source as account |
 | Camp roster | `r2` | global | remote-camp | signed JSON, CDN-cached 30s |
 | Camp data (live) | `rpc` | project | remote-camp | `generation_from = "camp_roster"` |
-| Stripe webhooks | n/a (warden) | n/a | (out of mesofact) | mutates pg → triggers tag invalidation |
-| OAuth provider | n/a (warden) | n/a | (out of mesofact) | sets `yah_session` cookie |
+| Stripe webhooks | n/a (yubaba) | n/a | (out of mesofact) | mutates pg → triggers tag invalidation |
+| OAuth provider | n/a (yubaba) | n/a | (out of mesofact) | sets `yah_session` cookie |
 
 yah-platform's `pg` adapter and yah-remote-camp's `rpc` adapter both
 talk to data that ultimately originates from yah-platform's database
@@ -277,7 +277,7 @@ gaps honestly:
    fleet API, and camp-ownership table all need to land.
 
 2. **`yah-camp` HTTP bridge.** Today's daemon is Unix-socket
-   JSON-RPC only. The recommended shape is warden hosts a
+   JSON-RPC only. The recommended shape is yubaba hosts a
    HTTP → unix-socket proxy (TLS termination, rate limiting, and
    attestation verification at the right layer); `yah-camp` stays
    transport-agnostic.
@@ -285,12 +285,12 @@ gaps honestly:
 3. **The camp roster writer.** Nothing today emits the per-camp
    R2 manifests. yah-platform is the natural owner.
 
-4. **Per-user warden attestations.** Minted by yah-platform,
-   verified by warden at the camp's HTTP bridge. Phase 2.
+4. **Per-user yubaba attestations.** Minted by yah-platform,
+   verified by yubaba at the camp's HTTP bridge. Phase 2.
 
-5. **The release format itself.** Current warden takes a
+5. **The release format itself.** Current yubaba takes a
    `WorkloadSpec`
-   ([`crates/yah/warden/`](../../../../crates/yah/warden/)). A
+   ([`crates/yah/yubaba/`](../../../../crates/yah/yubaba/)). A
    release bundle that combines manifest + source-config + workload
    spec is informal today; this case study is the first place it's
    described as a shared convention. Worth elevating to its own
@@ -306,11 +306,11 @@ The minimum to validate "three services, one substrate":
    — essentially a second yah-marketing on a different hostname.
    Proves multi-instance posture *before* any auth work.
 3. **yah-remote-camp Mode 2 lobby with stub `rpc` adapter.** Returns
-   mocked camp data while the warden HTTP bridge is being built.
+   mocked camp data while the yubaba HTTP bridge is being built.
    Proves the `rpc` adapter + R2 roster + paired-generation
    pipeline end-to-end.
 
-Three instances running, each warden-deployed identically, each
+Three instances running, each yubaba-deployed identically, each
 single-tenant, sharing only the cookie domain and the mesofact
 binary. **That is the dogfood**: the substrate works because three
 genuinely-different services share it without convergence.

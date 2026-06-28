@@ -21,12 +21,12 @@ all-features = true
 # (yah-platform when it materializes) just wire concrete store impls from
 # cheers-sqlx / cheers-redis underneath and call `cheers_axum::google::router(...)`
 # etc. This crate stays product-agnostic — no cookie domain hardcoding,
-# no DATABASE_URL, no warden coupling.
+# no DATABASE_URL, no yubaba coupling.
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.15" }
-cheers-server = { path = "../cheers-server", version = "0.8.15" }
+cheers-core = { path = "../cheers-core", version = "0.8.16" }
+cheers-server = { path = "../cheers-server", version = "0.8.16" }
 # Optional — only pulled in under the `google`/`apple` features.
-cheers = { path = "../cheers", version = "0.8.15", default-features = false, optional = true }
+cheers = { path = "../cheers", version = "0.8.16", default-features = false, optional = true }
 
 # axum 0.8 (hyper 1 / http 1) — dedupes against reqwest's hyper 1 in the tree.
 # default = ["json", "tokio", "http1", "matched-path", "original-uri", "form", "query", "tracing"] is
@@ -71,7 +71,7 @@ uuid = { version = "1", default-features = false, features = ["v5"], optional = 
 # cheers-sqlx + sqlx (dev only) — the `me_basic` integration test backs the
 # session stores with a real SQLite file. (The W207 registration harness moved
 # out to the `cheers-test-identity` crate, R513-T8.)
-cheers-sqlx = { path = "../cheers-sqlx", version = "0.8.15", features = ["sqlite"] }
+cheers-sqlx = { path = "../cheers-sqlx", version = "0.8.16", features = ["sqlite"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
 serde_json = "1"
 # axum's `into_make_service` + `serve` for the round-trip tests; we drive the

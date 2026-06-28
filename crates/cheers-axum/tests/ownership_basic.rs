@@ -50,7 +50,7 @@ fn rig() -> (Router, PasetoV4SecretMinter, Arc<MemOwnershipStore>) {
     (app, minter, store)
 }
 
-/// Mint a token with the given scope list, `sub = svc:warden`.
+/// Mint a token with the given scope list, `sub = svc:yubaba`.
 fn mint_token(
     minter: &PasetoV4SecretMinter,
     now: i64,
@@ -60,7 +60,7 @@ fn mint_token(
     let claims = McpClaims::new(
         "https://cheers.example",
         "https://cheers.example",
-        PrincipalId::service("warden"),
+        PrincipalId::service("yubaba"),
         now,
         now + 60,
         jti,
@@ -132,7 +132,7 @@ async fn round_trip_post_then_delete_marks_row_revoked() {
     // of body content — and bake in the auth'd principal.
     assert_eq!(
         returned.get("granted_by").and_then(|v| v.as_str()),
-        Some("svc:warden"),
+        Some("svc:yubaba"),
     );
     assert_eq!(
         returned.get("on_behalf_of").and_then(|v| v.as_str()),
@@ -261,7 +261,7 @@ async fn post_with_service_on_behalf_of_is_400_ownership_invalid() {
         "resource_kind": "service",
         "resource_id": "svc-abc",
         "relationship": "owns",
-        "on_behalf_of": "svc:other-warden",
+        "on_behalf_of": "svc:other-yubaba",
     });
 
     let req = Request::builder()
@@ -330,7 +330,7 @@ async fn delete_without_ownership_write_returns_403_before_any_store_call() {
         "service",
         "svc-abc",
         "owns",
-        PrincipalId::service("warden"),
+        PrincipalId::service("yubaba"),
         Some(PrincipalId::user("alice")),
     )
     .unwrap();

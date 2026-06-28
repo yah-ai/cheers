@@ -144,7 +144,7 @@ pub enum RouteError {
 
     /// `POST /audit/ingest` body parsed as JSON but a record violated an
     /// [`AuditRecord`] invariant (e.g. empty `aud`, non-positive `at`). 400
-    /// — distinct from 401/403 so constable can tell auth failure from a
+    /// — distinct from 401/403 so kamaji can tell auth failure from a
     /// well-formed-but-invalid batch (do not retry as-is).
     ///
     /// [`AuditRecord`]: cheers_server::AuditRecord

@@ -3,7 +3,7 @@
 //! Boots a deterministic, SQLite-backed magic-link cheers server for E2E /
 //! registration harnesses. Configured entirely from the environment so it drops
 //! into the yah-camp appliance contract (the camp vends `DATABASE_URL` and the
-//! supervisor — constable `Backend::Native` — fork+execs this binary):
+//! supervisor — kamaji `Backend::Native` — fork+execs this binary):
 //!
 //! ```text
 //! DATABASE_URL=/abs/db.sqlite PORT=8745 cheers-test-identity

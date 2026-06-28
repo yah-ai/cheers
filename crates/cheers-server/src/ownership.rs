@@ -219,15 +219,15 @@ mod tests {
             "service",
             "svc-abc",
             "owns",
-            svc("warden"),
+            svc("yubaba"),
             Some(user("alice")),
         )
         .unwrap();
-        assert_eq!(n.granted_by, svc("warden"));
+        assert_eq!(n.granted_by, svc("yubaba"));
         assert_eq!(n.on_behalf_of, Some(user("alice")));
 
         // Self-grant: on_behalf_of=None is valid.
-        NewOwnership::new(camp("c-2"), "service", "s-1", "owns", svc("warden"), None).unwrap();
+        NewOwnership::new(camp("c-2"), "service", "s-1", "owns", svc("yubaba"), None).unwrap();
     }
 
     #[test]
@@ -269,8 +269,8 @@ mod tests {
             "service",
             "svc-abc",
             "owns",
-            svc("warden"),
-            Some(svc("warden")),
+            svc("yubaba"),
+            Some(svc("yubaba")),
         )
         .unwrap_err();
         assert_eq!(
@@ -283,7 +283,7 @@ mod tests {
             "service",
             "svc-abc",
             "owns",
-            svc("warden"),
+            svc("yubaba"),
             Some(camp("c-9")),
         )
         .unwrap_err();
@@ -301,7 +301,7 @@ mod tests {
             "service".into(),
             "svc-a".into(),
             "owns".into(),
-            svc("warden"),
+            svc("yubaba"),
             Some(user("alice")),
             100,
             None,

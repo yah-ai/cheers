@@ -18,7 +18,7 @@
 //! @yah:at(2026-05-26T17:52:56Z)
 //! @yah:status(review)
 //! @yah:parent(R019)
-//! @yah:next("Promote store.rs's 'cheers does not enforce revocation server-side; the product wires up the check' note into two traits: RevocationWriter { revoke(jti | chain) } (origin, Warden Redis/gossip) and RevocationReader { is_revoked(jti) } (edge, local replica / CF KV).")
+//! @yah:next("Promote store.rs's 'cheers does not enforce revocation server-side; the product wires up the check' note into two traits: RevocationWriter { revoke(jti | chain) } (origin, Yubaba Redis/gossip) and RevocationReader { is_revoked(jti) } (edge, local replica / CF KV).")
 //! @yah:next("Eventually-consistent by documented contract; the short access-token TTL is the stated propagation bound. Wire revoke() into logout + UserStore::revoke_device + RefreshStore::revoke_chain.")
 //! @yah:next("Keyed on the token's jti — depends on the Claims.jti field added alongside the facades feature.")
 //! @yah:verify("cd external/cheers && cargo test -p cheers-core")

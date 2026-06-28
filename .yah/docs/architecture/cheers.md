@@ -17,7 +17,7 @@
 ## What it is
 
 A pair of Rust crates that handles **end-user identity** for the
-mesofact / warden / yah / noisetable family: prove who the user is
+mesofact / yubaba / yah / noisetable family: prove who the user is
 (Google, Apple, passkey, email), mint a credential, store it on the
 appropriate platform, verify it on the server side. Pure library — no
 service, no admin UI, no separate process to run.
@@ -73,7 +73,7 @@ shapes without forcing them into one ingress.
 | Shape | Where it runs | Identity in | Credential lives | Verified by |
 |---|---|---|---|---|
 | **mesofact web** | `*.yah.dev`, `*.noisetable.com` | OIDC redirect (Google/Apple) or email-magic-link | `yah_session` cookie on parent domain | mesofact's `CookieSessionResolver` |
-| **yah-desktop** | Tauri on Mac/Linux/Windows | Native passkey via OS, or embedded webview OIDC, or password manager | OS keychain → Bearer header | warden's HTTP bridge over Tailscale, or any cheers-aware backend |
+| **yah-desktop** | Tauri on Mac/Linux/Windows | Native passkey via OS, or embedded webview OIDC, or password manager | OS keychain → Bearer header | yubaba's HTTP bridge over Tailscale, or any cheers-aware backend |
 | **noisetable native** | iOS / macOS / Linux desktop, fully Rust | Apple passkey (preferred on Apple), Google passkey, or email | iOS/macOS Keychain → Bearer | noisetable's API peer |
 | **noisetable rpi** | Headless Linux on Raspberry Pi | LAN-pair from an already-authed phone/Mac | age-encrypted file → device credential | LAN peer or upstream via xlb-net |
 
@@ -179,7 +179,7 @@ or JWT.
   RS256-vs-HS256 confusion.
 - Symmetric key — fine because the *issuer and verifier are the same
   process* (the product binary) for native flows, and the same key
-  (warden-injected) across `*.yah.dev` mesofact instances for web.
+  (yubaba-injected) across `*.yah.dev` mesofact instances for web.
 
 ### Claims shape
 
@@ -391,9 +391,9 @@ takes an `xlb_net::Endpoint` and uses it as the transport for
 No other cheers feature requires xlb-net. Web-only consumers don't
 pull it in.
 
-### With warden
+### With yubaba
 
-When a cheers-using product runs as a warden workload, warden
+When a cheers-using product runs as a yubaba workload, yubaba
 injects:
 - The paseto v4 symmetric key (rotated weekly, all `*.yah.dev`
   instances get the same one — that's what gives mesofact-yah's
@@ -402,8 +402,8 @@ injects:
   Service ID + signing key file).
 - The `UserStore` connection config (pg URL for yah-platform, etc.).
 
-The crate has no warden dependency — it just reads its config from a
-caller-supplied struct. Warden is one possible caller.
+The crate has no yubaba dependency — it just reads its config from a
+caller-supplied struct. Yubaba is one possible caller.
 
 ## Open decisions
 

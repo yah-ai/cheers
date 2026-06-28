@@ -326,12 +326,12 @@ mod tests {
             .uri("/api/admin/service-principals")
             .header(k, v)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"desired_id":"warden-1"}"#))
+            .body(Body::from(r#"{"desired_id":"yubaba-1"}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body: ProvisionResponse = body_json(resp.into_body()).await;
-        assert_eq!(body.principal.id, PrincipalId::service("warden-1"));
+        assert_eq!(body.principal.id, PrincipalId::service("yubaba-1"));
         assert_eq!(body.signing_key.status, SigningKeyStatus::Active);
         // 64-byte secret base64url-no-pad (88 chars without padding).
         let raw = URL_SAFE_NO_PAD
@@ -354,7 +354,7 @@ mod tests {
             .uri("/api/admin/service-principals")
             .header(k, v)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"desired_id":"warden-2"}"#))
+            .body(Body::from(r#"{"desired_id":"yubaba-2"}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -372,7 +372,7 @@ mod tests {
             .method("POST")
             .uri("/api/admin/service-principals")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"desired_id":"warden-3"}"#))
+            .body(Body::from(r#"{"desired_id":"yubaba-3"}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -389,7 +389,7 @@ mod tests {
                 .uri("/api/admin/service-principals")
                 .header(k, v)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"desired_id":"warden-dup"}"#))
+                .body(Body::from(r#"{"desired_id":"yubaba-dup"}"#))
                 .unwrap()
         };
         let resp = app.clone().oneshot(make_req()).await.unwrap();
@@ -412,7 +412,7 @@ mod tests {
             .uri("/api/admin/service-principals")
             .header(k, v)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"desired_id":"warden-r"}"#))
+            .body(Body::from(r#"{"desired_id":"yubaba-r"}"#))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -422,7 +422,7 @@ mod tests {
         let (k, v) = bearer(&token);
         let req = Request::builder()
             .method("POST")
-            .uri("/api/admin/service-principals/warden-r/rotate")
+            .uri("/api/admin/service-principals/yubaba-r/rotate")
             .header(k, v)
             .body(Body::empty())
             .unwrap();
@@ -470,7 +470,7 @@ mod tests {
         let (k, v) = bearer(&token);
         let req = Request::builder()
             .method("POST")
-            .uri("/api/admin/service-principals/warden-x/rotate")
+            .uri("/api/admin/service-principals/yubaba-x/rotate")
             .header(k, v)
             .body(Body::empty())
             .unwrap();
@@ -488,7 +488,7 @@ mod tests {
         // does).
         let authority = ServicePrincipalAuthority::new(MemoryServicePrincipalStore::new());
         let provisioned = authority
-            .provision(NewServicePrincipal::new("warden-enc"), 1_000)
+            .provision(NewServicePrincipal::new("yubaba-enc"), 1_000)
             .await
             .unwrap();
         let response = ProvisionResponse::from_provisioned(provisioned);

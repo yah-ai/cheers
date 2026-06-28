@@ -24,10 +24,10 @@ path = "src/main.rs"
 [dependencies]
 # email feature gives MagicLinkProvider / CapturingMailer / MagicLinkEmail and
 # the magic-link route handlers, with no lettre/SMTP transport pulled in.
-cheers = { path = "../cheers", version = "0.8.15", default-features = false, features = ["email"] }
-cheers-axum = { path = "../cheers-axum", version = "0.8.15", features = ["email"] }
-cheers-server = { path = "../cheers-server", version = "0.8.15" }
-cheers-sqlx = { path = "../cheers-sqlx", version = "0.8.15", features = ["sqlite"] }
+cheers = { path = "../cheers", version = "0.8.16", default-features = false, features = ["email"] }
+cheers-axum = { path = "../cheers-axum", version = "0.8.16", features = ["email"] }
+cheers-server = { path = "../cheers-server", version = "0.8.16" }
+cheers-sqlx = { path = "../cheers-sqlx", version = "0.8.16", features = ["sqlite"] }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "http1", "tokio"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }

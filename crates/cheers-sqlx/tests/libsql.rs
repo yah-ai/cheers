@@ -262,7 +262,7 @@ async fn ownership_check_constraints_reject_bad_rows() {
         .conn
         .execute(
             "INSERT INTO ownership (id, principal_id, resource_kind, resource_id, relationship, granted_by, on_behalf_of, granted_at) \
-             VALUES ('o2', 'user:alice', 'doc', 'd1', 'owner', 'svc:warden', 'svc:other', 1000)",
+             VALUES ('o2', 'user:alice', 'doc', 'd1', 'owner', 'svc:yubaba', 'svc:other', 1000)",
             (),
         )
         .await;
@@ -275,7 +275,7 @@ async fn ownership_check_constraints_reject_bad_rows() {
     fx.conn
         .execute(
             "INSERT INTO ownership (id, principal_id, resource_kind, resource_id, relationship, granted_by, on_behalf_of, granted_at) \
-             VALUES ('o3', 'user:alice', 'doc', 'd1', 'owner', 'svc:warden', NULL, 1000)",
+             VALUES ('o3', 'user:alice', 'doc', 'd1', 'owner', 'svc:yubaba', NULL, 1000)",
             (),
         )
         .await

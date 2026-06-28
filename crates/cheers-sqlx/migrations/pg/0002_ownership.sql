@@ -3,7 +3,7 @@
 --
 -- See .yah/docs/working/mcp-auth-and-ownership.md §Ownership table for the
 -- wire-claim contract this backs (W159 Layer 2 — local resource-membership
--- check on constable's host, no per-call cheers round-trip).
+-- check on kamaji's host, no per-call cheers round-trip).
 --
 -- Two CHECK constraints encode the invariants the doc calls out:
 -- - granted_by is ALWAYS a service principal (humans never write ownership).

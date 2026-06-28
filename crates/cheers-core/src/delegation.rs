@@ -1,7 +1,7 @@
 //! [`UserDelegation`] — the user-signed authorization that lets cheers bind a
 //! camp principal to a user at provision time.
 //!
-//! See `.yah/docs/working/mcp-auth-and-ownership.md` §Camp bootstrap. Warden
+//! See `.yah/docs/working/mcp-auth-and-ownership.md` §Camp bootstrap. Yubaba
 //! provisions a camp on behalf of a user `U`; cheers won't allocate the camp
 //! principal until it sees a payload signed by `U` authorising the binding.
 //! The signing flow itself is yah-side (W122 QR-pair / mobile-app); cheers's
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn new_rejects_non_user_bound_to() {
         let err = UserDelegation::new(
-            PrincipalId::service("warden"),
+            PrincipalId::service("yubaba"),
             "c-1",
             1_000,
             1_600,

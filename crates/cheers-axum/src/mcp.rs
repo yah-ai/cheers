@@ -134,7 +134,7 @@ mod tests {
     fn sample_claims(jti: &str) -> McpClaims {
         McpClaims::new(
             "https://cheers.example",
-            "https://constable.example",
+            "https://kamaji.example",
             PrincipalId::user("alice"),
             1_000,
             1_600,

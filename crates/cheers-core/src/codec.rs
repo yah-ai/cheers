@@ -30,8 +30,8 @@
 //! @yah:next("Suggested quest placement: foundation (Q002) owns the core codec/claims/store changes; the driver is the yah-platform edge deployment (Q005). Filed standalone to avoid presuming where it slots — maintainers reparent.")
 //! @yah:gotcha("The current Codec (PasetoV4Codec v4.local / HmacBlobCodec) is SYMMETRIC — the same key mints AND verifies. Edge verification therefore can't be done without shipping minting power to the CF edge (forge-any-session blast radius). The asymmetric codec is the prerequisite for ANY edge verification; do not edge-verify the symmetric token.")
 //! @yah:gotcha("cheers is pre-launch, so splitting the Codec trait can be a breaking change; a blanket impl keeps PasetoV4Codec/HmacBlobCodec working as both minter and verifier.")
-//! @yah:gotcha("Consumer mapping (yah side): mesofact CF Worker (yah R327) = EdgeVerifier; mesofact axum SSR origin = SessionAuthority; Warden backs RefreshStore + RevocationWriter.")
-//! @yah:assumes("Auth has no cross-session OLTP (every check validates one session) — that licenses a stateless/global access token and an eventually-consistent revocation set. Only refresh replay-detection needs consistency, and it's homed (origin/Warden) on the cold path.")
+//! @yah:gotcha("Consumer mapping (yah side): mesofact CF Worker (yah R327) = EdgeVerifier; mesofact axum SSR origin = SessionAuthority; Yubaba backs RefreshStore + RevocationWriter.")
+//! @yah:assumes("Auth has no cross-session OLTP (every check validates one session) — that licenses a stateless/global access token and an eventually-consistent revocation set. Only refresh replay-detection needs consistency, and it's homed (origin/Yubaba) on the cold path.")
 //! @arch:see(.yah/docs/working/edge-verifiable-auth.md)
 //!
 //! @yah:ticket(R019-F1, "Split Codec into TokenMinter + TokenVerifier traits")

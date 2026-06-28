@@ -3,7 +3,7 @@
 //! 1. Batch POST 100 records: every record is present in the audit store
 //!    after a single call.
 //! 2. A record with a forbidden shape (empty `aud`) returns 4xx + does not
-//!    commit the batch; constable's retry of the corrected batch succeeds.
+//!    commit the batch; kamaji's retry of the corrected batch succeeds.
 //! 3. Negative auth: a token without `audit:write` is rejected 403 BEFORE
 //!    the store is touched.
 //!
@@ -58,7 +58,7 @@ fn mint_service_token(
     let claims = McpClaims::new(
         "https://cheers.example",
         "https://cheers.example",
-        PrincipalId::service("constable"),
+        PrincipalId::service("kamaji"),
         now,
         now + 60,
         jti,
@@ -92,7 +92,7 @@ async fn batch_post_100_records_all_landed() {
     let token = mint_service_token(&minter, now, vec![Scope::AuditWrite], "jti-100");
 
     let batch: Vec<serde_json::Value> = (0..100)
-        .map(|i| record_json("POST /cloud/deploy", &format!("rid-{i}"), "https://constable.example"))
+        .map(|i| record_json("POST /cloud/deploy", &format!("rid-{i}"), "https://kamaji.example"))
         .collect();
     let body = serde_json::Value::Array(batch);
 
@@ -133,7 +133,7 @@ async fn forbidden_shape_returns_400_and_backed_off_retry_succeeds() {
 
     // First call: one record has an empty `aud` — atomic batch rejection.
     let mut bad_batch: Vec<serde_json::Value> = (0..3)
-        .map(|i| record_json("POST /x", &format!("rid-{i}"), "https://constable.example"))
+        .map(|i| record_json("POST /x", &format!("rid-{i}"), "https://kamaji.example"))
         .collect();
     bad_batch[1] = record_json("POST /x", "rid-1", ""); // empty aud — forbidden shape
 
@@ -155,7 +155,7 @@ async fn forbidden_shape_returns_400_and_backed_off_retry_succeeds() {
 
     // Backed-off retry with the corrected batch (same call shape, fixed aud).
     let good_batch: Vec<serde_json::Value> = (0..3)
-        .map(|i| record_json("POST /x", &format!("rid-{i}"), "https://constable.example"))
+        .map(|i| record_json("POST /x", &format!("rid-{i}"), "https://kamaji.example"))
         .collect();
     let req = Request::builder()
         .method("POST")
@@ -179,7 +179,7 @@ async fn missing_audit_write_returns_403_before_any_store_call() {
     let batch = serde_json::Value::Array(vec![record_json(
         "POST /x",
         "rid-1",
-        "https://constable.example",
+        "https://kamaji.example",
     )]);
 
     let req = Request::builder()
@@ -208,7 +208,7 @@ async fn missing_bearer_returns_401() {
     let batch = serde_json::Value::Array(vec![record_json(
         "POST /x",
         "rid-1",
-        "https://constable.example",
+        "https://kamaji.example",
     )]);
 
     let req = Request::builder()

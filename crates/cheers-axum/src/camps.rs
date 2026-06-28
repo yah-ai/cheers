@@ -1,11 +1,11 @@
-//! `POST /admin/camps/bootstrap` — the warden-callable path that provisions a
+//! `POST /admin/camps/bootstrap` — the yubaba-callable path that provisions a
 //! camp principal on behalf of a user.
 //!
 //! Lives separately from [`admin`](crate::admin) because the bearer is
-//! **different in kind**: this endpoint takes an MCP token (warden's service
+//! **different in kind**: this endpoint takes an MCP token (yubaba's service
 //! principal, scope = [`Scope::CampAdmin`]), not a session bearer (operator
 //! passkey). The admin / service-principal endpoints elevate a *human*
-//! operator; this endpoint elevates a *service* (warden) calling on behalf of
+//! operator; this endpoint elevates a *service* (yubaba) calling on behalf of
 //! a human U whose signed delegation rides in the request body.
 //!
 //! ## Wire shape
@@ -18,7 +18,7 @@
 //!
 //! ```ignore
 //! POST /admin/camps/bootstrap
-//! Authorization: Bearer <v4.public.*>   # warden, scope=camp:admin
+//! Authorization: Bearer <v4.public.*>   # yubaba, scope=camp:admin
 //! Content-Type: application/json
 //! {
 //!   "bound_to": "user:alice",
@@ -40,7 +40,7 @@
 //! { "principal": {...}, "credential": { "token": "<opaque>", "expires_at": ... } }
 //! ```
 //!
-//! `credential.token` is the long-lived secret warden persists alongside the
+//! `credential.token` is the long-lived secret yubaba persists alongside the
 //! camp's runtime state. The doc retains it cheers-side (unlike the
 //! service-principal Ed25519 secret which leaves cheers exactly once) because
 //! the camp must present this exact string back to mint MCP tokens via flow
@@ -118,7 +118,7 @@ pub struct CreateCampBootstrapBody {
 ///
 /// Both halves are returned in full: the persisted [`Principal`] (so the
 /// caller sees the assigned `created_at`, etc.) and the
-/// [`CampBootstrapCredential`] including the opaque `token`. Warden is
+/// [`CampBootstrapCredential`] including the opaque `token`. Yubaba is
 /// expected to persist `credential.token` alongside the camp's runtime
 /// state before navigating away from the response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,7 +255,7 @@ mod tests {
     }
 
     /// Build the camp router with a fresh in-memory authority. Returns the
-    /// router, the MCP minter (so tests can mint warden-bearer tokens), the
+    /// router, the MCP minter (so tests can mint yubaba-bearer tokens), the
     /// authority Arc (for state inspection), and the user-signing-key store
     /// (so tests can register the user's trusted pubkey).
     #[allow(clippy::type_complexity)]
@@ -279,7 +279,7 @@ mod tests {
         (app, minter, authority, key_store, camp_store)
     }
 
-    /// Mint an MCP bearer for warden's service principal.
+    /// Mint an MCP bearer for yubaba's service principal.
     fn mint_warden_mcp(
         minter: &PasetoV4SecretMinter,
         scopes: Vec<Scope>,
@@ -288,13 +288,13 @@ mod tests {
         let claims = McpClaims::new(
             "https://cheers.example",
             "https://cheers.example/api",
-            PrincipalId::service("warden-1"),
+            PrincipalId::service("yubaba-1"),
             now_s,
             now_s + 600,
-            "jti-warden",
+            "jti-yubaba",
             scopes,
         )
-        .with_act(Actor::new(PrincipalId::service("warden-1")))
+        .with_act(Actor::new(PrincipalId::service("yubaba-1")))
         .with_auth_strength(AuthStrength::Bootstrap);
         minter.mint_mcp(&claims).expect("mcp mint")
     }
@@ -470,7 +470,7 @@ mod tests {
         let grants = MemoryGrantStore::new();
         let ownership = InlineOwn::default();
         let bundles = MemoryBundleStore::with_defaults();
-        let aud = "https://constable.camp.example";
+        let aud = "https://kamaji.camp.example";
         grants.put(
             prov.principal.id.clone(),
             aud,
@@ -551,7 +551,7 @@ mod tests {
         let d = signed_delegation(&kp, user.clone(), "c", now_s, now_s + 600);
 
         let session = Claims::new(
-            UserId::new("warden-operator"),
+            UserId::new("yubaba-operator"),
             DeviceId::new("dev"),
             DeviceBinding::Passkey,
             now_s,

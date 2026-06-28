@@ -3,7 +3,7 @@
 **Status:** proposal (2026-05-26). Not yet scheduled into a phase.
 
 **Driver:** yah/mesofact deploys behind a Cloudflare Worker edge in front of
-Warden-hosted origins (mesofact axum SSR + per-user data). We want the edge to
+Yubaba-hosted origins (mesofact axum SSR + per-user data). We want the edge to
 do cheap, stateless session checks *near the user* — without holding any key
 that can mint sessions, and without reaching back to a single origin store on
 every request.
@@ -29,8 +29,8 @@ It splits into three tiers, distinct from the per-user project DB:
 | State | Hot-path op | Locality | Backing |
 |---|---|---|---|
 | Access token | signature verify (no read) | global / edge — with the **user** | none (stateless token) |
-| Revocation set | point membership check, read-mostly | globally replicated, eventually consistent | CF KV cache / Warden gossip |
-| Refresh chain | rotate + replay-detect (rare, needs consistency) | **homed** — origin/Warden, region-pinnable | `RefreshStore` |
+| Revocation set | point membership check, read-mostly | globally replicated, eventually consistent | CF KV cache / Yubaba gossip |
+| Refresh chain | rotate + replay-detect (rare, needs consistency) | **homed** — origin/Yubaba, region-pinnable | `RefreshStore` |
 | _(Project DB)_ | OLTP, single-writer | regional **home** — with the **data** | per-user SQLite + Litestream |
 
 The one consistency-sensitive auth op (refresh replay detection) is the rare
@@ -70,14 +70,14 @@ Add `jti` to `Claims` (`#[non_exhaustive]`, additive) so revocation has a key.
 ### 4. Revocation as a read/write-split abstraction
 Promote store.rs's "the product wires up the check" note into:
 
-- `RevocationWriter { revoke(jti | chain) }` — origin (Warden Redis/gossip).
+- `RevocationWriter { revoke(jti | chain) }` — origin (Yubaba Redis/gossip).
 - `RevocationReader { is_revoked(jti) }` — edge (local replica / CF KV).
 
 Eventually-consistent by documented contract; short access TTL is the bound.
 `EdgeVerifier` checks the reader; `SessionAuthority` writes on logout/device-revoke.
 
 ### 5. Guide by omission — routing stays out of the identity token
-Do **not** add a shard/routing field to `Claims`. Routing metadata (which Warden
+Do **not** add a shard/routing field to `Claims`. Routing metadata (which Yubaba
 shard holds a user's data) travels as a separate plaintext hint (cookie /
 subdomain) the edge routes on; the origin authoritatively validates entitlement.
 Keeping the identity token about identity is the guidance.
@@ -86,7 +86,7 @@ Keeping the identity token about identity is the guidance.
 
 - mesofact CF Worker (yah **R327**) = `EdgeVerifier` (public key + revocation reader).
 - mesofact axum SSR origin = `SessionAuthority` (secret key + stores).
-- Warden backs `RefreshStore` + `RevocationWriter`; CF KV (or Warden gossip) is
+- Yubaba backs `RefreshStore` + `RevocationWriter`; CF KV (or Yubaba gossip) is
   the global `RevocationReader` replica.
 
 ## Crate topology

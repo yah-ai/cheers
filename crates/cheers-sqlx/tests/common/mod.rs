@@ -280,7 +280,7 @@ where
 // ---------------------------------------------------------------------------
 
 pub async fn ownership_store_lifecycle<O: OwnershipStore + ?Sized>(store: &O) {
-    let warden = PrincipalId::service("warden");
+    let yubaba = PrincipalId::service("yubaba");
     let alice = PrincipalId::user("alice");
     let bob = PrincipalId::user("bob");
     let camp_a = PrincipalId::camp("camp-a");
@@ -292,13 +292,13 @@ pub async fn ownership_store_lifecycle<O: OwnershipStore + ?Sized>(store: &O) {
         "service",
         "svc-1",
         "owns",
-        warden.clone(),
+        yubaba.clone(),
         Some(alice.clone()),
     )
     .expect("validate new1");
     let row1 = store.insert(&new1, 100).await.expect("insert 1");
     assert_eq!(row1.principal_id, camp_a);
-    assert_eq!(row1.granted_by, warden);
+    assert_eq!(row1.granted_by, yubaba);
     assert_eq!(row1.on_behalf_of, Some(alice.clone()));
     assert_eq!(row1.granted_at, 100);
     assert!(row1.revoked_at.is_none());
@@ -312,7 +312,7 @@ pub async fn ownership_store_lifecycle<O: OwnershipStore + ?Sized>(store: &O) {
                 "arch_doc",
                 "doc-1",
                 "owns",
-                warden.clone(),
+                yubaba.clone(),
                 Some(alice.clone()),
             )
             .unwrap(),
@@ -327,7 +327,7 @@ pub async fn ownership_store_lifecycle<O: OwnershipStore + ?Sized>(store: &O) {
                 "service",
                 "svc-2",
                 "owns",
-                warden.clone(),
+                yubaba.clone(),
                 Some(bob.clone()),
             )
             .unwrap(),
@@ -395,7 +395,7 @@ pub async fn ownership_store_check_constraints_reject_bad_rows<O: OwnershipStore
     use cheers_core::PrincipalKind;
     use cheers_server::ownership::OwnershipValidationError;
 
-    let warden = PrincipalId::service("warden");
+    let yubaba = PrincipalId::service("yubaba");
     let alice = PrincipalId::user("alice");
 
     let err = NewOwnership::new(
@@ -417,8 +417,8 @@ pub async fn ownership_store_check_constraints_reject_bad_rows<O: OwnershipStore
         "service",
         "s",
         "owns",
-        warden.clone(),
-        Some(warden.clone()),
+        yubaba.clone(),
+        Some(yubaba.clone()),
     )
     .unwrap_err();
     assert_eq!(
@@ -434,7 +434,7 @@ pub async fn ownership_store_check_constraints_reject_bad_rows<O: OwnershipStore
                 "service",
                 "s-1",
                 "owns",
-                warden,
+                yubaba,
                 Some(alice),
             )
             .unwrap(),
@@ -461,14 +461,14 @@ fn fixture_signing_key(
 }
 
 pub async fn service_principal_lifecycle<S: ServicePrincipalStore + ?Sized>(store: &S) {
-    let warden = PrincipalId::service("warden-1");
+    let yubaba = PrincipalId::service("yubaba-1");
 
     // Unknown principal lookup is None, not an error.
-    assert!(store.get_principal(&warden).await.unwrap().is_none());
+    assert!(store.get_principal(&yubaba).await.unwrap().is_none());
 
     // Insert a fresh principal — service kind, bound_to=None per Principal::try_new.
     let principal =
-        Principal::try_new(warden.clone(), None, PrincipalStatus::Active, 1_000).unwrap();
+        Principal::try_new(yubaba.clone(), None, PrincipalStatus::Active, 1_000).unwrap();
     store.insert_principal(&principal).await.expect("insert");
 
     // Re-insert with the same id => Conflict.
@@ -478,16 +478,16 @@ pub async fn service_principal_lifecycle<S: ServicePrincipalStore + ?Sized>(stor
     }
 
     // Round-trip through get.
-    let back = store.get_principal(&warden).await.unwrap().unwrap();
+    let back = store.get_principal(&yubaba).await.unwrap().unwrap();
     assert_eq!(back, principal);
 
     // Empty key set for a freshly-provisioned principal.
-    assert!(store.list_signing_keys(&warden).await.unwrap().is_empty());
+    assert!(store.list_signing_keys(&yubaba).await.unwrap().is_empty());
 
     // Insert the active key.
     let k1 = fixture_signing_key(
         "kid-1",
-        &warden,
+        &yubaba,
         1,
         SigningKeyStatus::Active,
         1_000,
@@ -502,7 +502,7 @@ pub async fn service_principal_lifecycle<S: ServicePrincipalStore + ?Sized>(stor
     }
 
     // list_signing_keys returns the one key.
-    let listed = store.list_signing_keys(&warden).await.unwrap();
+    let listed = store.list_signing_keys(&yubaba).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0], k1);
 
@@ -522,7 +522,7 @@ pub async fn service_principal_lifecycle<S: ServicePrincipalStore + ?Sized>(stor
         .retire_signing_key(&k1.kid, 5_000)
         .await
         .expect("retire");
-    let listed = store.list_signing_keys(&warden).await.unwrap();
+    let listed = store.list_signing_keys(&yubaba).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].status, SigningKeyStatus::Retiring);
     assert_eq!(listed[0].retire_at, Some(5_000));
@@ -532,13 +532,13 @@ pub async fn service_principal_lifecycle<S: ServicePrincipalStore + ?Sized>(stor
         .retire_signing_key(&k1.kid, 6_000)
         .await
         .expect("re-retire");
-    let listed = store.list_signing_keys(&warden).await.unwrap();
+    let listed = store.list_signing_keys(&yubaba).await.unwrap();
     assert_eq!(listed[0].retire_at, Some(6_000));
 
     // Add a fresh active key (rotation).
     let k2 = fixture_signing_key(
         "kid-2",
-        &warden,
+        &yubaba,
         2,
         SigningKeyStatus::Active,
         7_000,
@@ -547,7 +547,7 @@ pub async fn service_principal_lifecycle<S: ServicePrincipalStore + ?Sized>(stor
     store.insert_signing_key(&k2).await.expect("insert k2");
 
     // Both keys present.
-    let mut listed = store.list_signing_keys(&warden).await.unwrap();
+    let mut listed = store.list_signing_keys(&yubaba).await.unwrap();
     listed.sort_by(|a, b| a.kid.cmp(&b.kid));
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].kid, "kid-1");
@@ -556,12 +556,12 @@ pub async fn service_principal_lifecycle<S: ServicePrincipalStore + ?Sized>(stor
     // Prune before retire_at — k1 stays.
     let dropped = store.prune_retired_keys(5_999).await.unwrap();
     assert_eq!(dropped, 0);
-    assert_eq!(store.list_signing_keys(&warden).await.unwrap().len(), 2);
+    assert_eq!(store.list_signing_keys(&yubaba).await.unwrap().len(), 2);
 
     // Prune at retire_at — k1 drops, k2 stays.
     let dropped = store.prune_retired_keys(6_000).await.unwrap();
     assert_eq!(dropped, 1);
-    let listed = store.list_signing_keys(&warden).await.unwrap();
+    let listed = store.list_signing_keys(&yubaba).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].kid, "kid-2");
 
@@ -614,7 +614,7 @@ fn fixture_audit(at: i64, sub: PrincipalId, method: &str, request_id: &str) -> A
         sub,
         None,
         Some("camp-a".into()),
-        "https://constable.example",
+        "https://kamaji.example",
         method,
         vec![Scope::CloudDeploy, Scope::CloudRead],
         "allow",
@@ -627,7 +627,7 @@ pub async fn audit_store_batch_insert_round_trip<A: AuditStore + ?Sized>(store: 
     use cheers_core::{Actor, PrincipalId, Scope};
 
     let alice = PrincipalId::user("alice");
-    let warden = PrincipalId::service("warden");
+    let yubaba = PrincipalId::service("yubaba");
 
     // Empty batch is a no-op (matches the trait contract).
     let zero = store.insert_batch(&[], 9_000).await.unwrap();
@@ -664,7 +664,7 @@ pub async fn audit_store_batch_insert_round_trip<A: AuditStore + ?Sized>(store: 
     )
     .unwrap();
     // Also exercise a service-principal-sub row to confirm sub vocabulary.
-    let svc_call = fixture_audit(1_700_002_000, warden.clone(), "POST /ownership", "rid-svc");
+    let svc_call = fixture_audit(1_700_002_000, yubaba.clone(), "POST /ownership", "rid-svc");
     let rows = store
         .insert_batch(&[with_act.clone(), svc_call.clone()], 1_800_000_500)
         .await
@@ -673,7 +673,7 @@ pub async fn audit_store_batch_insert_round_trip<A: AuditStore + ?Sized>(store: 
     assert_eq!(rows[0].record.act.as_ref().map(|a| &a.sub), Some(&agent));
     assert_eq!(rows[0].record.camp_id, None);
     assert_eq!(rows[0].record.scope, Vec::<Scope>::new());
-    assert_eq!(rows[1].record.sub, warden);
+    assert_eq!(rows[1].record.sub, yubaba);
     assert_eq!(rows[1].record.method, "POST /ownership");
 }
 

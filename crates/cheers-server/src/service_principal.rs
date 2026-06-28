@@ -8,7 +8,7 @@
 //!    intended grants. Cheers allocates the [`Principal`] record, generates a
 //!    fresh Ed25519 keypair, persists the public half (kid'd, status=active),
 //!    and returns the **secret half exactly once** in the `ProvisionedKey`.
-//! 2. The consumer (warden) stores the secret in its config dir (mode 0600)
+//! 2. The consumer (yubaba) stores the secret in its config dir (mode 0600)
 //!    and mints its own short-lived MCP tokens from that keypair. Cheers
 //!    verifies those tokens via the JWKS endpoint (R020-F11) that publishes
 //!    the principal's public key alongside cheers's own signing keys.
@@ -20,7 +20,7 @@
 //!    drops it.
 //!
 //! The crate-direction invariant from R019 still holds: this module is
-//! origin-only (it generates secret keys). The verify-side (constable, CF
+//! origin-only (it generates secret keys). The verify-side (kamaji, CF
 //! Worker) never depends on `cheers-server` and never sees a
 //! [`PasetoV4SecretMinter`] — it links `cheers-verify` and consumes the public
 //! halves via JWKS.
@@ -67,7 +67,7 @@ pub enum SigningKeyStatus {
 #[non_exhaustive]
 pub struct SigningKey {
     /// Stable opaque identifier — the JWKS rotation handle. Unique across
-    /// the JWKS (not just within one principal); constable matches against
+    /// the JWKS (not just within one principal); kamaji matches against
     /// `kid` and falls back to a rate-limited refresh on unknown values.
     pub kid: String,
     /// Service principal this key signs for. `kind` is always
@@ -159,7 +159,7 @@ impl NewServicePrincipal {
 /// hands out a secret half.
 ///
 /// `secret_key` is the 64-byte PASETO V4 `seed || public` layout. The caller
-/// (warden install flow) writes it to its config dir (mode 0600). Cheers
+/// (yubaba install flow) writes it to its config dir (mode 0600). Cheers
 /// retains nothing of it: the matching pubkey lives in [`SigningKey`] and a
 /// lost secret is unrecoverable — the recovery path is to rotate and accept
 /// a new keypair.
@@ -624,21 +624,21 @@ mod tests {
         let authority = rig();
         block_on(async {
             let provisioned = authority
-                .provision(NewServicePrincipal::new("warden-1"), 1_000)
+                .provision(NewServicePrincipal::new("yubaba-1"), 1_000)
                 .await
                 .unwrap();
 
             // Principal record carries the right shape.
             assert_eq!(
                 provisioned.principal.id,
-                PrincipalId::service("warden-1")
+                PrincipalId::service("yubaba-1")
             );
             assert_eq!(provisioned.principal.bound_to, None);
             assert_eq!(provisioned.principal.status, PrincipalStatus::Active);
             assert_eq!(provisioned.principal.created_at, 1_000);
 
             // Signing key is fresh + active, with a non-empty kid.
-            assert_eq!(provisioned.signing_key.principal_id, PrincipalId::service("warden-1"));
+            assert_eq!(provisioned.signing_key.principal_id, PrincipalId::service("yubaba-1"));
             assert_eq!(provisioned.signing_key.status, SigningKeyStatus::Active);
             assert!(provisioned.signing_key.retire_at.is_none());
             assert_eq!(provisioned.signing_key.created_at, 1_000);
@@ -666,11 +666,11 @@ mod tests {
         let authority = rig();
         block_on(async {
             let provisioned = authority
-                .provision(NewServicePrincipal::new("warden-2"), 1_000)
+                .provision(NewServicePrincipal::new("yubaba-2"), 1_000)
                 .await
                 .unwrap();
 
-            // Reconstruct the minter off-cheers, like warden would.
+            // Reconstruct the minter off-cheers, like yubaba would.
             let off_cheers_minter =
                 PasetoV4SecretMinter::from_secret_key(&provisioned.secret_key).unwrap();
 
@@ -684,14 +684,14 @@ mod tests {
             owns.service = vec!["svc-prod".into()];
             let claims = McpClaims::new(
                 "https://cheers.example",
-                "https://constable.example",
-                PrincipalId::service("warden-2"),
+                "https://kamaji.example",
+                PrincipalId::service("yubaba-2"),
                 1_000,
                 1_600,
                 "jti-rt",
                 vec![Scope::OwnershipWrite],
             )
-            .with_act(Actor::new(PrincipalId::service("warden-2")))
+            .with_act(Actor::new(PrincipalId::service("yubaba-2")))
             .with_owns(owns)
             .with_auth_strength(AuthStrength::Bootstrap);
 
@@ -729,7 +729,7 @@ mod tests {
         let authority = rig();
         block_on(async {
             let first = authority
-                .provision(NewServicePrincipal::new("warden-r"), 1_000)
+                .provision(NewServicePrincipal::new("yubaba-r"), 1_000)
                 .await
                 .unwrap();
             let id = first.principal.id.clone();
@@ -763,7 +763,7 @@ mod tests {
         let authority = rig().with_policy(OverlapPolicy::new(60 * 60)); // 1h
         block_on(async {
             let first = authority
-                .provision(NewServicePrincipal::new("warden-c"), 1_000)
+                .provision(NewServicePrincipal::new("yubaba-c"), 1_000)
                 .await
                 .unwrap();
             authority.rotate(&first.principal.id, 2_000).await.unwrap();
@@ -819,7 +819,7 @@ mod tests {
         let authority = rig().with_policy(OverlapPolicy::new(100));
         block_on(async {
             let first = authority
-                .provision(NewServicePrincipal::new("warden-p"), 1_000)
+                .provision(NewServicePrincipal::new("yubaba-p"), 1_000)
                 .await
                 .unwrap();
             // Rotate at t=2000; old key retire_at=2100, new key active.
@@ -846,7 +846,7 @@ mod tests {
         let authority = rig().with_policy(OverlapPolicy::new(100));
         block_on(async {
             let first = authority
-                .provision(NewServicePrincipal::new("warden-x"), 1_000)
+                .provision(NewServicePrincipal::new("yubaba-x"), 1_000)
                 .await
                 .unwrap();
             authority.rotate(&first.principal.id, 2_000).await.unwrap();
@@ -910,7 +910,7 @@ mod tests {
     fn signing_key_roundtrips_through_json_with_base64_pubkey() {
         let key = SigningKey {
             kid: "kid-abc".into(),
-            principal_id: PrincipalId::service("warden"),
+            principal_id: PrincipalId::service("yubaba"),
             public_key: [1u8; 32],
             status: SigningKeyStatus::Active,
             created_at: 100,

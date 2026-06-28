@@ -1,8 +1,8 @@
-//! `POST /audit/ingest` — accept a batch of audit records from constable
+//! `POST /audit/ingest` — accept a batch of audit records from kamaji
 //! and durably append them to cheers's centralized audit table.
 //!
 //! The producer contract is in `.yah/docs/working/mcp-auth-and-ownership.md`
-//! §Audit ingest: constable retains a local JSONL as the source of truth
+//! §Audit ingest: kamaji retains a local JSONL as the source of truth
 //! and forwards batches here with bounded backoff. Cheers's responsibility
 //! ends at "accepted and durable on cheers's side" — a 2xx means the batch
 //! is committed; a 4xx means the records are malformed (do not retry as-is);
@@ -102,7 +102,7 @@ where
     let claims = authenticate_mcp(&headers, &state.mcp.verifier, now)?;
     claims.require_scope(Scope::AuditWrite)?;
     // Validate the whole batch first — atomic semantics mean we don't
-    // start writing until every record passes. Constable retries the
+    // start writing until every record passes. Kamaji retries the
     // corrected batch on 4xx; a partial commit would defeat that.
     for rec in &records {
         rec.validate()?;

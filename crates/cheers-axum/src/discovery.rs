@@ -21,12 +21,12 @@
 //!   carry cheers's principal-kind vocabulary, not OIDC's pseudonymity
 //!   variants (`public` / `pairwise`) — consistent with the spec doc.
 //!
-//! ## yah constable coordination
+//! ## yah kamaji coordination
 //!
-//! yah's constable serves its own
-//! `${constable}/.well-known/oauth-protected-resource` that points back at
+//! yah's kamaji serves its own
+//! `${kamaji}/.well-known/oauth-protected-resource` that points back at
 //! cheers's issuer — that's the discovery hop MCP clients follow to reach
-//! cheers. The constable does not rewrite this document; it just references
+//! cheers. The kamaji does not rewrite this document; it just references
 //! cheers's `issuer` field.
 //!
 //! ## Wiring
