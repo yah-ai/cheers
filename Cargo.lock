@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "cheers"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-axum"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "async-trait",
  "axum",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-core"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-redis"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "async-trait",
  "cheers-core",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-server"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-sqlx"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-store"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "age",
  "async-trait",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-test-identity"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "axum",
  "cheers",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-test-support"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "async-trait",
  "cheers-core",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-verify"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "async-trait",
  "cheers-core",
@@ -9613,7 +9613,7 @@ dependencies = [
 
 [[package]]
 name = "xlb-net"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "anyhow",
  "bytes",

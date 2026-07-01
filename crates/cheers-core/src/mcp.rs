@@ -42,6 +42,11 @@ pub enum Scope {
     CloudRead,
     CloudDeploy,
     CloudDestroy,
+    /// Fleet-operator admin — sees every machine/workload in the cloud
+    /// snapshot (the yah-cloud-admin dashboard's gate; R568-F5). Distinct
+    /// from `CloudRead` (which is the tenant-facing read scope, filtered by
+    /// principal ownership).
+    CloudAdmin,
     PartyRead,
     PartyWrite,
     SubagentSpawn,
@@ -66,6 +71,7 @@ impl Scope {
             Self::CloudRead => "cloud:read",
             Self::CloudDeploy => "cloud:deploy",
             Self::CloudDestroy => "cloud:destroy",
+            Self::CloudAdmin => "cloud:admin",
             Self::PartyRead => "party:read",
             Self::PartyWrite => "party:write",
             Self::SubagentSpawn => "subagent:spawn",
@@ -102,6 +108,7 @@ impl Scope {
         Self::CloudRead,
         Self::CloudDeploy,
         Self::CloudDestroy,
+        Self::CloudAdmin,
         Self::PartyRead,
         Self::PartyWrite,
         Self::SubagentSpawn,
@@ -147,6 +154,7 @@ impl std::str::FromStr for Scope {
             "cloud:read" => Self::CloudRead,
             "cloud:deploy" => Self::CloudDeploy,
             "cloud:destroy" => Self::CloudDestroy,
+            "cloud:admin" => Self::CloudAdmin,
             "party:read" => Self::PartyRead,
             "party:write" => Self::PartyWrite,
             "subagent:spawn" => Self::SubagentSpawn,
@@ -355,6 +363,7 @@ mod tests {
             Scope::CloudRead,
             Scope::CloudDeploy,
             Scope::CloudDestroy,
+            Scope::CloudAdmin,
             Scope::PartyRead,
             Scope::PartyWrite,
             Scope::SubagentSpawn,
@@ -387,6 +396,7 @@ mod tests {
                 Scope::CloudRead => Scope::ALL.contains(&Scope::CloudRead),
                 Scope::CloudDeploy => Scope::ALL.contains(&Scope::CloudDeploy),
                 Scope::CloudDestroy => Scope::ALL.contains(&Scope::CloudDestroy),
+                Scope::CloudAdmin => Scope::ALL.contains(&Scope::CloudAdmin),
                 Scope::PartyRead => Scope::ALL.contains(&Scope::PartyRead),
                 Scope::PartyWrite => Scope::ALL.contains(&Scope::PartyWrite),
                 Scope::SubagentSpawn => Scope::ALL.contains(&Scope::SubagentSpawn),
