@@ -13,13 +13,13 @@ name = "cheers_test_support"
 path = "src/lib.rs"
 
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.16" }
-cheers-server = { path = "../cheers-server", version = "0.8.16" }
-cheers-verify = { path = "../cheers-verify", version = "0.8.16" }
+cheers-core = { path = "../cheers-core", version = "0.8.17" }
+cheers-server = { path = "../cheers-server", version = "0.8.17" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.17" }
 
 async-trait = "0.1"
 turso = { workspace = true }
 
 [dev-dependencies]
-cheers-server = { path = "../cheers-server", version = "0.8.16" }
+cheers-server = { path = "../cheers-server", version = "0.8.17" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
