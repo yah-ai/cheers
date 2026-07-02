@@ -231,8 +231,14 @@ impl Actor {
 /// membership locally with no per-call cheers round-trip.
 ///
 /// Open-ended: explicit fields for the resource kinds cheers currently writes
-/// (`service`, `arch_doc`) plus a `flatten`ed catch-all for future kinds so
-/// adding one doesn't break the wire contract.
+/// (`service`, `arch_doc`, `node`) plus a `flatten`ed catch-all for future
+/// kinds so adding one doesn't break the wire contract.
+///
+/// `node` (W268 §The binding: enrollment is an ownership row) is the
+/// machine-identity resource kind: a row `principal owns node:<NodeId>`
+/// records that a fleet machine (or paired end-user device) is enrolled to
+/// `principal`. `resource_id` is the mshr `NodeId` in the same hex encoding
+/// yubaba's `/identity` route serves.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Owns {
@@ -240,6 +246,9 @@ pub struct Owns {
     pub service: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arch_doc: Vec<String>,
+    /// NodeIds (hex-encoded mshr identity) enrolled to this principal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node: Vec<String>,
     /// Forward-compatibility spill for resource kinds added after this lands.
     #[serde(flatten)]
     pub extra: std::collections::BTreeMap<String, Vec<String>>,
@@ -247,7 +256,10 @@ pub struct Owns {
 
 impl Owns {
     pub fn is_empty(&self) -> bool {
-        self.service.is_empty() && self.arch_doc.is_empty() && self.extra.is_empty()
+        self.service.is_empty()
+            && self.arch_doc.is_empty()
+            && self.node.is_empty()
+            && self.extra.is_empty()
     }
 }
 
@@ -531,6 +543,7 @@ mod tests {
         let o = Owns {
             service: vec!["svc-a".into()],
             arch_doc: vec![],
+            node: vec![],
             extra: Default::default(),
         };
         let json = serde_json::to_string(&o).unwrap();
@@ -566,6 +579,7 @@ mod tests {
         .with_owns(Owns {
             service: vec!["svc-a".into()],
             arch_doc: vec!["doc-1".into()],
+            node: vec![],
             extra: Default::default(),
         })
         .with_auth_strength(AuthStrength::UserFresh)

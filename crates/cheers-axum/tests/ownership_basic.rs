@@ -358,3 +358,83 @@ async fn delete_without_ownership_write_returns_403_before_any_store_call() {
         "DELETE on auth failure must not mark the row revoked"
     );
 }
+
+#[tokio::test]
+async fn duplicate_post_returns_existing_live_row_not_a_second_insert() {
+    // Idempotent create: ownership rows are set-membership. A second POST
+    // with the same (principal, kind, id, relationship) — cloud-init re-runs
+    // and daemon restarts re-POST by design — must return the EXISTING live
+    // row (200), not stack a duplicate (201). Otherwise revoking "the" row
+    // leaves older live duplicates keeping the grant alive.
+    let (app, minter, store) = rig();
+    let now = now();
+    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-dup");
+
+    let body = serde_json::json!({
+        "principal_id": "svc:yubaba",
+        "resource_kind": "node",
+        "resource_id": "aa11bb22",
+        "relationship": "owns",
+    });
+    let post = |b: String, tok: String| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/ownership")
+            .header(header::AUTHORIZATION, auth(&tok))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(b))
+            .unwrap()
+    };
+
+    // First POST inserts — 201.
+    let resp = app
+        .clone()
+        .oneshot(post(body.to_string(), token.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let first: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    let first_id = first["id"].as_str().unwrap().to_owned();
+
+    // Identical second POST — 200 with the SAME row, no second insert.
+    let resp = app
+        .clone()
+        .oneshot(post(body.to_string(), token.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "identical live row → 200, not 201");
+    let second: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    assert_eq!(second["id"].as_str().unwrap(), first_id);
+    assert_eq!(store.insert_call_count(), 1, "no duplicate insert reached the store");
+
+    // Exactly one live row for the principal.
+    let live = store
+        .list_for_principal(&PrincipalId::service("yubaba"))
+        .await
+        .unwrap();
+    assert_eq!(live.len(), 1, "duplicate POST must not stack rows: {live:?}");
+
+    // After revoking that row, an identical POST inserts a FRESH row (201):
+    // revoked rows do not satisfy the idempotency match — re-enrollment
+    // after eviction is a new membership, not a resurrection.
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/ownership/{first_id}"))
+        .header(header::AUTHORIZATION, auth(&token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(post(body.to_string(), token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "post-revoke re-POST is a fresh insert");
+    let third: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    assert_ne!(third["id"].as_str().unwrap(), first_id);
+}

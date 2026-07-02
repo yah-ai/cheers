@@ -58,13 +58,13 @@ use hmac::{Hmac, Mac};
 use pasetors::claims::{Claims as PasetoClaims, ClaimsValidationRules};
 use pasetors::keys::{AsymmetricPublicKey, AsymmetricSecretKey, SymmetricKey};
 use pasetors::token::UntrustedToken;
-use pasetors::version4::V4;
+use pasetors::version4::{PublicToken, V4};
 use pasetors::{local, public};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use cheers_core::{Claims, CodecError, McpClaims, TokenMinter, TokenVerifier};
-use cheers_verify::{codec_err, PasetoV4PublicVerifier, MCP_CLAIM_KEY};
+use cheers_verify::{codec_err, PasetoV4PublicVerifier};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -187,21 +187,39 @@ impl PasetoV4SecretMinter {
 
     /// Sign an MCP-call token carrying [`McpClaims`].
     ///
-    /// Sibling to the session-token [`TokenMinter::mint`] path: same PASETO
-    /// v4.public sign code, but stores the payload under the [`MCP_CLAIM_KEY`]
-    /// (`"mcp"`) additional claim instead of `"cheers"`. The matching
-    /// [`PasetoV4PublicVerifier::verify_mcp_at`] reads under the same key.
+    /// **Wire convention** (R592-B7) — the same envelope kamaji-bin's
+    /// verifier, `cheers-mock`, and yubaba's `mint_ownership_write_token`
+    /// already agree on (pinned byte-for-byte in
+    /// `cheers_test_support::fixtures`): `claims` serializes directly as the
+    /// token's FLAT top-level JSON payload — no wrapping claim key, `exp`/
+    /// `iat` stay i64 Unix seconds — signed via pasetors' LOW-LEVEL
+    /// [`PublicToken::sign`], never the high-level `Claims` wrapper (which
+    /// hard-rejects non-string registered claims). `kid` rides in the PASETO
+    /// footer as `{"kid":"<kid>"}`; the matching
+    /// [`PasetoV4PublicVerifier::verify_mcp_at`] requires it.
     ///
     /// The caller owns `iat`/`exp` (mirrors the session-claim path) — TTL
-    /// policy for MCP tokens belongs upstream of this primitive.
-    pub fn mint_mcp(&self, claims: &McpClaims) -> Result<String, CodecError> {
-        let mut p = PasetoClaims::new_expires_in(&core::time::Duration::ZERO)
-            .map_err(|e| CodecError::Crypto(format!("{e:?}")))?;
-        p.non_expiring();
-        let mcp_value = serde_json::to_value(claims)?;
-        p.add_additional(MCP_CLAIM_KEY, mcp_value)
-            .map_err(|e| CodecError::Crypto(format!("{e:?}")))?;
-        public::sign(&self.secret, &p, None, None).map_err(codec_err)
+    /// policy for MCP tokens belongs upstream of this primitive. `kid`
+    /// identifies which published key this mint used — same string a
+    /// verifier's JWKS/footer lookup keys off of.
+    ///
+    /// Serializes via `serde_json::Value` rather than serializing `claims`
+    /// directly: every reference wire producer (yubaba's
+    /// `mint_ownership_write_token`, cheers-mock's `MockIssuer::mint`,
+    /// `cheers_test_support::fixtures::sign_fixture`) builds its payload as a
+    /// `Value`/`json!{}` map, whose default (non-`preserve_order`)
+    /// `BTreeMap`-backed key order is alphabetical — NOT the struct's
+    /// field-declaration order `#[derive(Serialize)]` would emit. Routing
+    /// through `Value` here reproduces that same alphabetical byte layout,
+    /// which is what makes `mint_mcp`'s output byte-identical to the golden
+    /// fixtures (verified in `cheers-server/tests/golden_fixtures.rs`).
+    /// Deserialization is unaffected either way (JSON objects key-match by
+    /// name), but the mint side has to match on the wire.
+    pub fn mint_mcp(&self, claims: &McpClaims, kid: &str) -> Result<String, CodecError> {
+        let value = serde_json::to_value(claims)?;
+        let payload = serde_json::to_vec(&value)?;
+        let footer = format!(r#"{{"kid":"{kid}"}}"#).into_bytes();
+        PublicToken::sign(&self.secret, &payload, Some(&footer), None).map_err(codec_err)
     }
 }
 
@@ -454,15 +472,21 @@ mod tests {
         assert_eq!(rebuilt.verify_at(&tok, 5_000).unwrap(), c);
     }
 
-    // ---- PasetoV4 v4.public — McpClaims mint/verify ------------------------
+    // ---- PasetoV4 v4.public — McpClaims mint/verify (wire convention) ------
     //
-    // The same sign/verify code path as the session-claim variant above; the
-    // distinction lives in the additional-claim key. Cross-shape mix-ups
-    // therefore surface as Malformed, not as a partial deserialize.
+    // R592-B7: mint_mcp/verify_mcp_at now speak the SAME envelope as
+    // kamaji-bin's verifier / cheers-mock / yubaba's minter — flat top-level
+    // JSON, i64 exp/iat, kid in the footer, low-level PublicToken sign/verify.
+    // A cross-shape token (session vs MCP) is no longer distinguished by an
+    // additional-claim key; it's distinguished by footer presence (session
+    // tokens never stamp one) and by claims deserialization (each shape's
+    // required fields differ).
 
     use cheers_core::{
         Actor, AuthStrength, McpClaims, Owns, PrincipalId, Scope,
     };
+
+    const TEST_KID: &str = "codec-test-kid-1";
 
     fn sample_mcp_claims(exp: i64) -> McpClaims {
         // Owns is #[non_exhaustive] in cheers-core, so build via Default +
@@ -490,9 +514,9 @@ mod tests {
     fn paseto_v4_public_mcp_roundtrip() {
         let (minter, verifier) = v4_public_pair();
         let c = sample_mcp_claims(10_000);
-        let tok = minter.mint_mcp(&c).unwrap();
+        let tok = minter.mint_mcp(&c, TEST_KID).unwrap();
         assert!(tok.starts_with("v4.public."));
-        let back = verifier.verify_mcp_at(&tok, 5_000).unwrap();
+        let back = verifier.verify_mcp_at(&tok, 5_000, TEST_KID).unwrap();
         assert_eq!(back, c);
     }
 
@@ -500,8 +524,8 @@ mod tests {
     fn paseto_v4_public_mcp_rejects_expired() {
         let (minter, verifier) = v4_public_pair();
         let c = sample_mcp_claims(100);
-        let tok = minter.mint_mcp(&c).unwrap();
-        let err = verifier.verify_mcp_at(&tok, 200).unwrap_err();
+        let tok = minter.mint_mcp(&c, TEST_KID).unwrap();
+        let err = verifier.verify_mcp_at(&tok, 200, TEST_KID).unwrap_err();
         assert!(matches!(err, CodecError::Expired));
     }
 
@@ -509,29 +533,50 @@ mod tests {
     fn paseto_v4_public_mcp_rejects_wrong_key() {
         let (minter, _) = v4_public_pair();
         let (_, other_verifier) = v4_public_pair();
-        let tok = minter.mint_mcp(&sample_mcp_claims(10_000)).unwrap();
-        let err = other_verifier.verify_mcp_at(&tok, 5_000).unwrap_err();
+        let tok = minter.mint_mcp(&sample_mcp_claims(10_000), TEST_KID).unwrap();
+        let err = other_verifier.verify_mcp_at(&tok, 5_000, TEST_KID).unwrap_err();
         assert!(matches!(err, CodecError::SignatureMismatch));
     }
 
     #[test]
-    fn mcp_token_not_verifiable_under_session_verify_at() {
-        // An MCP-shape token has no "cheers" claim — verifying it as a session
-        // token must surface Malformed, not a partial deserialize against
-        // Claims. The key separation is what makes this structural.
+    fn paseto_v4_public_mcp_rejects_unknown_kid() {
+        // Same key, but the verifier only trusts TEST_KID — a token minted
+        // under a different kid string is rejected before signature check.
         let (minter, verifier) = v4_public_pair();
-        let tok = minter.mint_mcp(&sample_mcp_claims(10_000)).unwrap();
+        let tok = minter
+            .mint_mcp(&sample_mcp_claims(10_000), "some-other-kid")
+            .unwrap();
+        let err = verifier.verify_mcp_at(&tok, 5_000, TEST_KID).unwrap_err();
+        assert!(
+            matches!(err, CodecError::UnknownKid(ref k) if k == "some-other-kid"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_token_not_verifiable_under_session_verify_at() {
+        // An MCP token is flat top-level JSON with i64 exp/iat — verify_at's
+        // high-level pasetors::public::verify parses the payload through
+        // Claims::from_string, which hard-rejects a numeric registered claim.
+        // The two shapes can't be confused even though both are valid
+        // v4.public signatures from the same key.
+        let (minter, verifier) = v4_public_pair();
+        let tok = minter.mint_mcp(&sample_mcp_claims(10_000), TEST_KID).unwrap();
         let err = verifier.verify_at(&tok, 5_000).unwrap_err();
-        assert!(matches!(err, CodecError::Malformed), "got {err:?}");
+        assert!(
+            matches!(err, CodecError::Crypto(ref msg) if msg.contains("InvalidClaim")),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn session_token_not_verifiable_under_mcp_verify_at() {
-        // The inverse: a session token has no "mcp" claim.
+        // The inverse: a session token never stamps a footer at all, so
+        // verify_mcp_at's kid-in-footer requirement rejects it up front.
         let (minter, verifier) = v4_public_pair();
         let tok = minter.mint(&sample_claims(10_000)).unwrap();
-        let err = verifier.verify_mcp_at(&tok, 5_000).unwrap_err();
-        assert!(matches!(err, CodecError::Malformed), "got {err:?}");
+        let err = verifier.verify_mcp_at(&tok, 5_000, TEST_KID).unwrap_err();
+        assert!(matches!(err, CodecError::MissingKid), "got {err:?}");
     }
 
     #[test]
@@ -541,7 +586,7 @@ mod tests {
         let (minter, _) = v4_public_pair();
         let derived = minter.verifier().unwrap();
         let c = sample_mcp_claims(10_000);
-        let tok = minter.mint_mcp(&c).unwrap();
-        assert_eq!(derived.verify_mcp_at(&tok, 5_000).unwrap(), c);
+        let tok = minter.mint_mcp(&c, TEST_KID).unwrap();
+        assert_eq!(derived.verify_mcp_at(&tok, 5_000, TEST_KID).unwrap(), c);
     }
 }

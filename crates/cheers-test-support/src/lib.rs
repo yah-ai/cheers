@@ -172,6 +172,7 @@ fn row_to_record(row: &turso::Row) -> Result<RefreshTokenRecord, StoreError> {
 
 // ── re-exports: complete in-memory test stack ────────────────────────────────
 
+pub mod fixtures;
 pub mod mem;
 
 // ── integration tests ────────────────────────────────────────────────────────

@@ -157,6 +157,10 @@ pub struct McpAuthority<B, G, O> {
     grants: G,
     ownership: O,
     iss: String,
+    /// `kid` stamped into every minted token's PASETO footer (R592-B7 wire
+    /// convention) — identifies which published key `minter` signs with, so
+    /// an edge verifier's JWKS/footer lookup can find the matching pubkey.
+    kid: String,
     policy: McpPolicy,
 }
 
@@ -167,12 +171,17 @@ where
     O: OwnershipStore,
 {
     /// Assemble an authority with the [default policy](McpPolicy::default).
+    ///
+    /// `kid` is the footer identifier published alongside `minter`'s public
+    /// key (e.g. in cheers's JWKS) — every token this authority mints carries
+    /// it so a verifier can select the right key.
     pub fn new(
         minter: PasetoV4SecretMinter,
         bundles: B,
         grants: G,
         ownership: O,
         iss: impl Into<String>,
+        kid: impl Into<String>,
     ) -> Self {
         Self {
             minter,
@@ -180,6 +189,7 @@ where
             grants,
             ownership,
             iss: iss.into(),
+            kid: kid.into(),
             policy: McpPolicy::default(),
         }
     }
@@ -277,7 +287,7 @@ where
             claims = claims.with_owns(owns);
         }
 
-        let token = self.minter.mint_mcp(&claims)?;
+        let token = self.minter.mint_mcp(&claims, &self.kid)?;
         Ok(MintedMcpToken { token, claims })
     }
 
@@ -352,7 +362,7 @@ where
             claims = claims.with_owns(owns);
         }
 
-        let token = self.minter.mint_mcp(&claims)?;
+        let token = self.minter.mint_mcp(&claims, &self.kid)?;
         Ok(MintedMcpToken { token, claims })
     }
 
@@ -478,7 +488,7 @@ where
             claims = claims.with_owns(owns);
         }
 
-        let token = self.minter.mint_mcp(&claims)?;
+        let token = self.minter.mint_mcp(&claims, &self.kid)?;
         Ok(MintedMcpToken { token, claims })
     }
 }
@@ -488,20 +498,31 @@ where
 /// check keeps the wire shape from leaking stale entries if the store
 /// contract evolves). Unknown resource kinds spill into
 /// [`Owns::extra`](cheers_core::Owns).
+///
+/// Duplicate `(kind, resource_id)` pairs collapse to one entry — ownership
+/// is set-membership, and while `POST /ownership` is idempotent for
+/// identical live rows, historical duplicates (or the residual
+/// concurrent-write race) may still exist in a store. The claim shape must
+/// not amplify them onto every minted token.
 fn rows_to_owns(rows: &[OwnershipRow]) -> Owns {
+    fn push_unique(list: &mut Vec<String>, id: &str) {
+        if !list.iter().any(|existing| existing == id) {
+            list.push(id.to_owned());
+        }
+    }
     let mut o = Owns::default();
     for r in rows {
         if r.is_revoked() {
             continue;
         }
         match r.resource_kind.as_str() {
-            "service" => o.service.push(r.resource_id.clone()),
-            "arch_doc" => o.arch_doc.push(r.resource_id.clone()),
-            other => o
-                .extra
-                .entry(other.to_owned())
-                .or_default()
-                .push(r.resource_id.clone()),
+            "service" => push_unique(&mut o.service, &r.resource_id),
+            "arch_doc" => push_unique(&mut o.arch_doc, &r.resource_id),
+            "node" => push_unique(&mut o.node, &r.resource_id),
+            other => push_unique(
+                o.extra.entry(other.to_owned()).or_default(),
+                &r.resource_id,
+            ),
         }
     }
     o
@@ -611,6 +632,10 @@ mod tests {
 
     // ---- assembly ----------------------------------------------------------
 
+    /// `kid` this test rig's authority stamps into every mint — tests that
+    /// verify a minted token must pass the same value to `verify_mcp_at`.
+    const RIG_KID: &str = "mcp-authority-test-kid-1";
+
     fn rig() -> (
         McpAuthority<MemoryBundleStore, MemoryGrantStore, MemOwnershipStore>,
         PasetoV4PublicVerifier,
@@ -619,7 +644,14 @@ mod tests {
         let bundles = MemoryBundleStore::with_defaults();
         let grants = MemoryGrantStore::new();
         let ownership = MemOwnershipStore::new();
-        let authority = McpAuthority::new(minter, bundles, grants, ownership, "https://cheers.example");
+        let authority = McpAuthority::new(
+            minter,
+            bundles,
+            grants,
+            ownership,
+            "https://cheers.example",
+            RIG_KID,
+        );
         (authority, verifier)
     }
 
@@ -671,7 +703,7 @@ mod tests {
                 1_000 + McpPolicy::DEFAULT_ACCESS_TTL_SECONDS
             );
             // Edge verifies the freshly minted token under the public key.
-            let back = verifier.verify_mcp_at(&minted.token, 1_100).unwrap();
+            let back = verifier.verify_mcp_at(&minted.token, 1_100, RIG_KID).unwrap();
             assert_eq!(back, minted.claims);
             assert_eq!(back.sub, user);
             assert_eq!(back.scope, vec![Scope::CloudDeploy, Scope::CloudRead]);
@@ -775,7 +807,7 @@ mod tests {
             assert_eq!(minted.claims.owns.arch_doc, vec!["doc-1".to_string()]);
 
             // Edge accepts it.
-            let back = verifier.verify_mcp_at(&minted.token, 1_100).unwrap();
+            let back = verifier.verify_mcp_at(&minted.token, 1_100, RIG_KID).unwrap();
             assert_eq!(back, minted.claims);
         });
     }
@@ -933,7 +965,7 @@ mod tests {
 
             // Edge verifies the freshly minted token under the public key —
             // no per-call cheers round trip.
-            let back = verifier.verify_mcp_at(&minted.token, 1_100).unwrap();
+            let back = verifier.verify_mcp_at(&minted.token, 1_100, RIG_KID).unwrap();
             assert_eq!(back, minted.claims);
             assert_eq!(back.scope, vec![Scope::CloudDeploy, Scope::CloudRead]);
         });
@@ -986,6 +1018,45 @@ mod tests {
             assert_eq!(minted.claims.owns.service, vec!["svc-a".to_string()]);
             assert_eq!(minted.claims.owns.arch_doc, vec!["doc-1".to_string()]);
         });
+    }
+
+    #[test]
+    fn rows_to_owns_dedups_duplicate_resource_ids() {
+        // Historical duplicate rows (pre-idempotent-create stores, or the
+        // residual concurrent-write race) must collapse to one entry per
+        // (kind, resource_id) — the owns claim is set-membership.
+        let camp = PrincipalId::camp("c-dup");
+        let svc = PrincipalId::service("yubaba");
+        let mk = |id: &str, kind: &str, rid: &str| {
+            OwnershipRow::new(
+                id.to_owned(),
+                camp.clone(),
+                kind.to_owned(),
+                rid.to_owned(),
+                "owns".to_owned(),
+                svc.clone(),
+                None,
+                500,
+                None,
+            )
+        };
+        let rows = vec![
+            mk("row-1", "service", "svc-a"),
+            mk("row-2", "service", "svc-a"), // duplicate
+            mk("row-3", "service", "svc-b"),
+            mk("row-4", "node", "aa11"),
+            mk("row-5", "node", "aa11"), // duplicate
+            mk("row-6", "pond", "p-1"),
+            mk("row-7", "pond", "p-1"), // duplicate in the extra spill
+        ];
+
+        let owns = rows_to_owns(&rows);
+        assert_eq!(owns.service, vec!["svc-a".to_string(), "svc-b".to_string()]);
+        assert_eq!(owns.node, vec!["aa11".to_string()]);
+        assert_eq!(
+            owns.extra.get("pond"),
+            Some(&vec!["p-1".to_string()])
+        );
     }
 
     #[test]
@@ -1239,7 +1310,7 @@ mod tests {
                 1_000 + McpPolicy::DEFAULT_ACCESS_TTL_SECONDS
             );
             // Edge verifies.
-            let back = verifier.verify_mcp_at(&minted.token, 1_100).unwrap();
+            let back = verifier.verify_mcp_at(&minted.token, 1_100, RIG_KID).unwrap();
             assert_eq!(back, minted.claims);
         });
     }

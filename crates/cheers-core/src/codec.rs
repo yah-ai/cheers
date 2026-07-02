@@ -118,6 +118,13 @@ pub enum CodecError {
     /// JSON (de)serialization of the claim payload failed.
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
+    /// The wire convention requires `kid` in the PASETO footer (R592-B7) —
+    /// this token has no footer at all.
+    #[error("missing kid: token has no footer")]
+    MissingKid,
+    /// The footer carries a `kid` the verifier doesn't recognize/trust.
+    #[error("unknown kid: {0}")]
+    UnknownKid(String),
 }
 
 /// Mint session tokens carrying [`Claims`].

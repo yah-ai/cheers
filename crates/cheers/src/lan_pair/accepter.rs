@@ -1,6 +1,6 @@
 //! LAN-pair accepter — the already-authed device side (phone / Mac).
 
-use xlb_net::{Endpoint, EndpointAddr, NodeId};
+use mshr::{Endpoint, EndpointAddr, NodeId};
 
 use crate::lan_pair::{
     AccepterMsg, ConfirmationStrategy, LanPairError, PairAccept, PairOffer, ALPN, MAX_FRAME,
@@ -11,7 +11,7 @@ use crate::lan_pair::{
 ///
 /// # Lifecycle
 ///
-/// 1. Build an [`xlb_net::Endpoint`] with [`ALPN`] in its ALPN list.
+/// 1. Build an [`mshr::Endpoint`] with [`ALPN`] in its ALPN list.
 /// 2. Discover the offerer's [`EndpointAddr`] (via mDNS or out-of-band).
 /// 3. Call [`pair`] with a [`ConfirmationStrategy`] that matches the desired
 ///    UX (auto-trust, six-digit code, display-code).
@@ -32,7 +32,7 @@ impl Accepter {
         Self { endpoint }
     }
 
-    /// This endpoint's xlb-net node identifier (Ed25519 public key).
+    /// This endpoint's mshr node identifier (Ed25519 public key).
     pub fn node_id(&self) -> NodeId {
         self.endpoint.node_id()
     }

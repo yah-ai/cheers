@@ -80,7 +80,7 @@ pub enum ProviderKey {
     OidcGeneric { issuer: String },
     /// Email-based identity (magic-link or password). `subject` is the email.
     Email,
-    /// LAN-pair identity. `subject` is the device's xlb-net node-id.
+    /// LAN-pair identity. `subject` is the device's mshr node-id.
     LanPair,
 }
 

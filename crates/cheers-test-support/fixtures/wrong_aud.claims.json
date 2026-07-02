@@ -1,0 +1,9 @@
+{
+  "iss": "https://cheers.fixture.test",
+  "aud": "https://wrong-resource.fixture.test",
+  "exp": 1700000900,
+  "iat": 1700000000,
+  "jti": "fixture-wrongaud-1",
+  "sub": "user:alice-fixture",
+  "scope": ["cloud:read"]
+}

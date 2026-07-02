@@ -1,0 +1,9 @@
+{
+  "iss": "https://wrong-issuer.fixture.test",
+  "aud": "https://kamaji.fixture.test",
+  "exp": 1700000900,
+  "iat": 1700000000,
+  "jti": "fixture-wrongiss-1",
+  "sub": "user:alice-fixture",
+  "scope": ["cloud:read"]
+}

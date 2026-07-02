@@ -89,10 +89,25 @@ where
         .with_state(state)
 }
 
-/// `POST /ownership` — insert a fresh row. The caller's verified `sub`
-/// becomes `granted_by`; the body supplies the rest. Returns
-/// `201 Created` + the materialised [`OwnershipRow`] (carrying the
-/// store-minted `id` + `granted_at`).
+/// `POST /ownership` — record the row, idempotently. The caller's verified
+/// `sub` becomes `granted_by`; the body supplies the rest.
+///
+/// **Idempotent create**: ownership rows are set-membership — a duplicate
+/// `(principal, kind, id, relationship)` row carries no meaning anywhere
+/// (the `owns[]` claim is a set, revocation targets the membership). When an
+/// identical LIVE row already exists, this handler returns it with `200 OK`
+/// instead of inserting a second one; a fresh insert returns `201 Created` +
+/// the materialised [`OwnershipRow`] (carrying the store-minted `id` +
+/// `granted_at`). Writers that re-POST by design (cloud-init re-runs, daemon
+/// restarts that forgot their row id) therefore converge on one live row and
+/// get its `id` back for a later `DELETE`.
+///
+/// The existence check is a handler-level pre-query over
+/// [`OwnershipStore::list_for_principal`] (live rows only), not a store
+/// uniqueness constraint — it works uniformly across every store impl with
+/// no schema migration. Two exactly-concurrent identical POSTs can still
+/// race past it and land two rows; that residual duplicate is harmless
+/// (set-membership) and mint-time dedup covers the `owns[]` claim shape.
 pub async fn create<O>(
     State(state): State<Arc<OwnershipState<O>>>,
     headers: HeaderMap,
@@ -112,6 +127,19 @@ where
         claims.sub.clone(),
         body.on_behalf_of,
     )?;
+    // Idempotency pre-query: an identical live row satisfies this request.
+    // Runs AFTER NewOwnership::new so an invalid body is still a 400 even
+    // when a matching row exists. list_for_principal returns live rows only;
+    // is_revoked() is a belt-and-braces re-check mirroring rows_to_owns.
+    let existing = state.store.list_for_principal(&new.principal_id).await?;
+    if let Some(row) = existing.into_iter().find(|r| {
+        !r.is_revoked()
+            && r.resource_kind == new.resource_kind
+            && r.resource_id == new.resource_id
+            && r.relationship == new.relationship
+    }) {
+        return Ok((StatusCode::OK, Json(row)));
+    }
     let row = state.store.insert(&new, now).await?;
     Ok((StatusCode::CREATED, Json(row)))
 }

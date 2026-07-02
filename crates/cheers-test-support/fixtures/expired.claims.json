@@ -1,0 +1,9 @@
+{
+  "iss": "https://cheers.fixture.test",
+  "aud": "https://kamaji.fixture.test",
+  "exp": 1650000900,
+  "iat": 1650000000,
+  "jti": "fixture-expired-1",
+  "sub": "user:alice-fixture",
+  "scope": ["cloud:read"]
+}

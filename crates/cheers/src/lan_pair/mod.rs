@@ -1,7 +1,7 @@
-//! LAN-pair: credential bootstrap for headless devices over xlb-net.
+//! LAN-pair: credential bootstrap for headless devices over mshr.
 //!
 //! The rpi case: an already-authed device (phone/Mac) vouches for a fresh
-//! headless device over the local network, using xlb-net as transport.
+//! headless device over the local network, using mshr as transport.
 //!
 //! ## Protocol
 //!
@@ -40,7 +40,7 @@ const MAX_FRAME: usize = 65_536;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PairOffer {
-    /// Raw bytes of the offerer's xlb-net `NodeId` (Ed25519 public key).
+    /// Raw bytes of the offerer's mshr `NodeId` (Ed25519 public key).
     pub node_id: [u8; 32],
     /// Capabilities the offerer declares. Accepter should verify
     /// `"cheers/lan-pair/v1"` is present before sending credentials.
@@ -97,7 +97,7 @@ pub enum LanPairError {
 mod tests {
     use std::collections::HashMap;
 
-    use xlb_net::{Endpoint, Keypair};
+    use mshr::{Endpoint, Keypair};
 
     use super::*;
     use crate::lan_pair::confirm::{AutoTrust, DisplayCode, SixDigitCode};
@@ -111,7 +111,7 @@ mod tests {
         }
     }
 
-    async fn make_pair() -> (Offerer, Accepter, xlb_net::EndpointAddr) {
+    async fn make_pair() -> (Offerer, Accepter, mshr::EndpointAddr) {
         let offerer_ep = Endpoint::builder()
             .keypair(Keypair::generate())
             .alpns([ALPN])

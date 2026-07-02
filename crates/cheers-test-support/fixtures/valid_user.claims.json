@@ -1,0 +1,13 @@
+{
+  "iss": "https://cheers.fixture.test",
+  "aud": "https://kamaji.fixture.test",
+  "exp": 1700000900,
+  "iat": 1700000000,
+  "jti": "fixture-user-1",
+  "sub": "user:alice-fixture",
+  "scope": ["cloud:read", "cloud:deploy"],
+  "act": {"sub": "svc:agent-claude-fixture"},
+  "camp_id": "camp-fixture-1",
+  "owns": {"service": ["svc-fixture-a"]},
+  "auth_strength": "user-fresh"
+}

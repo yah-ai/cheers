@@ -22,5 +22,5 @@ pub mod public_verifier;
 pub mod revocation;
 
 pub use edge::EdgeVerifier;
-pub use public_verifier::{codec_err, PasetoV4PublicVerifier, MCP_CLAIM_KEY};
+pub use public_verifier::{codec_err, PasetoV4PublicVerifier};
 pub use revocation::RevocationReader;

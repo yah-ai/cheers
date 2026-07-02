@@ -19,8 +19,8 @@ path = "src/lib.rs"
 # the crypto. A verify-only consumer never depends on this crate, so it never gets
 # a minter. See .yah/docs/working/edge-verifiable-auth.md (Crate topology).
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.17" }
-cheers-verify = { path = "../cheers-verify", version = "0.8.17" }
+cheers-core = { path = "../cheers-core", version = "0.8.18" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.18" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -39,3 +39,7 @@ ed25519-compact = { version = "2", default-features = false }
 [dev-dependencies]
 pollster = "0.4"
 proptest = "1"
+# R592-F3 golden-token fixtures (shared with cheers-verify / cheers-mock /
+# kamaji-bin / yubaba's minter). A dev-dependency cycle back into this crate
+# is fine — Cargo explicitly supports cyclic dev-dependencies.
+cheers-test-support = { path = "../cheers-test-support", version = "0.8.18" }

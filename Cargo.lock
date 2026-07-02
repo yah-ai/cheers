@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "cheers"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1042,6 +1042,7 @@ dependencies = [
  "getrandom 0.3.4",
  "jsonwebtoken",
  "lettre",
+ "mshr",
  "objc2 0.5.2",
  "objc2-authentication-services",
  "objc2-foundation 0.2.2",
@@ -1059,12 +1060,11 @@ dependencies = [
  "webauthn-rs",
  "webauthn-rs-proto",
  "wiremock",
- "xlb-net",
 ]
 
 [[package]]
 name = "cheers-axum"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "async-trait",
  "axum",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-core"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-redis"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "async-trait",
  "cheers-core",
@@ -1126,11 +1126,12 @@ dependencies = [
 
 [[package]]
 name = "cheers-server"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "cheers-core",
+ "cheers-test-support",
  "cheers-verify",
  "ed25519-compact",
  "getrandom 0.3.4",
@@ -1147,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-sqlx"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1169,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-store"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "age",
  "async-trait",
@@ -1182,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-test-identity"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "axum",
  "cheers",
@@ -1202,22 +1203,28 @@ dependencies = [
 
 [[package]]
 name = "cheers-test-support"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "async-trait",
+ "base64ct",
  "cheers-core",
  "cheers-server",
  "cheers-verify",
+ "ed25519-compact",
+ "pasetors",
+ "serde",
+ "serde_json",
  "tokio",
  "turso",
 ]
 
 [[package]]
 name = "cheers-verify"
-version = "0.8.17"
+version = "0.8.18"
 dependencies = [
  "async-trait",
  "cheers-core",
+ "cheers-test-support",
  "pasetors",
  "pollster",
  "serde_json",
@@ -4256,6 +4263,28 @@ dependencies = [
  "smallvec",
  "tagptr",
  "uuid",
+]
+
+[[package]]
+name = "mshr"
+version = "0.8.18"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "directories",
+ "futures-core",
+ "hex",
+ "iroh",
+ "iroh-mdns-address-lookup",
+ "iroh-relay",
+ "rcgen 0.13.2",
+ "rustls 0.23.40",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -9609,28 +9638,6 @@ checksum = "ec1cdab258fb55c0da61328dc52c8764709b249011b2cad0454c72f0bf10a1f6"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "xlb-net"
-version = "0.8.17"
-dependencies = [
- "anyhow",
- "bytes",
- "directories",
- "futures-core",
- "hex",
- "iroh",
- "iroh-mdns-address-lookup",
- "iroh-relay",
- "rcgen 0.13.2",
- "rustls 0.23.40",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
 ]
 
 [[package]]

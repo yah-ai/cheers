@@ -16,6 +16,16 @@
 //! verifier). When a `McpTokenVerifier` trait lands, this state shrinks to a
 //! one-line generic-ification.
 //!
+//! Alongside the verifier, [`McpAuthState`] also carries the trust context
+//! `verify_mcp_at` / [`authenticate_mcp`] check a bearer against:
+//! `expected_kid` (which published key this surface trusts — R592-B7's
+//! kid-in-footer requirement) and `expected_iss` / `expected_aud` (which
+//! cheers issuer + which resource identity a token must be minted for).
+//! Mirrors `cloud-admin`'s `CheersAuth`
+//! (`crates/yah/cloud-admin/src/auth.rs`) — a cryptographically valid MCP
+//! token minted for a DIFFERENT resource by the SAME issuer key must still
+//! be rejected before scope is even consulted.
+//!
 //! ## Scope guard
 //!
 //! [`McpClaimsExt::require_scope`] is the per-handler authorization check
@@ -32,7 +42,12 @@
 //! # use cheers_axum::mcp::McpAuthState;
 //! # use cheers_server::PasetoV4SecretMinter;
 //! # let (_minter, verifier) = PasetoV4SecretMinter::generate().unwrap();
-//! let state = Arc::new(McpAuthState::new(verifier));
+//! let state = Arc::new(McpAuthState::new(
+//!     verifier,
+//!     "platform-kid-1",
+//!     "https://cheers.example",
+//!     "https://cheers.example",
+//! ));
 //! // Hand `state` to a router that nests POST /ownership, /audit/ingest, etc.
 //! ```
 

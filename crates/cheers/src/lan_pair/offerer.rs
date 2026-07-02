@@ -1,6 +1,6 @@
 //! LAN-pair offerer — the headless / new-device side.
 
-use xlb_net::{Endpoint, EndpointAddr, NodeId};
+use mshr::{Endpoint, EndpointAddr, NodeId};
 
 use crate::lan_pair::{AccepterMsg, LanPairError, PairAccept, PairOffer, MAX_FRAME};
 
@@ -9,7 +9,7 @@ use crate::lan_pair::{AccepterMsg, LanPairError, PairAccept, PairOffer, MAX_FRAM
 ///
 /// # Lifecycle
 ///
-/// 1. Build an [`xlb_net::Endpoint`] with [`ALPN`] in its ALPN list.
+/// 1. Build an [`mshr::Endpoint`] with [`ALPN`] in its ALPN list.
 /// 2. Optionally call [`with_code`] or [`with_random_code`] and show the
 ///    code on the device's console so the user can enter it on the phone.
 /// 3. Call [`wait_for_pair`] to block until a phone connects and sends
@@ -68,7 +68,7 @@ impl Offerer {
         self.code.as_deref()
     }
 
-    /// This endpoint's xlb-net node identifier (Ed25519 public key).
+    /// This endpoint's mshr node identifier (Ed25519 public key).
     pub fn node_id(&self) -> NodeId {
         self.endpoint.node_id()
     }

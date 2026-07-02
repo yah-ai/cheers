@@ -16,16 +16,7 @@ use pasetors::claims::ClaimsValidationRules;
 use pasetors::keys::AsymmetricPublicKey;
 use pasetors::public;
 use pasetors::token::UntrustedToken;
-use pasetors::version4::V4;
-
-/// Additional-claim key under which [`McpClaims`] ride a PASETO v4.public token.
-///
-/// Distinct from the session-claim key (`"cheers"`) so a verifier can't
-/// silently deserialize the wrong shape: an MCP token has no `"cheers"` claim,
-/// a session token has no `"mcp"` claim, and either mix-up surfaces as
-/// [`CodecError::Malformed`]. Exported so the matching origin minter in
-/// `cheers-server` writes under the same key.
-pub const MCP_CLAIM_KEY: &str = "mcp";
+use pasetors::version4::{PublicToken, V4};
 
 /// Map a `pasetors` crypto-library error into the shared [`CodecError`].
 ///
@@ -75,31 +66,61 @@ impl PasetoV4PublicVerifier {
         &self.public
     }
 
-    /// Verify an MCP-call token signed by `cheers_server::PasetoV4SecretMinter::mint_mcp`,
-    /// returning the embedded [`McpClaims`].
+    /// Verify an MCP-call token signed by
+    /// `cheers_server::PasetoV4SecretMinter::mint_mcp`, returning the
+    /// embedded [`McpClaims`].
     ///
-    /// Sibling to the session-token [`verify_at`](Self::verify_at) path: same
-    /// PASETO v4.public signature check, but reads the `"mcp"` additional claim
-    /// instead of `"cheers"` and parses it into [`McpClaims`]. Expiry is owned
-    /// by [`McpClaims::is_expired_at`] (parity with the session-claim path) —
-    /// `exp <= now` is [`CodecError::Expired`].
+    /// **Wire convention** (R592-B7) — the shape kamaji-bin's verifier,
+    /// `cheers-mock`, and yubaba's minter already share: `claims` is the
+    /// token's FLAT top-level JSON payload (no wrapping claim key), verified
+    /// via pasetors' LOW-LEVEL [`PublicToken::verify`] — never the high-level
+    /// `public::verify`, which hard-rejects the i64 `exp`/`iat` this shape
+    /// carries.
     ///
-    /// A token minted for the session shape (`"cheers"` claim, no `"mcp"`)
-    /// surfaces here as [`CodecError::Malformed`] — the key separation is the
-    /// structural guard against confusing the two claim shapes.
-    pub fn verify_mcp_at(&self, token: &str, now: i64) -> Result<McpClaims, CodecError> {
+    /// `kid` is REQUIRED in the PASETO footer: an empty footer is
+    /// [`CodecError::MissingKid`]; a footer that doesn't parse or has no
+    /// `kid` field is [`CodecError::Malformed`]; a `kid` that doesn't match
+    /// `expected_kid` is [`CodecError::UnknownKid`] (this verifier holds a
+    /// single trusted `(kid, public key)` pair — it has no JWKS of its own,
+    /// so "does the footer's kid match the one caller I trust" is the whole
+    /// key-selection check here; a full JWKS lookup across many kids is a
+    /// consumer's job, e.g. kamaji-bin's `AuthVerifier`).
+    ///
+    /// Expiry is owned by [`McpClaims::is_expired_at`] (parity with the
+    /// session-claim path) — `exp <= now` is [`CodecError::Expired`].
+    /// `iss`/`aud` are NOT checked here — that policy varies per consumer
+    /// (which issuer/audience a caller expects), so it lives at the caller
+    /// (e.g. `cloud-admin`'s `viewer_from_claims`), not in this shared
+    /// primitive.
+    pub fn verify_mcp_at(
+        &self,
+        token: &str,
+        now: i64,
+        expected_kid: &str,
+    ) -> Result<McpClaims, CodecError> {
         let untrusted = UntrustedToken::<pasetors::token::Public, V4>::try_from(token)
             .map_err(|_| CodecError::Malformed)?;
-        let mut rules = ClaimsValidationRules::new();
-        rules.allow_non_expiring();
-        let trusted = public::verify(&self.public, &untrusted, &rules, None, None)
-            .map_err(codec_err)?;
-        let pclaims = trusted.payload_claims().ok_or(CodecError::Malformed)?;
-        let v = pclaims
-            .get_claim(MCP_CLAIM_KEY)
-            .ok_or(CodecError::Malformed)?
-            .clone();
-        let out: McpClaims = serde_json::from_value(v)?;
+
+        // Footer/kid check BEFORE the crypto check — cheap, and it's the
+        // key-selection signal a real multi-kid verifier would need anyway.
+        // The footer bytes are bound into the signature regardless of when
+        // we read them, so this ordering doesn't weaken anything.
+        let footer_bytes = untrusted.untrusted_footer();
+        if footer_bytes.is_empty() {
+            return Err(CodecError::MissingKid);
+        }
+        let footer: serde_json::Value =
+            serde_json::from_slice(footer_bytes).map_err(|_| CodecError::Malformed)?;
+        let kid = footer
+            .get("kid")
+            .and_then(|v| v.as_str())
+            .ok_or(CodecError::Malformed)?;
+        if kid != expected_kid {
+            return Err(CodecError::UnknownKid(kid.to_string()));
+        }
+
+        let trusted = PublicToken::verify(&self.public, &untrusted, None, None).map_err(codec_err)?;
+        let out: McpClaims = serde_json::from_str(trusted.payload())?;
         if out.is_expired_at(now) {
             return Err(CodecError::Expired);
         }

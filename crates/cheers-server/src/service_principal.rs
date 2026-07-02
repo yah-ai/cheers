@@ -695,8 +695,12 @@ mod tests {
             .with_owns(owns)
             .with_auth_strength(AuthStrength::Bootstrap);
 
-            let token = off_cheers_minter.mint_mcp(&claims).unwrap();
-            let back = verifier.verify_mcp_at(&token, 1_100).unwrap();
+            let token = off_cheers_minter
+                .mint_mcp(&claims, &provisioned.signing_key.kid)
+                .unwrap();
+            let back = verifier
+                .verify_mcp_at(&token, 1_100, &provisioned.signing_key.kid)
+                .unwrap();
             assert_eq!(back, claims);
         });
     }

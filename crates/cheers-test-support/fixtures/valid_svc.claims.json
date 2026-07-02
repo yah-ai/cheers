@@ -1,0 +1,9 @@
+{
+  "iss": "https://cheers.fixture.test",
+  "aud": "https://cheers.fixture.test",
+  "exp": 1700000300,
+  "iat": 1700000000,
+  "jti": "fixture-svc-1",
+  "sub": "svc:yubaba-fixture-1",
+  "scope": ["ownership:write"]
+}
