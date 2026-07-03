@@ -218,7 +218,13 @@ impl PasetoV4SecretMinter {
     pub fn mint_mcp(&self, claims: &McpClaims, kid: &str) -> Result<String, CodecError> {
         let value = serde_json::to_value(claims)?;
         let payload = serde_json::to_vec(&value)?;
-        let footer = format!(r#"{{"kid":"{kid}"}}"#).into_bytes();
+        // Build the footer through serde rather than string interpolation so a
+        // `kid` containing `"`, `\`, or control characters is JSON-escaped
+        // instead of corrupting the footer (or smuggling extra footer fields).
+        // For the base64url kids `mint_kid` produces, the compact serde output
+        // is byte-identical to the old `{"kid":"<kid>"}` form, so the golden
+        // fixtures are unaffected.
+        let footer = serde_json::to_vec(&serde_json::json!({ "kid": kid }))?;
         PublicToken::sign(&self.secret, &payload, Some(&footer), None).map_err(codec_err)
     }
 }
