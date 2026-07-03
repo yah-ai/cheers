@@ -1,5 +1,8 @@
 //! LAN-pair offerer — the headless / new-device side.
 
+use std::sync::Arc;
+
+use cheers_core::{Credential, CredentialStore, DeviceBinding, DeviceId, UserId};
 use mshr::{Endpoint, EndpointAddr, NodeId};
 
 use crate::lan_pair::{AccepterMsg, LanPairError, PairAccept, PairOffer, MAX_FRAME};
@@ -12,12 +15,17 @@ use crate::lan_pair::{AccepterMsg, LanPairError, PairAccept, PairOffer, MAX_FRAM
 /// 1. Build an [`mshr::Endpoint`] with [`ALPN`] in its ALPN list.
 /// 2. Optionally call [`with_code`] or [`with_random_code`] and show the
 ///    code on the device's console so the user can enter it on the phone.
-/// 3. Call [`wait_for_pair`] to block until a phone connects and sends
+/// 3. Optionally call [`with_credential_store`] so a successful pair parks
+///    the received [`PairAccept`] locally (R593-F5 item 3).
+/// 4. Call [`wait_for_pair`] to block until a phone connects and sends
 ///    credentials.
-/// 4. Persist the returned [`PairAccept`] (e.g. via `EncryptedFileStore`).
+/// 5. If no credential store was attached, the caller is responsible for
+///    persisting the returned [`PairAccept`] itself (e.g. via
+///    `cheers-store`'s `EncryptedFileStore`).
 ///
 /// [`with_code`]: Offerer::with_code
 /// [`with_random_code`]: Offerer::with_random_code
+/// [`with_credential_store`]: Offerer::with_credential_store
 /// [`wait_for_pair`]: Offerer::wait_for_pair
 ///
 /// # @yah:assumes
@@ -27,6 +35,7 @@ use crate::lan_pair::{AccepterMsg, LanPairError, PairAccept, PairOffer, MAX_FRAM
 pub struct Offerer {
     endpoint: Endpoint,
     code: Option<String>,
+    credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
 impl Offerer {
@@ -35,7 +44,25 @@ impl Offerer {
     /// The endpoint must have [`ALPN`] registered; iroh rejects connections
     /// on unregistered ALPNs at the TLS layer.
     pub fn new(endpoint: Endpoint) -> Self {
-        Self { endpoint, code: None }
+        Self { endpoint, code: None, credential_store: None }
+    }
+
+    /// Attach a `cheers_core::CredentialStore` (R593-F5 item 3, W268
+    /// §"End-user device"). When set, a successful [`wait_for_pair`] parks
+    /// the received [`PairAccept`] — keyed on `accept.device_id`, bound as
+    /// [`DeviceBinding::LanPair`] — before returning it, so the offerer
+    /// doesn't need a separate persistence step. Production callers pass a
+    /// `cheers-store` `KeyringStore` (desktop/mobile) or `EncryptedFileStore`
+    /// (headless) impl; `cheers` itself only depends on the
+    /// `cheers_core::CredentialStore` trait, not on any concrete backend
+    /// (`cheers-store` is a sibling crate, not a dependency of this one).
+    /// Leaving this unset (the default) preserves the prior behavior:
+    /// the caller persists `PairAccept` itself.
+    ///
+    /// [`wait_for_pair`]: Offerer::wait_for_pair
+    pub fn with_credential_store(mut self, store: Arc<dyn CredentialStore>) -> Self {
+        self.credential_store = Some(store);
+        self
     }
 
     /// Attach a fixed confirmation code. The caller is responsible for
@@ -129,8 +156,38 @@ impl Offerer {
             .map_err(|e| LanPairError::Codec(e.to_string()))?;
 
         match msg {
-            AccepterMsg::Accept(accept) => Ok(accept),
+            AccepterMsg::Accept(accept) => {
+                if let Some(store) = &self.credential_store {
+                    self.park_credential(store.as_ref(), &accept).await?;
+                }
+                Ok(accept)
+            }
             AccepterMsg::Reject { .. } => Err(LanPairError::Rejected),
         }
+    }
+
+    /// Park `accept` into `store`, keyed on the device id the accepter
+    /// assigned. `material` is the full serialized [`PairAccept`] (user id,
+    /// device id, attrs, expiry) — `CredentialStore` treats it as an opaque
+    /// blob (module doc, `cheers-core::store`), so round-tripping the whole
+    /// struct rather than a subset keeps every field the offerer received
+    /// recoverable later, not just what this crate happens to read today.
+    async fn park_credential(
+        &self,
+        store: &dyn CredentialStore,
+        accept: &PairAccept,
+    ) -> Result<(), LanPairError> {
+        let material = serde_json::to_vec(accept)
+            .map_err(|e| LanPairError::Enrollment(format!("serialize PairAccept: {e}")))?;
+        let credential = Credential::new(
+            UserId::new(accept.user_id.clone()),
+            DeviceId::new(accept.device_id.clone()),
+            DeviceBinding::LanPair,
+            material,
+        );
+        store
+            .put(&accept.device_id, &credential)
+            .await
+            .map_err(|e| LanPairError::Enrollment(format!("CredentialStore::put: {e}")))
     }
 }

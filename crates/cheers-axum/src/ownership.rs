@@ -1,16 +1,24 @@
 //! `POST /ownership` + `DELETE /ownership/{id}` — the write side of cheers's
-//! embedded-ownership table.
+//! embedded-ownership table — plus `GET /ownership?principal_id=` — the
+//! writer's management read.
 //!
-//! These two routes are the only path into the ownership table writes per
-//! `.yah/docs/working/mcp-auth-and-ownership.md` §Ownership table. Both
-//! require an MCP token bearing [`Scope::OwnershipWrite`] — granted to
-//! service principals only by composition rule (4) (the grant API rejects
+//! The POST + DELETE routes are the only path into the ownership table
+//! writes per `.yah/docs/working/mcp-auth-and-ownership.md` §Ownership
+//! table. All three routes (including the GET) require an MCP token bearing
+//! [`Scope::OwnershipWrite`] — granted to service principals only by
+//! composition rule (4) (the grant API rejects
 //! `(kind=user, scope=ownership:write)` at write time via
 //! [`cheers_core::validate_grant`]; this handler is the defense-in-depth
 //! mint-side check). [`NewOwnership::new`] additionally guards the row
 //! invariants (`granted_by` is a service, `on_behalf_of` is a user when
 //! set), so a misconfigured insert short-circuits at parse time instead
 //! of round-tripping to the database.
+//!
+//! The GET is deliberately gated on the *write* scope, not a broader read
+//! scope: it exists so the writer can manage what it wrote — e.g. yubaba
+//! rediscovering its node-enrollment row after a daemon restart lost the
+//! in-memory row id, so eviction can still revoke it (R593-F4). General
+//! ownership reads happen through the minted `owns[]` claim, not here.
 //!
 //! ## Wiring
 //!
@@ -22,7 +30,12 @@
 //! # use cheers_server::{OwnershipStore, PasetoV4SecretMinter};
 //! # async fn run<O: OwnershipStore + 'static>(store: Arc<O>) -> Result<(), Box<dyn std::error::Error>> {
 //! let (_minter, verifier) = PasetoV4SecretMinter::generate()?;
-//! let mcp = Arc::new(McpAuthState::new(verifier));
+//! let mcp = Arc::new(McpAuthState::new(
+//!     verifier,
+//!     "platform-kid-1",
+//!     "https://cheers.example",
+//!     "https://cheers.example",
+//! ));
 //! let state = Arc::new(OwnershipState { mcp, store });
 //! let app: Router = Router::new().nest("/api", router(state));
 //! # Ok(()) }
@@ -32,7 +45,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, post};
 use serde::Deserialize;
@@ -77,14 +90,23 @@ pub struct CreateOwnershipBody {
     pub on_behalf_of: Option<PrincipalId>,
 }
 
-/// Build a router mounting `POST /ownership` + `DELETE /ownership/{id}`. The
-/// product nests it under whatever base path it chose (`/api`, …).
+/// Query parameters for `GET /ownership`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListOwnershipQuery {
+    /// Principal whose live rows to list — required; there is no
+    /// unfiltered table dump.
+    pub principal_id: PrincipalId,
+}
+
+/// Build a router mounting `POST /ownership` + `GET /ownership` +
+/// `DELETE /ownership/{id}`. The product nests it under whatever base path
+/// it chose (`/api`, …).
 pub fn router<O>(state: Arc<OwnershipState<O>>) -> Router
 where
     O: OwnershipStore + 'static,
 {
     Router::new()
-        .route("/ownership", post(create::<O>))
+        .route("/ownership", post(create::<O>).get(list::<O>))
         .route("/ownership/{id}", delete(revoke::<O>))
         .with_state(state)
 }
@@ -117,7 +139,7 @@ where
     O: OwnershipStore,
 {
     let now = now_unix();
-    let claims = authenticate_mcp(&headers, &state.mcp.verifier, now)?;
+    let claims = authenticate_mcp(&headers, &state.mcp, now)?;
     claims.require_scope(Scope::OwnershipWrite)?;
     let new = NewOwnership::new(
         body.principal_id,
@@ -144,6 +166,26 @@ where
     Ok((StatusCode::CREATED, Json(row)))
 }
 
+/// `GET /ownership?principal_id=<p>` — live (non-revoked) rows held by
+/// `principal_id`, as a JSON array. Requires [`Scope::OwnershipWrite`]
+/// like the writes — this is the writer's management read (see module
+/// doc), not a general query surface. The principal filter is mandatory;
+/// there is no unfiltered dump of the table.
+pub async fn list<O>(
+    State(state): State<Arc<OwnershipState<O>>>,
+    headers: HeaderMap,
+    Query(query): Query<ListOwnershipQuery>,
+) -> Result<Json<Vec<OwnershipRow>>, RouteError>
+where
+    O: OwnershipStore,
+{
+    let now = now_unix();
+    let claims = authenticate_mcp(&headers, &state.mcp, now)?;
+    claims.require_scope(Scope::OwnershipWrite)?;
+    let rows = state.store.list_for_principal(&query.principal_id).await?;
+    Ok(Json(rows))
+}
+
 /// `DELETE /ownership/{id}` — soft-delete by id. Returns `204 No Content`
 /// on success, `404 Not Found` ([`RouteError::UnknownOwnership`]) when the
 /// id does not exist. Re-revoking an already-revoked row is a no-op (the
@@ -157,7 +199,7 @@ where
     O: OwnershipStore,
 {
     let now = now_unix();
-    let claims = authenticate_mcp(&headers, &state.mcp.verifier, now)?;
+    let claims = authenticate_mcp(&headers, &state.mcp, now)?;
     claims.require_scope(Scope::OwnershipWrite)?;
     state
         .store

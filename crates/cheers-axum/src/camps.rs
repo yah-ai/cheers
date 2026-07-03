@@ -59,7 +59,12 @@
 //! #     authority: Arc<CampAuthority<S, K>>,
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
 //! let (_minter, verifier) = PasetoV4SecretMinter::generate()?;
-//! let mcp = Arc::new(McpAuthState::new(verifier));
+//! let mcp = Arc::new(McpAuthState::new(
+//!     verifier,
+//!     "platform-kid-1",
+//!     "https://cheers.example",
+//!     "https://cheers.example/api",
+//! ));
 //! let state = Arc::new(CampAdminState { mcp, authority });
 //! let app: Router = Router::new().nest("/api", router(state));
 //! # Ok(()) }
@@ -161,7 +166,7 @@ where
     K: UserSigningKeyStore,
 {
     let now = now_unix();
-    let claims = authenticate_mcp(&headers, &state.mcp.verifier, now)?;
+    let claims = authenticate_mcp(&headers, &state.mcp, now)?;
     claims.require_scope(Scope::CampAdmin)?;
     let provisioned = state
         .authority
@@ -254,6 +259,10 @@ mod tests {
         ));
     }
 
+    /// `kid` [`rig`]'s [`McpAuthState`] expects in the footer, and that
+    /// [`mint_warden_mcp`] stamps — R592-B7's kid-in-footer requirement.
+    const CAMPS_TEST_KID: &str = "camps-test-kid-1";
+
     /// Build the camp router with a fresh in-memory authority. Returns the
     /// router, the MCP minter (so tests can mint yubaba-bearer tokens), the
     /// authority Arc (for state inspection), and the user-signing-key store
@@ -267,7 +276,12 @@ mod tests {
         MemoryCampPrincipalStore,
     ) {
         let (minter, verifier) = PasetoV4SecretMinter::generate().expect("paseto v4 keypair");
-        let mcp = Arc::new(McpAuthState::new(verifier));
+        let mcp = Arc::new(McpAuthState::new(
+            verifier,
+            CAMPS_TEST_KID,
+            "https://cheers.example",
+            "https://cheers.example/api",
+        ));
         let camp_store = MemoryCampPrincipalStore::new();
         let key_store = MemoryUserSigningKeyStore::new();
         let authority = Arc::new(CampAuthority::new(camp_store.clone(), key_store.clone()));
@@ -296,7 +310,7 @@ mod tests {
         )
         .with_act(Actor::new(PrincipalId::service("yubaba-1")))
         .with_auth_strength(AuthStrength::Bootstrap);
-        minter.mint_mcp(&claims).expect("mcp mint")
+        minter.mint_mcp(&claims, CAMPS_TEST_KID).expect("mcp mint")
     }
 
     fn bearer(token: &str) -> (header::HeaderName, String) {
@@ -466,6 +480,7 @@ mod tests {
         // Stand up an McpAuthority over the same minter + ownership/grants
         // shape mint_bootstrap needs, and grant the freshly-provisioned camp
         // a scope for `aud`.
+        const MINT_AUTHORITY_KID: &str = "camp-y-mint-authority-kid";
         let (mcp_minter, mcp_verifier) = PasetoV4SecretMinter::generate().unwrap();
         let grants = MemoryGrantStore::new();
         let ownership = InlineOwn::default();
@@ -482,6 +497,7 @@ mod tests {
             grants,
             ownership,
             "https://cheers.example",
+            MINT_AUTHORITY_KID,
         );
 
         // Mint a path-#2 token off the camp principal — the same code the
@@ -503,7 +519,7 @@ mod tests {
         assert_eq!(minted.claims.camp_id.as_deref(), Some("camp-y"));
         // Edge verifies it.
         let back = mcp_verifier
-            .verify_mcp_at(&minted.token, now_s + 60)
+            .verify_mcp_at(&minted.token, now_s + 60, MINT_AUTHORITY_KID)
             .unwrap();
         assert_eq!(back, minted.claims);
         // Camp principal still Active end-to-end.

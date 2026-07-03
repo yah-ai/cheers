@@ -38,10 +38,19 @@ fn now() -> i64 {
 /// Build the full /ownership router. Returns the router, the minter (so
 /// tests can forge bearer tokens), and the underlying store (so tests can
 /// observe row state directly).
+/// `kid` [`rig`]'s [`McpAuthState`] expects — every token minted for these
+/// tests must carry it in the PASETO footer (R592-B7).
+const TEST_KID: &str = "ownership-basic-test-kid";
+
 fn rig() -> (Router, PasetoV4SecretMinter, Arc<MemOwnershipStore>) {
     let (minter, verifier) = PasetoV4SecretMinter::generate().expect("paseto v4 keypair");
     let store = Arc::new(MemOwnershipStore::default());
-    let mcp = Arc::new(McpAuthState::new(verifier));
+    let mcp = Arc::new(McpAuthState::new(
+        verifier,
+        TEST_KID,
+        "https://cheers.example",
+        "https://cheers.example",
+    ));
     let state = Arc::new(OwnershipState {
         mcp,
         store: store.clone(),
@@ -67,7 +76,7 @@ fn mint_token(
         scopes,
     )
     .with_auth_strength(AuthStrength::Bootstrap);
-    minter.mint_mcp(&claims).expect("mint")
+    minter.mint_mcp(&claims, TEST_KID).expect("mint")
 }
 
 /// Mint a token whose `sub` is the user-shape — used in the defense-in-depth
@@ -89,7 +98,7 @@ fn mint_user_token(
         scopes,
     )
     .with_auth_strength(AuthStrength::UserFresh);
-    minter.mint_mcp(&claims).expect("mint")
+    minter.mint_mcp(&claims, TEST_KID).expect("mint")
 }
 
 fn auth(token: &str) -> String {
@@ -437,4 +446,79 @@ async fn duplicate_post_returns_existing_live_row_not_a_second_insert() {
     let third: serde_json::Value =
         serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
     assert_ne!(third["id"].as_str().unwrap(), first_id);
+}
+
+#[tokio::test]
+async fn list_returns_live_rows_for_principal_and_requires_write_scope() {
+    // GET /ownership?principal_id= — the writer's management read
+    // (R593-F4): lets yubaba rediscover its enrollment row(s) after a
+    // restart lost the in-memory row id, so eviction can still revoke.
+    let (app, minter, store) = rig();
+    let now = now();
+    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-list");
+
+    // Seed three rows directly through the store, then revoke one — the
+    // revoked row must not appear in the listing.
+    let svc = PrincipalId::service("yubaba");
+    for (kind, rid) in [("node", "aa11"), ("service", "svc-x"), ("node", "bb22")] {
+        let new = cheers_server::NewOwnership::new(
+            svc.clone(),
+            kind,
+            rid,
+            "owns",
+            PrincipalId::service("yubaba"),
+            None,
+        )
+        .unwrap();
+        store.insert(&new, now).await.unwrap();
+    }
+    let bb22_id = store
+        .list_for_principal(&svc)
+        .await
+        .unwrap()
+        .iter()
+        .find(|r| r.resource_id == "bb22")
+        .map(|r| r.id.clone())
+        .unwrap();
+    store.revoke_by_id(&bb22_id, now).await.unwrap();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/ownership?principal_id=svc:yubaba")
+        .header(header::AUTHORIZATION, auth(&token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "live rows only: {rows:?}");
+    let ids: Vec<&str> = rows.iter().map(|r| r["resource_id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"aa11") && ids.contains(&"svc-x"), "got {ids:?}");
+
+    // A different principal's filter sees none of svc:yubaba's rows.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/ownership?principal_id=svc:other")
+        .header(header::AUTHORIZATION, auth(&token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 0);
+
+    // The read is gated on ownership:write like the writes — a token
+    // without the scope is 403.
+    let noscope = mint_token(&minter, now, vec![Scope::CloudRead], "jti-list-noscope");
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/ownership?principal_id=svc:yubaba")
+        .header(header::AUTHORIZATION, auth(&noscope))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

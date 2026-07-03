@@ -27,7 +27,12 @@
 //! # use cheers_server::{AuditStore, PasetoV4SecretMinter};
 //! # async fn run<A: AuditStore + 'static>(store: Arc<A>) -> Result<(), Box<dyn std::error::Error>> {
 //! let (_minter, verifier) = PasetoV4SecretMinter::generate()?;
-//! let mcp = Arc::new(McpAuthState::new(verifier));
+//! let mcp = Arc::new(McpAuthState::new(
+//!     verifier,
+//!     "platform-kid-1",
+//!     "https://cheers.example",
+//!     "https://cheers.example",
+//! ));
 //! let state = Arc::new(AuditState { mcp, store });
 //! let app: Router = Router::new().merge(router(state));
 //! # Ok(()) }
@@ -99,7 +104,7 @@ where
     A: AuditStore,
 {
     let now = now_unix();
-    let claims = authenticate_mcp(&headers, &state.mcp.verifier, now)?;
+    let claims = authenticate_mcp(&headers, &state.mcp, now)?;
     claims.require_scope(Scope::AuditWrite)?;
     // Validate the whole batch first — atomic semantics mean we don't
     // start writing until every record passes. Kamaji retries the

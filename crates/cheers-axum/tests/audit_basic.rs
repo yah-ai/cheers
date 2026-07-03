@@ -37,10 +37,19 @@ fn now() -> i64 {
         .expect("clock past epoch")
 }
 
+/// `kid` [`rig`]'s [`McpAuthState`] expects — every token minted for these
+/// tests must carry it in the PASETO footer (R592-B7).
+const TEST_KID: &str = "audit-basic-test-kid";
+
 fn rig() -> (Router, PasetoV4SecretMinter, Arc<MemoryAuditStore>) {
     let (minter, verifier) = PasetoV4SecretMinter::generate().expect("paseto v4 keypair");
     let store = Arc::new(MemoryAuditStore::new());
-    let mcp = Arc::new(McpAuthState::new(verifier));
+    let mcp = Arc::new(McpAuthState::new(
+        verifier,
+        TEST_KID,
+        "https://cheers.example",
+        "https://cheers.example",
+    ));
     let state = Arc::new(AuditState {
         mcp,
         store: store.clone(),
@@ -65,7 +74,7 @@ fn mint_service_token(
         scopes,
     )
     .with_auth_strength(AuthStrength::Bootstrap);
-    minter.mint_mcp(&claims).expect("mint")
+    minter.mint_mcp(&claims, TEST_KID).expect("mint")
 }
 
 fn auth(token: &str) -> String {

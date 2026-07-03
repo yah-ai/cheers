@@ -612,8 +612,8 @@ mod tests {
         .with_act(Actor::new(PrincipalId::service("yubaba-e2e")))
         .with_owns(owns)
         .with_auth_strength(AuthStrength::Bootstrap);
-        let token = minter.mint_mcp(&claims).unwrap();
-        let back = verifier.verify_mcp_at(&token, 1_100).unwrap();
+        let token = minter.mint_mcp(&claims, &target_kid).unwrap();
+        let back = verifier.verify_mcp_at(&token, 1_100, &target_kid).unwrap();
         assert_eq!(back, claims);
     }
 }
