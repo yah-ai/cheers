@@ -30,6 +30,9 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Structured server-side logging of the raw sqlx error in the error mapper — the
+# opaque `StoreError::Backend` handed to callers never carries the driver detail.
+tracing = "0.1"
 # OS CSPRNG for default user_id / token id generation. Matches the version
 # pulled by cheers-server's refresh.rs so no extra version in the workspace.
 getrandom = "0.3"

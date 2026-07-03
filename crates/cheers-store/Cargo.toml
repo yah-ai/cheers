@@ -30,6 +30,12 @@ cheers-core = { path = "../cheers-core", version = "0.8.18" }
 async-trait = { version = "0.1", optional = true }
 serde_json = { version = "1", optional = true }
 
+# OS CSPRNG for the atomic-write temp-file suffix (headless/EncryptedFileStore) —
+# an unpredictable name so the `create_new` (O_EXCL) open can't be pre-empted by
+# a planted symlink/file. Already in the tree via age's rand stack; matches the
+# getrandom 0.3 the rest of the workspace uses.
+getrandom = { version = "0.3", optional = true }
+
 # age (R015-T2) — EncryptedFileStore. Pure-Rust authenticated file encryption
 # (ChaCha20-Poly1305 payload, X25519 recipient stanzas); no openssl, no TLS, so
 # the device tier stays openssl-free. default-features=false drops the CLI /
@@ -77,5 +83,6 @@ default = []
 keyring = ["dep:keyring", "dep:async-trait", "dep:serde_json"]
 # EncryptedFileStore over an age-encrypted file, for headless hosts with no OS
 # keyring (the rpi case). age supplies the at-rest encryption; serde_json
-# encodes the credential map; async-trait for the impl.
-headless = ["dep:age", "dep:async-trait", "dep:serde_json"]
+# encodes the credential map; async-trait for the impl; getrandom names the
+# unpredictable atomic-write temp-file suffix.
+headless = ["dep:age", "dep:async-trait", "dep:serde_json", "dep:getrandom"]

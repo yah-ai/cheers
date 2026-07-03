@@ -117,7 +117,7 @@ impl KeyringStore {
     /// Get-or-create the cached `Entry` for `key`. The keyring call itself runs
     /// outside the lock — only the cache read/insert is guarded.
     fn entry(&self, key: &str) -> Result<Arc<Entry>, StoreError> {
-        let mut entries = self.entries.lock().expect("KeyringStore entry cache poisoned");
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = entries.get(key) {
             return Ok(Arc::clone(entry));
         }
