@@ -191,19 +191,19 @@ impl EncryptedFileStore {
 #[async_trait]
 impl CredentialStore for EncryptedFileStore {
     async fn put(&self, key: &str, cred: &Credential) -> Result<(), StoreError> {
-        let _guard = self.lock.lock().expect("EncryptedFileStore lock poisoned");
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut map = self.load_map()?;
         map.insert(key.to_owned(), cred.clone());
         self.store_map(&map)
     }
 
     async fn get(&self, key: &str) -> Result<Option<Credential>, StoreError> {
-        let _guard = self.lock.lock().expect("EncryptedFileStore lock poisoned");
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         Ok(self.load_map()?.get(key).cloned())
     }
 
     async fn delete(&self, key: &str) -> Result<(), StoreError> {
-        let _guard = self.lock.lock().expect("EncryptedFileStore lock poisoned");
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut map = self.load_map()?;
         if map.remove(key).is_none() {
             return Err(StoreError::NotFound);
@@ -260,12 +260,16 @@ fn write_key_file(path: &Path, identity: &age::x25519::Identity) -> std::io::Res
 /// Write `bytes` to a sibling temp file then rename it over `path`, so a reader
 /// never observes a partially written store and a crash leaves the old file
 /// intact.
+///
+/// The temp file has a unique, unpredictable name (pid + 128 random bits) and is
+/// opened `create_new` (O_EXCL): a pre-planted file or symlink at the path can't
+/// be followed or clobbered — the open fails instead of writing through it.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     create_parent(path).map_err(|e| backend("create data dir", &e))?;
-    let tmp = path.with_extension("age.tmp");
+    let tmp = unique_temp_path(path);
     {
         let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -277,6 +281,26 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         file.sync_all().map_err(|e| backend("sync temp file", &e))?;
     }
     std::fs::rename(&tmp, path).map_err(|e| backend("rename into place", &e))
+}
+
+/// A unique, unpredictable sibling path for the write-then-rename temp file:
+/// `<data-file>.<pid>.<random-hex>.tmp`. The 128-bit random suffix (from the OS
+/// CSPRNG) makes the name unguessable, so an attacker can't pre-create or
+/// symlink the target ahead of the `create_new` (O_EXCL) open in [`write_atomic`].
+fn unique_temp_path(path: &Path) -> PathBuf {
+    let mut rand = [0u8; 16];
+    getrandom::fill(&mut rand).expect("OS CSPRNG must be available");
+    let mut suffix = String::with_capacity(rand.len() * 2);
+    for b in rand {
+        use std::fmt::Write as _;
+        let _ = write!(suffix, "{b:02x}");
+    }
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{suffix}.tmp", std::process::id()));
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
 }
 
 /// `create_dir_all` the parent of `path`, tolerating a bare filename (no parent).

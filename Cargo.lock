@@ -1086,6 +1086,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",
@@ -1166,6 +1167,7 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1175,6 +1177,7 @@ dependencies = [
  "age",
  "async-trait",
  "cheers-core",
+ "getrandom 0.3.4",
  "keyring",
  "pollster",
  "serde_json",
@@ -4285,6 +4288,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

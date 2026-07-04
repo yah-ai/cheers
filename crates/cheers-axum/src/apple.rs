@@ -37,6 +37,7 @@ use cheers_core::{DeviceBinding, DeviceId, TokenMinter};
 use cheers_server::{
     NewUser, ProviderKey, RefreshStore, RevocationWriter, SessionAuthority, UserStore,
 };
+use subtle::ConstantTimeEq;
 
 use crate::cookie::{CsrfCookieConfig, read_cookie};
 use crate::error::RouteError;
@@ -130,7 +131,14 @@ where
         .and_then(|h| h.to_str().ok())
         .and_then(|raw| read_cookie(raw, &state.cookie.name).map(str::to_owned))
         .ok_or(RouteError::MissingCsrfCookie)?;
-    if cookie_value != state_param {
+    // Constant-time compare so a timing side-channel can't recover the CSRF
+    // secret one byte at a time. A length mismatch short-circuits to non-equal.
+    if cookie_value
+        .as_bytes()
+        .ct_eq(state_param.as_bytes())
+        .unwrap_u8()
+        != 1
+    {
         return Err(RouteError::CsrfStateMismatch);
     }
 
@@ -178,8 +186,12 @@ where
         Some(u) => u,
         None => {
             let mut new_user = NewUser::new();
-            if let Some(e) = verified.email.as_deref() {
-                new_user = new_user.with_email(e);
+            // Only persist the email when Apple asserted it's verified — an
+            // unverified `email` claim must not seed the account.
+            if verified.email_verified == Some(true) {
+                if let Some(e) = verified.email.as_deref() {
+                    new_user = new_user.with_email(e);
+                }
             }
             // Apple's name comes from the one-shot `user` form field; the
             // id_token doesn't carry `name`. If first_login is empty, we leave

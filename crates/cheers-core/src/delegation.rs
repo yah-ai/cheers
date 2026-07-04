@@ -17,9 +17,10 @@
 //! `user_signing_key` is the 32-byte Ed25519 public key the signature must
 //! verify under; both it and the 64-byte `signature` ride on the wire as
 //! base64url-no-pad strings (matches the JWKS / service-principal-key encoding
-//! the doc uses elsewhere). `bound_to` MUST be a user principal — invariant
-//! is checked by [`UserDelegation::new`] up front so a misconfigured payload
-//! never reaches the authority.
+//! the doc uses elsewhere). `bound_to` MUST be a user principal — invariant is
+//! checked by [`UserDelegation::new`] *and* the [`Deserialize`] impl up front
+//! so a misconfigured (or hand-crafted wire) payload never reaches the
+//! authority.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -47,8 +48,10 @@ pub enum DelegationError {
 /// The signed payload is the canonical byte serialization of every field
 /// except `signature` itself (see [`signing_payload`](Self::signing_payload)).
 /// Construct via [`UserDelegation::new`] — the constructor enforces the
-/// invariants the authority would otherwise reject downstream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// invariants the authority would otherwise reject downstream. Deserialization
+/// runs those same checks via [`RawUserDelegation`], so a wire payload can't
+/// bypass them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct UserDelegation {
     /// The user authorising the delegation. MUST have
@@ -124,6 +127,38 @@ impl UserDelegation {
             user_signing_key: &self.user_signing_key,
         };
         serde_json::to_vec(&unsigned).expect("UnsignedPayload serializes infallibly")
+    }
+}
+
+/// The wire shape [`UserDelegation`] deserializes *through* — a structural
+/// mirror with the same fields + serde attrs, but no invariant checks. The
+/// [`Deserialize`] impl below reconstructs through [`UserDelegation::new`] so a
+/// hand-crafted payload can't bypass the constructor's guarantees (mirrors
+/// [`Principal`](crate::Principal) / `RawPrincipal`).
+#[derive(Deserialize)]
+struct RawUserDelegation {
+    bound_to: PrincipalId,
+    camp_id: String,
+    issued_at: i64,
+    expires_at: i64,
+    #[serde(with = "ed25519_public_key_serde")]
+    user_signing_key: [u8; 32],
+    #[serde(with = "ed25519_signature_serde")]
+    signature: [u8; 64],
+}
+
+impl<'de> Deserialize<'de> for UserDelegation {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let raw = RawUserDelegation::deserialize(de)?;
+        UserDelegation::new(
+            raw.bound_to,
+            raw.camp_id,
+            raw.issued_at,
+            raw.expires_at,
+            raw.user_signing_key,
+            raw.signature,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -306,6 +341,35 @@ mod tests {
         let err = serde_json::from_str::<UserDelegation>(json).unwrap_err();
         assert!(
             err.to_string().contains("32 user_signing_key bytes"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_non_user_bound_to() {
+        // A wire delegation whose `bound_to` names a non-user principal must
+        // fail to deserialize — the raw intermediate can't bypass `new()`.
+        let json = serde_json::to_string(&sample(1_000))
+            .unwrap()
+            .replace("user:alice", "svc:yubaba");
+        let err = serde_json::from_str::<UserDelegation>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("bound_to must be a user principal"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_expires_at_or_before_issued_at() {
+        // sample(1_000) has issued_at:1000, expires_at:1600. Collapse expiry to
+        // equal issued_at on the wire and the deserializer must reject it.
+        let json = serde_json::to_string(&sample(1_000))
+            .unwrap()
+            .replace("\"expires_at\":1600", "\"expires_at\":1000");
+        let err = serde_json::from_str::<UserDelegation>(&json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expires_at must be strictly greater than issued_at"),
             "got {err}"
         );
     }

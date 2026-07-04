@@ -3,7 +3,9 @@
 //! Three buckets:
 //! - `RowNotFound` → [`StoreError::NotFound`]
 //! - UNIQUE/PK violation → [`StoreError::Conflict`]
-//! - Everything else → [`StoreError::Backend`] with a short message
+//! - Everything else → [`StoreError::Backend`] with a generic opaque message
+//!   (the raw driver error is logged server-side, never handed to the caller —
+//!   it can carry SQL fragments, schema names, or connection details)
 //!
 //! Conflict detection is backend-specific (Postgres `23505`, SQLite
 //! `UNIQUE constraint failed`); we pattern-match both shapes so the same
@@ -17,7 +19,13 @@ pub fn map_sqlx_error(err: SqlxError) -> StoreError {
     match err {
         SqlxError::RowNotFound => StoreError::NotFound,
         SqlxError::Database(db_err) if is_unique_violation(db_err.as_ref()) => StoreError::Conflict,
-        other => StoreError::Backend(other.to_string()),
+        other => {
+            // Don't surface the raw driver error to the caller — it can leak SQL
+            // fragments, table/column names, or connection details. Log the full
+            // error server-side and hand back an opaque message.
+            tracing::debug!(error = %other, "sqlx backend error");
+            StoreError::Backend("database error".to_owned())
+        }
     }
 }
 

@@ -61,6 +61,10 @@ sha2 = { version = "0.10", default-features = false }
 # the tree via cheers's openidconnect dep.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"], optional = true }
+# Constant-time compare of the CSRF cookie against the IdP-echoed `state` in the
+# OIDC callback handlers — avoids a timing side-channel on the secret compare.
+# Same crate cheers-server uses (codec.rs); only pulled under google/apple.
+subtle = { version = "2", optional = true }
 # uuid (passkey only) — webauthn-rs uses `Uuid` as the WebAuthn user-handle
 # type; we derive a stable v5 handle from cheers's `UserId` so the same user
 # always reaches the same handle without a UserId↔Uuid table. webauthn-rs
@@ -108,6 +112,7 @@ google = [
     "dep:reqwest",
     "dep:openidconnect",
     "dep:getrandom",
+    "dep:subtle",
     "cheers/google",
 ]
 # Wire the Apple Sign-In form-post handlers.
@@ -116,6 +121,7 @@ apple = [
     "dep:reqwest",
     "dep:openidconnect",
     "dep:getrandom",
+    "dep:subtle",
     "cheers/apple",
 ]
 # Wire the passkey (WebAuthn) register + authenticate handlers. Pulls in
