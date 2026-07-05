@@ -225,8 +225,18 @@ impl RefreshTokenRecord {
 pub trait RefreshStore: Send + Sync {
     async fn put(&self, record: &RefreshTokenRecord) -> Result<(), StoreError>;
     async fn get(&self, token: &str) -> Result<Option<RefreshTokenRecord>, StoreError>;
-    /// Mark `token` as consumed. Returns `NotFound` if unknown.
-    async fn mark_consumed(&self, token: &str) -> Result<(), StoreError>;
+    /// Atomically transition `token` from unconsumed to consumed.
+    ///
+    /// Returns `Ok(true)` iff *this* call flipped `consumed` false→true, and
+    /// `Ok(false)` if no unconsumed row matched — the token was already
+    /// consumed (the losing side of a concurrent rotation) or is absent. The
+    /// check-and-set MUST be a single atomic operation (a conditional
+    /// `UPDATE … WHERE consumed = FALSE`, a Lua CAS, a guarded map mutation);
+    /// a read-then-write lets two concurrent rotations of the same token both
+    /// observe `consumed = false` and each mint a live successor. The rotator
+    /// relies on the returned bool to detect that double-spend and revoke the
+    /// chain, so an impl that always returns `true` reopens the replay hole.
+    async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError>;
     /// Revoke every record in `chain_id`. Idempotent.
     async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError>;
 }
@@ -373,10 +383,17 @@ mod tests {
         async fn get(&self, token: &str) -> Result<Option<RefreshTokenRecord>, StoreError> {
             Ok(self.0.lock().unwrap().get(token).cloned())
         }
-        async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
+        async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
+            // Atomic under the map lock: only the caller that observes
+            // `consumed == false` flips it and reports `true`.
             let mut g = self.0.lock().unwrap();
-            g.get_mut(token).ok_or(StoreError::NotFound)?.consumed = true;
-            Ok(())
+            match g.get_mut(token) {
+                Some(r) if !r.consumed => {
+                    r.consumed = true;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
         }
         async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {
             let mut g = self.0.lock().unwrap();
@@ -435,7 +452,12 @@ mod tests {
                 revoked: false,
             };
             s.put(&r).await.unwrap();
-            s.mark_consumed("tok-1").await.unwrap();
+            // First consume transitions the row and reports true; a second
+            // consume finds nothing unconsumed and reports false (this is the
+            // signal the rotator turns into replay detection).
+            assert!(s.mark_consumed("tok-1").await.unwrap());
+            assert!(!s.mark_consumed("tok-1").await.unwrap());
+            assert!(!s.mark_consumed("no-such-token").await.unwrap());
             assert!(s.get("tok-1").await.unwrap().unwrap().consumed);
             s.revoke_chain("chain-A").await.unwrap();
             assert!(s.get("tok-1").await.unwrap().unwrap().revoked);

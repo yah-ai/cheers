@@ -374,10 +374,15 @@ mod tests {
         async fn get(&self, token: &str) -> Result<Option<RefreshTokenRecord>, StoreError> {
             Ok(self.0.lock().unwrap().get(token).cloned())
         }
-        async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
+        async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
             let mut g = self.0.lock().unwrap();
-            g.get_mut(token).ok_or(StoreError::NotFound)?.consumed = true;
-            Ok(())
+            match g.get_mut(token) {
+                Some(r) if !r.consumed => {
+                    r.consumed = true;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
         }
         async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {
             let mut g = self.0.lock().unwrap();

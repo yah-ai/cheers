@@ -183,11 +183,23 @@ impl<'s, S: RefreshStore + ?Sized> RefreshRotator<'s, S> {
             return Err(RefreshError::Expired);
         }
 
-        // Mark consumed *first*: if the successor put fails afterwards,
-        // the worst case is a chain that can't be rotated further (the
-        // client retries, gets `Replay`, and re-authenticates) — far
-        // better than handing out two live tokens for one consume.
-        self.store.mark_consumed(&existing.token).await?;
+        // Atomically consume *first*, and treat losing the race as a replay.
+        // The `existing.consumed` check above is only a fast path off a stale
+        // read — two concurrent rotations of the same live token can both pass
+        // it. `mark_consumed` is the real gate: it flips false→true in a single
+        // atomic step and returns `true` only to the winner. A `false` here
+        // means a concurrent rotation already consumed this token (a
+        // double-spend / stolen-token replay), so revoke the whole chain and
+        // reject — exactly as if the caller had re-presented a consumed token.
+        //
+        // Consuming before minting the successor is deliberate: if the
+        // successor `put` fails afterwards the worst case is a chain that can't
+        // rotate further (the client retries, gets `Replay`, re-authenticates)
+        // — far better than handing out two live tokens for one consume.
+        if !self.store.mark_consumed(&existing.token).await? {
+            self.store.revoke_chain(&existing.chain_id).await?;
+            return Err(RefreshError::Replay);
+        }
 
         let token = RefreshToken::generate();
         let record = RefreshTokenRecord {
@@ -236,10 +248,15 @@ mod tests {
         async fn get(&self, token: &str) -> Result<Option<RefreshTokenRecord>, StoreError> {
             Ok(self.0.lock().unwrap().get(token).cloned())
         }
-        async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
+        async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
             let mut g = self.0.lock().unwrap();
-            g.get_mut(token).ok_or(StoreError::NotFound)?.consumed = true;
-            Ok(())
+            match g.get_mut(token) {
+                Some(r) if !r.consumed => {
+                    r.consumed = true;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
         }
         async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {
             let mut g = self.0.lock().unwrap();
@@ -348,6 +365,43 @@ mod tests {
             // Even the still-fresh tip can no longer rotate.
             let err = r.rotate(c.token.as_str(), 140).await.unwrap_err();
             assert!(matches!(err, RefreshError::ChainRevoked), "got {err:?}");
+        });
+    }
+
+    #[test]
+    fn lost_consume_race_is_treated_as_replay() {
+        // Two concurrent rotations of the same live token: `get` still sees it
+        // unconsumed (so the fast-path replay check passes), but the atomic
+        // `mark_consumed` reports `false` because the other rotation won the
+        // race. The rotator must treat that as a replay and revoke the chain —
+        // otherwise a double-spend mints two live successors.
+        struct LostRace(MemRefreshStore);
+        #[async_trait]
+        impl RefreshStore for LostRace {
+            async fn put(&self, r: &RefreshTokenRecord) -> Result<(), StoreError> {
+                self.0.put(r).await
+            }
+            async fn get(&self, t: &str) -> Result<Option<RefreshTokenRecord>, StoreError> {
+                self.0.get(t).await
+            }
+            async fn mark_consumed(&self, _t: &str) -> Result<bool, StoreError> {
+                Ok(false) // always "lost the race"
+            }
+            async fn revoke_chain(&self, c: &str) -> Result<(), StoreError> {
+                self.0.revoke_chain(c).await
+            }
+        }
+        let store = LostRace(MemRefreshStore::default());
+        let r = RefreshRotator::new(&store, 3_600);
+        pollster::block_on(async {
+            let a = r.mint_root(user(), device(), 100).await.unwrap();
+            let err = r.rotate(a.token.as_str(), 110).await.unwrap_err();
+            assert!(matches!(err, RefreshError::Replay), "got {err:?}");
+            // The chain is revoked as a side effect of the lost race.
+            assert!(
+                store.0.get(a.token.as_str()).await.unwrap().unwrap().revoked,
+                "chain should be revoked when a rotation loses the consume race"
+            );
         });
     }
 
