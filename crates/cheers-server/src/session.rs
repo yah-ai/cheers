@@ -586,9 +586,10 @@ mod tests {
                 .unwrap();
 
             // Successor refresh links back to the root and shares the chain.
+            // `parent` is the stored key (the hash), not the raw secret.
             assert_eq!(
                 rotated.refresh.record.parent.as_deref(),
-                Some(first.refresh.token.as_str())
+                Some(first.refresh.record.token.as_str())
             );
             assert_eq!(
                 rotated.refresh.record.chain_id,

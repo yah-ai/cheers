@@ -170,12 +170,14 @@ pub trait UserStore: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RefreshTokenRecord {
-    /// Opaque secret presented by the client (typically 32 random bytes,
-    /// base64url-encoded).
+    /// Storage key for this token: the SHA-256 hash (hex) of the opaque secret
+    /// the client holds, computed by the rotator. The raw secret is never
+    /// persisted, so a read-only store leak yields hashes, not usable tokens.
+    /// `RefreshStore` impls treat this as an opaque primary key.
     pub token: String,
     /// Stable identifier shared across every token in this rotation chain.
     pub chain_id: String,
-    /// Token this one rotated from (`None` for the chain root).
+    /// The `token` (hash) this one rotated from (`None` for the chain root).
     pub parent: Option<String>,
     pub user_id: UserId,
     pub device_id: DeviceId,
