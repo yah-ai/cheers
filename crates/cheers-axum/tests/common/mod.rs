@@ -452,6 +452,23 @@ impl OwnershipStore for MemOwnershipStore {
             .cloned()
             .collect())
     }
+
+    async fn list_for_resource(
+        &self,
+        resource_kind: &str,
+        resource_id: &str,
+    ) -> Result<Vec<OwnershipRow>, StoreError> {
+        let g = self.inner.lock().unwrap();
+        Ok(g.rows
+            .values()
+            .filter(|r| {
+                r.resource_kind == resource_kind
+                    && r.resource_id == resource_id
+                    && r.revoked_at.is_none()
+            })
+            .cloned()
+            .collect())
+    }
 }
 
 // ---------------------------------------------------------------------------

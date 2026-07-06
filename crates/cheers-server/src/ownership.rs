@@ -196,6 +196,22 @@ pub trait OwnershipStore: Send + Sync {
         &self,
         principal: &PrincipalId,
     ) -> Result<Vec<OwnershipRow>, StoreError>;
+
+    /// Live (non-revoked) rows over one resource — every principal currently
+    /// holding a relationship on `(resource_kind, resource_id)`, in
+    /// unspecified order.
+    ///
+    /// Exists for eviction-parity sweeps (R593-F9, W268 Q6): when a device
+    /// (`resource_kind = "node"`) is re-enrolled under a *different* owner —
+    /// the device changed hands — the enrollment writer must find and revoke
+    /// the previous owner's still-live row, which `list_for_principal` cannot
+    /// see (it is keyed on the *old* principal, which the new ceremony does
+    /// not know).
+    async fn list_for_resource(
+        &self,
+        resource_kind: &str,
+        resource_id: &str,
+    ) -> Result<Vec<OwnershipRow>, StoreError>;
 }
 
 #[cfg(test)]
