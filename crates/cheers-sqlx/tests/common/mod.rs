@@ -130,10 +130,20 @@ pub async fn refresh_store_put_get_consume_revoke<R: RefreshStore + ?Sized>(
     assert_eq!(back, r1);
     assert!(refresh.get("missing").await.unwrap().is_none());
 
-    refresh.mark_consumed("tok-1").await.expect("consume");
+    // First consume transitions the row and reports true.
+    assert!(
+        refresh.mark_consumed("tok-1").await.expect("consume"),
+        "first consume should transition the row"
+    );
     let back = refresh.get("tok-1").await.unwrap().unwrap();
     assert!(back.consumed);
     assert!(!back.revoked);
+    // A second consume of the same token finds nothing unconsumed and reports
+    // false — the atomic double-spend guard the rotator reads as a replay.
+    assert!(
+        !refresh.mark_consumed("tok-1").await.expect("second consume"),
+        "second consume must report no transition"
+    );
 
     // Successor in same chain.
     let r2 = fixture_refresh(
@@ -157,11 +167,12 @@ pub async fn refresh_store_put_get_consume_revoke<R: RefreshStore + ?Sized>(
     // Re-revoke is idempotent.
     refresh.revoke_chain("chain-A").await.expect("idempotent");
 
-    // mark_consumed on a missing token => NotFound.
-    match refresh.mark_consumed("never-existed").await {
-        Err(StoreError::NotFound) => {}
-        other => panic!("expected NotFound, got {other:?}"),
-    }
+    // mark_consumed on a missing token reports no transition (Ok(false)), not
+    // an error — the rotator only calls it for a token it just read.
+    assert!(
+        !refresh.mark_consumed("never-existed").await.expect("missing"),
+        "consuming an absent token reports no transition"
+    );
 }
 
 pub async fn refresh_store_other_chain_unaffected<R: RefreshStore + ?Sized>(

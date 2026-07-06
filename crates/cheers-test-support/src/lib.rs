@@ -119,19 +119,20 @@ impl RefreshStore for TursoRefreshStore {
         }
     }
 
-    async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
+    async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
+        // Atomic consume gate: only a row still at `consumed = 0` is flipped,
+        // so exactly one of two racing rotations touches it. 0 rows affected
+        // means already consumed (or absent) — a lost race / replay.
         let n = self
             .conn
             .execute(
-                "UPDATE refresh_tokens SET consumed = 1 WHERE token = ?1",
+                "UPDATE refresh_tokens SET consumed = 1 \
+                 WHERE token = ?1 AND consumed = 0",
                 params![token.to_owned()],
             )
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        if n == 0 {
-            return Err(StoreError::NotFound);
-        }
-        Ok(())
+        Ok(n > 0)
     }
 
     async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {

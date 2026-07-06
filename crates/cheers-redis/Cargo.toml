@@ -38,6 +38,8 @@ default-features = false
 features = [
     "tokio-rustls-comp",
     "connection-manager",
+    # `Script` (Lua EVAL/EVALSHA) — powers the atomic mark_consumed CAS.
+    "script",
 ]
 
 [dev-dependencies]

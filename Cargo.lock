@@ -6039,6 +6039,7 @@ dependencies = [
  "rustls-pemfile",
  "rustls-pki-types",
  "ryu",
+ "sha1_smol",
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-util",

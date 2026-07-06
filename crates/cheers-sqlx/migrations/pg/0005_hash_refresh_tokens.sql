@@ -1,0 +1,20 @@
+-- Hash refresh tokens at rest (audit H3).
+--
+-- Refresh secrets used to be stored verbatim: the `refresh_tokens.token`
+-- primary key held the base64url secret the client presents. A read-only
+-- disclosure of this table (backup, replica, log, `SELECT` grant) therefore
+-- handed out live, usable session tokens for every user.
+--
+-- The rotator now persists only SHA-256(secret) (hex) as `token` and looks up
+-- by that hash; the raw secret never touches the database. Existing rows still
+-- hold plaintext secrets AND are keyed by the raw value, so the new hashed
+-- lookups can never match them — they are simultaneously a plaintext liability
+-- and dead weight. Delete them.
+--
+-- Operational impact: this invalidates every outstanding refresh token, so
+-- active sessions re-authenticate the next time their (short-lived) access
+-- token expires and a refresh is attempted. There is no portable way to
+-- re-hash the existing rows in place (SQLite has no SHA-256 builtin), and
+-- keeping plaintext around would defeat the fix — a one-time re-auth is the
+-- correct, bounded cost of moving secrets to hashed-at-rest.
+DELETE FROM refresh_tokens;

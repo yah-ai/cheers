@@ -23,16 +23,34 @@
 //! let rotator = RefreshRotator::new(store, /* ttl_seconds */ 60 * 60 * 24 * 30);
 //! let root = rotator.mint_root(UserId::new("u1"), DeviceId::new("d1"), 1_700_000_000).await?;
 //! let next = rotator.rotate(root.token.as_str(), 1_700_000_001).await?;
-//! assert_eq!(next.record.parent.as_deref(), Some(root.token.as_str()));
+//! assert_eq!(next.record.chain_id, root.record.chain_id); // successor shares the chain
 //! # Ok(()) }
 //! ```
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use cheers_core::{DeviceId, RefreshError, UserId};
 
 use crate::store::{RefreshStore, RefreshTokenRecord};
+
+/// Hash a refresh secret for storage. The raw secret is handed to the client;
+/// only this hash is ever persisted (as `RefreshTokenRecord::token` and looked
+/// up by the rotator), so a read-only leak of the DB or redis yields hashes,
+/// not usable session tokens. SHA-256 is sufficient here: the input is 256 bits
+/// of CSPRNG output, so there is nothing to brute-force — the hash exists to
+/// keep plaintext bearer secrets out of storage, not to slow a dictionary
+/// attack. Hex-encoded for a stable, index-friendly, ASCII key.
+fn hash_token(raw: &str) -> String {
+    let digest = Sha256::digest(raw.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
 
 /// Length of the opaque refresh secret in bytes (256 bits of CSPRNG).
 pub const REFRESH_TOKEN_BYTES: usize = 32;
@@ -42,7 +60,8 @@ pub const REFRESH_TOKEN_BYTES: usize = 32;
 pub const CHAIN_ID_BYTES: usize = 16;
 
 /// Opaque refresh-token secret. 32 random bytes, base64url-encoded for
-/// transport. The wire format is what gets stored in `RefreshTokenRecord::token`.
+/// transport. This is the client-facing wire value; only its
+/// [`hash_token`] digest is persisted in `RefreshTokenRecord::token`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RefreshToken(String);
@@ -140,7 +159,8 @@ impl<'s, S: RefreshStore + ?Sized> RefreshRotator<'s, S> {
         let token = RefreshToken::generate();
         let chain_id = ChainId::generate();
         let record = RefreshTokenRecord {
-            token: token.0.clone(),
+            // Persist only the hash; the raw `token` goes to the client below.
+            token: hash_token(token.as_str()),
             chain_id: chain_id.into_inner(),
             parent: None,
             user_id,
@@ -163,9 +183,13 @@ impl<'s, S: RefreshStore + ?Sized> RefreshRotator<'s, S> {
     ///   chain is revoked as a side effect of this call.
     /// - [`RefreshError::Expired`] — within TTL is required.
     pub async fn rotate(&self, presented: &str, now: i64) -> Result<Rotated, RefreshError> {
+        // The store is keyed by hash, so hash the presented secret before every
+        // lookup/mutation. `existing.token` read back is therefore already the
+        // hash (used as-is for mark_consumed and as the successor's `parent`).
+        let presented_hash = hash_token(presented);
         let existing = self
             .store
-            .get(presented)
+            .get(&presented_hash)
             .await?
             .ok_or(RefreshError::Unknown)?;
 
@@ -183,15 +207,27 @@ impl<'s, S: RefreshStore + ?Sized> RefreshRotator<'s, S> {
             return Err(RefreshError::Expired);
         }
 
-        // Mark consumed *first*: if the successor put fails afterwards,
-        // the worst case is a chain that can't be rotated further (the
-        // client retries, gets `Replay`, and re-authenticates) — far
-        // better than handing out two live tokens for one consume.
-        self.store.mark_consumed(&existing.token).await?;
+        // Atomically consume *first*, and treat losing the race as a replay.
+        // The `existing.consumed` check above is only a fast path off a stale
+        // read — two concurrent rotations of the same live token can both pass
+        // it. `mark_consumed` is the real gate: it flips false→true in a single
+        // atomic step and returns `true` only to the winner. A `false` here
+        // means a concurrent rotation already consumed this token (a
+        // double-spend / stolen-token replay), so revoke the whole chain and
+        // reject — exactly as if the caller had re-presented a consumed token.
+        //
+        // Consuming before minting the successor is deliberate: if the
+        // successor `put` fails afterwards the worst case is a chain that can't
+        // rotate further (the client retries, gets `Replay`, re-authenticates)
+        // — far better than handing out two live tokens for one consume.
+        if !self.store.mark_consumed(&existing.token).await? {
+            self.store.revoke_chain(&existing.chain_id).await?;
+            return Err(RefreshError::Replay);
+        }
 
         let token = RefreshToken::generate();
         let record = RefreshTokenRecord {
-            token: token.0.clone(),
+            token: hash_token(token.as_str()),
             chain_id: existing.chain_id.clone(),
             parent: Some(existing.token.clone()),
             user_id: existing.user_id.clone(),
@@ -236,10 +272,15 @@ mod tests {
         async fn get(&self, token: &str) -> Result<Option<RefreshTokenRecord>, StoreError> {
             Ok(self.0.lock().unwrap().get(token).cloned())
         }
-        async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
+        async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
             let mut g = self.0.lock().unwrap();
-            g.get_mut(token).ok_or(StoreError::NotFound)?.consumed = true;
-            Ok(())
+            match g.get_mut(token) {
+                Some(r) if !r.consumed => {
+                    r.consumed = true;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
         }
         async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {
             let mut g = self.0.lock().unwrap();
@@ -257,6 +298,17 @@ mod tests {
     }
     fn device() -> DeviceId {
         DeviceId::new("d1")
+    }
+
+    /// Look a record up by its *raw* token. The store is keyed by the hash the
+    /// rotator computes, so a test can't `get` a raw secret directly — it hashes
+    /// the same way first.
+    async fn stored<S: RefreshStore + ?Sized>(store: &S, raw: &str) -> RefreshTokenRecord {
+        store
+            .get(&hash_token(raw))
+            .await
+            .unwrap()
+            .expect("record present")
     }
 
     #[test]
@@ -289,19 +341,23 @@ mod tests {
             assert_eq!(root.record.expires_at, 3_700);
 
             let next = r.rotate(root.token.as_str(), 200).await.unwrap();
-            assert_eq!(next.record.parent.as_deref(), Some(root.token.as_str()));
+            // `parent` links by the stored key (the hash), not the raw secret.
+            assert_eq!(next.record.parent.as_deref(), Some(root.record.token.as_str()));
             assert_eq!(next.record.chain_id, root.record.chain_id);
             assert_eq!(next.record.user_id, root.record.user_id);
             assert_eq!(next.record.device_id, root.record.device_id);
             assert_ne!(next.token, root.token);
+            // The persisted key is the hash, never the raw secret.
+            assert_ne!(next.record.token.as_str(), next.token.as_str());
+            assert_eq!(next.record.token, hash_token(next.token.as_str()));
 
             // Old token now reads as consumed.
-            let stored_root = store.get(root.token.as_str()).await.unwrap().unwrap();
+            let stored_root = stored(&store, root.token.as_str()).await;
             assert!(stored_root.consumed);
             assert!(!stored_root.revoked);
 
             // The successor is fresh.
-            let stored_next = store.get(next.token.as_str()).await.unwrap().unwrap();
+            let stored_next = stored(&store, next.token.as_str()).await;
             assert!(!stored_next.consumed);
             assert!(!stored_next.revoked);
         });
@@ -320,9 +376,9 @@ mod tests {
             for hop in [&a, &b, &c, &d] {
                 assert_eq!(hop.record.chain_id, a.record.chain_id);
             }
-            assert_eq!(b.record.parent.as_deref(), Some(a.token.as_str()));
-            assert_eq!(c.record.parent.as_deref(), Some(b.token.as_str()));
-            assert_eq!(d.record.parent.as_deref(), Some(c.token.as_str()));
+            assert_eq!(b.record.parent.as_deref(), Some(a.record.token.as_str()));
+            assert_eq!(c.record.parent.as_deref(), Some(b.record.token.as_str()));
+            assert_eq!(d.record.parent.as_deref(), Some(c.record.token.as_str()));
         });
     }
 
@@ -341,13 +397,50 @@ mod tests {
 
             // Every record in the chain is now revoked.
             for tok in [a.token.as_str(), b.token.as_str(), c.token.as_str()] {
-                let rec = store.get(tok).await.unwrap().unwrap();
+                let rec = stored(&store, tok).await;
                 assert!(rec.revoked, "{tok} should be revoked");
             }
 
             // Even the still-fresh tip can no longer rotate.
             let err = r.rotate(c.token.as_str(), 140).await.unwrap_err();
             assert!(matches!(err, RefreshError::ChainRevoked), "got {err:?}");
+        });
+    }
+
+    #[test]
+    fn lost_consume_race_is_treated_as_replay() {
+        // Two concurrent rotations of the same live token: `get` still sees it
+        // unconsumed (so the fast-path replay check passes), but the atomic
+        // `mark_consumed` reports `false` because the other rotation won the
+        // race. The rotator must treat that as a replay and revoke the chain —
+        // otherwise a double-spend mints two live successors.
+        struct LostRace(MemRefreshStore);
+        #[async_trait]
+        impl RefreshStore for LostRace {
+            async fn put(&self, r: &RefreshTokenRecord) -> Result<(), StoreError> {
+                self.0.put(r).await
+            }
+            async fn get(&self, t: &str) -> Result<Option<RefreshTokenRecord>, StoreError> {
+                self.0.get(t).await
+            }
+            async fn mark_consumed(&self, _t: &str) -> Result<bool, StoreError> {
+                Ok(false) // always "lost the race"
+            }
+            async fn revoke_chain(&self, c: &str) -> Result<(), StoreError> {
+                self.0.revoke_chain(c).await
+            }
+        }
+        let store = LostRace(MemRefreshStore::default());
+        let r = RefreshRotator::new(&store, 3_600);
+        pollster::block_on(async {
+            let a = r.mint_root(user(), device(), 100).await.unwrap();
+            let err = r.rotate(a.token.as_str(), 110).await.unwrap_err();
+            assert!(matches!(err, RefreshError::Replay), "got {err:?}");
+            // The chain is revoked as a side effect of the lost race.
+            assert!(
+                stored(&store.0, a.token.as_str()).await.revoked,
+                "chain should be revoked when a rotation loses the consume race"
+            );
         });
     }
 
@@ -365,9 +458,9 @@ mod tests {
             // beyond the read), so a future call still reports Expired rather
             // than Replay. That matters for ops: an expired client should
             // re-auth without tripping the alarm-bell replay path.
-            let stored = store.get(a.token.as_str()).await.unwrap().unwrap();
-            assert!(!stored.consumed);
-            assert!(!stored.revoked);
+            let rec = stored(&store, a.token.as_str()).await;
+            assert!(!rec.consumed);
+            assert!(!rec.revoked);
         });
     }
 
@@ -404,13 +497,8 @@ mod tests {
             assert_ne!(a.record.chain_id, other.record.chain_id);
 
             r.revoke_chain(&a.record.chain_id).await.unwrap();
-            assert!(store.get(a.token.as_str()).await.unwrap().unwrap().revoked);
-            assert!(!store
-                .get(other.token.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .revoked);
+            assert!(stored(&store, a.token.as_str()).await.revoked);
+            assert!(!stored(&store, other.token.as_str()).await.revoked);
         });
     }
 }

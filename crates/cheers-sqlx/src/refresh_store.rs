@@ -101,16 +101,21 @@ mod pg {
             }))
         }
 
-        async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
-            let res = sqlx::query("UPDATE refresh_tokens SET consumed = TRUE WHERE token = $1")
-                .bind(token)
-                .execute(&self.pool)
-                .await
-                .map_err(map_sqlx_error)?;
-            if res.rows_affected() == 0 {
-                return Err(StoreError::NotFound);
-            }
-            Ok(())
+        async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
+            // Conditional update is the atomic consume gate: only the row that
+            // is still `consumed = FALSE` is flipped, so exactly one of two
+            // racing rotations touches a row. `rows_affected == 0` means the
+            // token was already consumed (or is gone) — the caller reads that
+            // as a lost race / replay.
+            let res = sqlx::query(
+                "UPDATE refresh_tokens SET consumed = TRUE \
+                 WHERE token = $1 AND consumed = FALSE",
+            )
+            .bind(token)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            Ok(res.rows_affected() > 0)
         }
 
         async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {
@@ -203,16 +208,19 @@ mod sqlite {
             }))
         }
 
-        async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
-            let res = sqlx::query("UPDATE refresh_tokens SET consumed = 1 WHERE token = ?")
-                .bind(token)
-                .execute(&self.pool)
-                .await
-                .map_err(map_sqlx_error)?;
-            if res.rows_affected() == 0 {
-                return Err(StoreError::NotFound);
-            }
-            Ok(())
+        async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
+            // Atomic consume gate — see the Postgres impl. Only a row still at
+            // `consumed = 0` is flipped; 0 rows affected means already consumed
+            // (or absent), which the rotator reads as a lost race / replay.
+            let res = sqlx::query(
+                "UPDATE refresh_tokens SET consumed = 1 \
+                 WHERE token = ? AND consumed = 0",
+            )
+            .bind(token)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            Ok(res.rows_affected() > 0)
         }
 
         async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {

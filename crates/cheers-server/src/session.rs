@@ -374,10 +374,15 @@ mod tests {
         async fn get(&self, token: &str) -> Result<Option<RefreshTokenRecord>, StoreError> {
             Ok(self.0.lock().unwrap().get(token).cloned())
         }
-        async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
+        async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
             let mut g = self.0.lock().unwrap();
-            g.get_mut(token).ok_or(StoreError::NotFound)?.consumed = true;
-            Ok(())
+            match g.get_mut(token) {
+                Some(r) if !r.consumed => {
+                    r.consumed = true;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
         }
         async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {
             let mut g = self.0.lock().unwrap();
@@ -581,9 +586,10 @@ mod tests {
                 .unwrap();
 
             // Successor refresh links back to the root and shares the chain.
+            // `parent` is the stored key (the hash), not the raw secret.
             assert_eq!(
                 rotated.refresh.record.parent.as_deref(),
-                Some(first.refresh.token.as_str())
+                Some(first.refresh.record.token.as_str())
             );
             assert_eq!(
                 rotated.refresh.record.chain_id,
