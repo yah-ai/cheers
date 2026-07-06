@@ -167,10 +167,19 @@ where
 }
 
 /// `GET /ownership?principal_id=<p>` — live (non-revoked) rows held by
-/// `principal_id`, as a JSON array. Requires [`Scope::OwnershipWrite`]
-/// like the writes — this is the writer's management read (see module
-/// doc), not a general query surface. The principal filter is mandatory;
-/// there is no unfiltered dump of the table.
+/// `principal_id` **that this caller itself granted**, as a JSON array.
+/// Requires [`Scope::OwnershipWrite`] like the writes — this is the writer's
+/// management read (see module doc), not a general query surface. The
+/// principal filter is mandatory; there is no unfiltered dump of the table.
+///
+/// R593-F8/F9 tightening: the result is additionally filtered to rows whose
+/// `granted_by` matches the caller's own verified `sub`. Before this, any
+/// `ownership:write`-scoped bearer (any service principal) could enumerate
+/// ownership rows for *any* `principal_id`, including ones a different
+/// service wrote — a cross-tenant read leak beyond what a single writer
+/// needs to manage its own grants (the stated purpose in the module doc:
+/// "the writer can manage what it wrote"). A compromised token from one
+/// service can no longer see another service's rows through this route.
 pub async fn list<O>(
     State(state): State<Arc<OwnershipState<O>>>,
     headers: HeaderMap,
@@ -182,14 +191,29 @@ where
     let now = now_unix();
     let claims = authenticate_mcp(&headers, &state.mcp, now)?;
     claims.require_scope(Scope::OwnershipWrite)?;
-    let rows = state.store.list_for_principal(&query.principal_id).await?;
+    let rows = state
+        .store
+        .list_for_principal(&query.principal_id)
+        .await?
+        .into_iter()
+        .filter(|r| r.granted_by == claims.sub)
+        .collect();
     Ok(Json(rows))
 }
 
-/// `DELETE /ownership/{id}` — soft-delete by id. Returns `204 No Content`
-/// on success, `404 Not Found` ([`RouteError::UnknownOwnership`]) when the
-/// id does not exist. Re-revoking an already-revoked row is a no-op (the
-/// underlying store treats it as idempotent).
+/// `DELETE /ownership/{id}` — soft-delete by id, but only when the row was
+/// `granted_by` the caller's own verified `sub`. Returns `204 No Content` on
+/// success, `404 Not Found` ([`RouteError::UnknownOwnership`]) both when the
+/// id does not exist AND when it exists but belongs to a different writer —
+/// deliberately the same response for both cases so a caller can't use this
+/// route to probe for the existence of another service's rows (an
+/// existence-oracle via 403-vs-404). Re-revoking an already-revoked row is a
+/// no-op (the underlying store treats it as idempotent).
+///
+/// R593-F8/F9 tightening: previously any `ownership:write`-scoped bearer
+/// could revoke *any* row by id regardless of who granted it — a compromised
+/// or over-scoped token from one service could nuke another service's
+/// enrollment/ownership grants. The ownership check below closes that.
 pub async fn revoke<O>(
     State(state): State<Arc<OwnershipState<O>>>,
     headers: HeaderMap,
@@ -201,6 +225,15 @@ where
     let now = now_unix();
     let claims = authenticate_mcp(&headers, &state.mcp, now)?;
     claims.require_scope(Scope::OwnershipWrite)?;
+    let row = state
+        .store
+        .get(&id)
+        .await
+        .map_err(map_store_error)?
+        .ok_or(RouteError::UnknownOwnership)?;
+    if row.granted_by != claims.sub {
+        return Err(RouteError::UnknownOwnership);
+    }
     state
         .store
         .revoke_by_id(&id, now)

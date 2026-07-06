@@ -269,6 +269,7 @@ pub mod audit;
 pub mod camps;
 pub mod cookie;
 pub mod discovery;
+pub mod enrollment;
 pub mod error;
 pub mod jwks;
 pub mod mcp;
@@ -294,6 +295,10 @@ pub use admin::{
 pub use audit::{AuditIngestBody, AuditIngestResponse, AuditState};
 pub use camps::{CampAdminState, CampBootstrapResponse, CreateCampBootstrapBody};
 pub use cookie::CsrfCookieConfig;
+pub use enrollment::{
+    ENROLLMENT_GRANTED_BY, EnrollNodeBody, EnrollmentState, NODE_RESOURCE_KIND as ENROLLMENT_NODE_RESOURCE_KIND,
+    OWNS_RELATIONSHIP as ENROLLMENT_OWNS_RELATIONSHIP,
+};
 pub use discovery::{
     DiscoveryState, GRANT_TYPES_SUPPORTED, OPENID_CONFIGURATION_PATH, OpenIdConfiguration,
     SUBJECT_TYPES_SUPPORTED,
