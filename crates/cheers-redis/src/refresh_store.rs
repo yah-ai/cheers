@@ -18,9 +18,35 @@ use cheers_core::StoreError;
 use cheers_server::store::{RefreshStore, RefreshTokenRecord};
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::DEFAULT_PREFIX;
+
+/// Atomic compare-and-set backing [`RefreshStore::mark_consumed`]. A Lua script
+/// runs to completion without interleaving, so it is the consume gate: GET the
+/// record, return 0 if it is missing / undecodable / already consumed,
+/// otherwise flip `consumed`, re-SET preserving the remaining TTL, and return 1.
+/// Exactly one of two racing rotations can get 1 back.
+static MARK_CONSUMED_CAS: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        local v = redis.call('GET', KEYS[1])
+        if not v then return 0 end
+        local ok, rec = pcall(cjson.decode, v)
+        if not ok or rec.consumed then return 0 end
+        rec.consumed = true
+        local ttl = redis.call('TTL', KEYS[1])
+        local nv = cjson.encode(rec)
+        if ttl and ttl > 0 then
+            redis.call('SET', KEYS[1], nv, 'EX', ttl)
+        else
+            redis.call('SET', KEYS[1], nv)
+        end
+        return 1
+        ",
+    )
+});
 
 fn map_redis_err(err: redis::RedisError) -> StoreError {
     StoreError::Backend(err.to_string())
@@ -124,38 +150,25 @@ impl RefreshStore for RedisRefreshStore {
         }
     }
 
-    async fn mark_consumed(&self, token: &str) -> Result<(), StoreError> {
+    async fn mark_consumed(&self, token: &str) -> Result<bool, StoreError> {
         let mut conn = self.conn.clone();
         let key = self.token_key(token);
-        let payload: Option<Vec<u8>> = conn.get(&key).await.map_err(map_redis_err)?;
-        let bytes = payload.ok_or(StoreError::NotFound)?;
-        let mut rec: RefreshTokenRecord = serde_json::from_slice(&bytes).map_err(|e| {
-            StoreError::Backend(format!("deserializing RefreshTokenRecord: {e}"))
-        })?;
-        if rec.consumed {
-            return Ok(()); // Already consumed — idempotent.
-        }
-        // Mutating an `#[non_exhaustive]` struct's fields from outside the
-        // crate is allowed because all fields are `pub`. (The non_exhaustive
-        // shield only blocks struct-literal *construction*.)
-        rec.consumed = true;
-        let new_payload = serde_json::to_vec(&rec).map_err(|e| {
-            StoreError::Backend(format!("re-serializing RefreshTokenRecord: {e}"))
-        })?;
-        // Preserve whatever TTL was left on the original key.
-        let ttl: i64 = conn.ttl(&key).await.map_err(map_redis_err)?;
-        if ttl > 0 {
-            let _: () = conn
-                .set_ex(&key, new_payload.as_slice(), ttl as u64)
-                .await
-                .map_err(map_redis_err)?;
-        } else {
-            // TTL of -1 means no expiry (shouldn't happen for us). -2 means
-            // the key vanished between our GET and now — race with expiry;
-            // treat as a no-op.
-            let _: () = conn.set(&key, new_payload.as_slice()).await.map_err(map_redis_err)?;
-        }
-        Ok(())
+        // The read-modify-write must be atomic, or two concurrent rotations of
+        // the same token both read `consumed = false` and each mint a live
+        // successor (the H2 double-spend). A Lua script executes to completion
+        // without interleaving, so it is the compare-and-set: decode the
+        // record, bail with 0 if it is missing or already consumed, otherwise
+        // flip `consumed`, re-encode preserving the remaining TTL, and return 1.
+        //
+        // cjson round-trips this record faithfully — every field is a string,
+        // bool, or small integer timestamp (well within cjson's integer
+        // precision), and serde reads a dropped null `parent` back as `None`.
+        let flipped: i64 = MARK_CONSUMED_CAS
+            .key(&key)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(map_redis_err)?;
+        Ok(flipped == 1)
     }
 
     async fn revoke_chain(&self, chain_id: &str) -> Result<(), StoreError> {
