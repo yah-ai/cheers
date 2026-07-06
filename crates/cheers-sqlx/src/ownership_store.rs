@@ -202,6 +202,25 @@ mod pg {
             .map_err(map_sqlx_error)?;
             rows.into_iter().map(row_from).collect()
         }
+
+        async fn list_for_resource(
+            &self,
+            resource_kind: &str,
+            resource_id: &str,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            let rows = sqlx::query(
+                "SELECT id, principal_id, resource_kind, resource_id, relationship,
+                        granted_by, on_behalf_of, granted_at, revoked_at
+                 FROM ownership
+                 WHERE resource_kind = $1 AND resource_id = $2 AND revoked_at IS NULL",
+            )
+            .bind(resource_kind)
+            .bind(resource_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            rows.into_iter().map(row_from).collect()
+        }
     }
 }
 
@@ -355,6 +374,25 @@ mod sqlite {
                  WHERE principal_id = ? AND revoked_at IS NULL",
             )
             .bind(principal.to_string())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            rows.into_iter().map(row_from).collect()
+        }
+
+        async fn list_for_resource(
+            &self,
+            resource_kind: &str,
+            resource_id: &str,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            let rows = sqlx::query(
+                "SELECT id, principal_id, resource_kind, resource_id, relationship,
+                        granted_by, on_behalf_of, granted_at, revoked_at
+                 FROM ownership
+                 WHERE resource_kind = ? AND resource_id = ? AND revoked_at IS NULL",
+            )
+            .bind(resource_kind)
+            .bind(resource_id)
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;

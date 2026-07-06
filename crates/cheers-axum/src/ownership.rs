@@ -20,6 +20,20 @@
 //! in-memory row id, so eviction can still revoke it (R593-F4). General
 //! ownership reads happen through the minted `owns[]` claim, not here.
 //!
+//! ## Per-writer scoping (R593-F8/F9 tightening)
+//!
+//! `GET` and `DELETE` are additionally scoped to rows whose `granted_by`
+//! matches the caller's own verified `sub` — see [`list`] and [`revoke`]'s
+//! doc comments. Before this, holding *any* `ownership:write`-scoped token
+//! was sufficient to enumerate or revoke *any* principal's rows regardless
+//! of who wrote them, which is wider than the module's own stated purpose
+//! ("the writer can manage what it wrote"). `POST` is unaffected: its
+//! `principal_id` is deliberately caller-supplied (a service legitimately
+//! grants ownership to principals other than itself — that's the whole
+//! mechanism), and `granted_by` on the written row is already forced to the
+//! caller's own `sub`, so a caller can never write a row attributed to a
+//! different writer.
+//!
 //! ## Wiring
 //!
 //! ```no_run

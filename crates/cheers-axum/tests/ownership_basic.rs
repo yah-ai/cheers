@@ -522,3 +522,98 @@ async fn list_returns_live_rows_for_principal_and_requires_write_scope() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn list_only_returns_rows_granted_by_the_caller_r593_f9_tightening() {
+    // Two different services (svc:yubaba, svc:other-writer) each grant a row
+    // to the SAME principal (camp:shared). A caller authenticated as
+    // svc:yubaba must see only its own row through GET /ownership, even
+    // though both rows match the requested principal_id — closes the
+    // cross-writer enumeration gap the R593-F8 adversarial review flagged.
+    let (app, minter, store) = rig();
+    let now = now();
+
+    let shared = PrincipalId::camp("shared");
+    let mine = cheers_server::NewOwnership::new(
+        shared.clone(),
+        "service",
+        "svc-mine",
+        "owns",
+        PrincipalId::service("yubaba"),
+        None,
+    )
+    .unwrap();
+    store.insert(&mine, now).await.unwrap();
+    let theirs = cheers_server::NewOwnership::new(
+        shared.clone(),
+        "service",
+        "svc-theirs",
+        "owns",
+        PrincipalId::service("other-writer"),
+        None,
+    )
+    .unwrap();
+    store.insert(&theirs, now).await.unwrap();
+
+    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-scoped-list");
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/ownership?principal_id=camp:shared")
+        .header(header::AUTHORIZATION, auth(&token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "must see only its own row: {rows:?}");
+    assert_eq!(
+        rows[0].get("resource_id").and_then(|v| v.as_str()),
+        Some("svc-mine")
+    );
+}
+
+#[tokio::test]
+async fn delete_returns_404_for_a_row_granted_by_a_different_writer_r593_f9_tightening() {
+    // A row written by svc:other-writer must not be revocable by a caller
+    // authenticated as svc:yubaba even though both hold ownership:write —
+    // closes the cross-writer revoke gap. 404 (not 403) so the response
+    // can't be used as an existence oracle distinguishing "not yours" from
+    // "doesn't exist".
+    let (app, minter, store) = rig();
+    let now = now();
+
+    let new = cheers_server::NewOwnership::new(
+        PrincipalId::camp("camp-xyz"),
+        "service",
+        "svc-abc",
+        "owns",
+        PrincipalId::service("other-writer"),
+        None,
+    )
+    .unwrap();
+    let row = store.insert(&new, now).await.unwrap();
+
+    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-del-notmine");
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/ownership/{}", row.id))
+        .header(header::AUTHORIZATION, auth(&token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = body_to_string(resp.into_body()).await;
+    assert!(
+        body.contains("unknown_ownership"),
+        "expected unknown_ownership: {body}"
+    );
+
+    // The row is untouched — still live.
+    let row = store.get(&row.id).await.unwrap().unwrap();
+    assert!(
+        row.revoked_at.is_none(),
+        "a different writer's row must not be revoked"
+    );
+}

@@ -219,4 +219,11 @@ lan-pair = [
     "dep:thiserror",
     "dep:async-trait",
     "dep:getrandom",
+    # R593-F9's HttpEnrollmentSink POSTs to cheers-server's /enrollment/node
+    # route, authenticated with the accepter's OWN existing session bearer
+    # (never a static secret) — reqwest is the transport, `json` feature for
+    # the request-body helper.
+    "dep:reqwest",
+    "reqwest/json",
+    "reqwest/rustls-tls",
 ]

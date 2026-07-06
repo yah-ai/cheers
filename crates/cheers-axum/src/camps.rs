@@ -456,6 +456,13 @@ mod tests {
             ) -> Result<Vec<OwnershipRow>, StoreError> {
                 Ok(vec![])
             }
+            async fn list_for_resource(
+                &self,
+                _kind: &str,
+                _id: &str,
+            ) -> Result<Vec<OwnershipRow>, StoreError> {
+                Ok(vec![])
+            }
         }
 
         let (app, _verifier_minter, camp_authority, keys, _store) = rig();

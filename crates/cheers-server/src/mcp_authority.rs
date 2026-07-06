@@ -628,6 +628,25 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        async fn list_for_resource(
+            &self,
+            resource_kind: &str,
+            resource_id: &str,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| {
+                    r.revoked_at.is_none()
+                        && r.resource_kind == resource_kind
+                        && r.resource_id == resource_id
+                })
+                .cloned()
+                .collect())
+        }
     }
 
     // ---- assembly ----------------------------------------------------------

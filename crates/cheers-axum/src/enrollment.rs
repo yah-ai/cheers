@@ -1,6 +1,7 @@
-//! `POST /enrollment/node` — the server-mediated, user-session-authenticated
-//! writer for the LAN-pair enrollment row (R593-F9, W268 §"The binding:
-//! enrollment is an ownership row").
+//! `POST /enrollment/node` + `DELETE /enrollment/node/{node_id}` — the
+//! server-mediated, user-session-authenticated writer (and de-enroller) for
+//! the LAN-pair enrollment row (R593-F9, W268 §"The binding: enrollment is
+//! an ownership row").
 //!
 //! ## Why this route exists (not another `POST /ownership` caller)
 //!
@@ -50,6 +51,15 @@
 //! Idempotent create, mirroring [`crate::ownership::create`]: repairing the
 //! same device converges on one live row (200), not a stack of duplicates.
 //!
+//! ## Eviction parity (W268 Q6)
+//!
+//! Re-enrolling a node under a **different** user revokes the previous
+//! owner's live row first (see [`enroll_node`]) — a device that changed
+//! hands cannot leave two simultaneously-live owner bindings, which would
+//! otherwise keep satisfying R593-F6's token binding for the original owner.
+//! `DELETE /enrollment/node/{node_id}` ([`deenroll_node`]) is the explicit
+//! retire-a-device half, scoped to the caller's own row.
+//!
 //! ## Wiring
 //!
 //! ```no_run
@@ -73,9 +83,9 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{delete, post};
 use serde::Deserialize;
 
 use cheers_core::{PrincipalId, TokenVerifier};
@@ -141,8 +151,9 @@ impl<V, Rd, O> std::fmt::Debug for EnrollmentState<V, Rd, O> {
     }
 }
 
-/// Build a router mounting `POST /enrollment/node`. The product nests it
-/// under whatever base path it chose (`/api`, …).
+/// Build a router mounting `POST /enrollment/node` +
+/// `DELETE /enrollment/node/{node_id}`. The product nests it under whatever
+/// base path it chose (`/api`, …).
 pub fn router<V, Rd, O>(state: Arc<EnrollmentState<V, Rd, O>>) -> Router
 where
     V: TokenVerifier + Send + Sync + 'static,
@@ -151,6 +162,10 @@ where
 {
     Router::new()
         .route("/enrollment/node", post(enroll_node::<V, Rd, O>))
+        .route(
+            "/enrollment/node/{node_id}",
+            delete(deenroll_node::<V, Rd, O>),
+        )
         .with_state(state)
 }
 
@@ -159,6 +174,17 @@ where
 /// token), then writes idempotently: an identical live row returns `200`,
 /// a fresh one `201` (mirrors `POST /ownership`'s idempotency contract so a
 /// re-pair of the same device converges on one row).
+///
+/// ## Eviction parity on ownership change (W268 Q6, R593-F9)
+///
+/// Before writing, any *live* enrollment row binding this same node to a
+/// **different** principal is revoked — "the device changed hands":
+/// re-pairing under user B must not leave user A's stale row alive, because
+/// that stale row would keep satisfying R593-F6's token binding for the
+/// original owner after they gave the device away. Last completed
+/// (user-authenticated, physically-present LAN-pair) ceremony wins — the
+/// same trust model as the pairing itself. The sweep uses
+/// [`OwnershipStore::list_for_resource`], added for exactly this.
 pub async fn enroll_node<V, Rd, O>(
     State(state): State<Arc<EnrollmentState<V, Rd, O>>>,
     headers: HeaderMap,
@@ -182,20 +208,73 @@ where
         Some(principal),
     )?;
 
-    // Idempotency pre-query, same pattern as ownership::create: an
-    // identical live row already recording this (user, node) binding
-    // satisfies the request without stacking a duplicate.
-    let existing = state.store.list_for_principal(&new.principal_id).await?;
-    if let Some(row) = existing.into_iter().find(|r| {
+    // Q6 eviction-parity sweep: revoke live rows binding this node to any
+    // OTHER principal — the device changed hands; the previous owner's row
+    // must not stay live. Scoped to this route's own row shape (kind=node,
+    // relationship=owns) so it can never touch unrelated resource kinds.
+    let holders = state
+        .store
+        .list_for_resource(&new.resource_kind, &new.resource_id)
+        .await?;
+    for stale in holders.iter().filter(|r| {
         !r.is_revoked()
-            && r.resource_kind == new.resource_kind
-            && r.resource_id == new.resource_id
+            && r.relationship == new.relationship
+            && r.principal_id != new.principal_id
+    }) {
+        state.store.revoke_by_id(&stale.id, now).await?;
+    }
+
+    // Idempotency: an identical live row already recording this (user, node)
+    // binding satisfies the request without stacking a duplicate. Reuses the
+    // resource-scoped listing from the sweep above.
+    if let Some(row) = holders.into_iter().find(|r| {
+        !r.is_revoked()
+            && r.principal_id == new.principal_id
             && r.relationship == new.relationship
     }) {
         return Ok((StatusCode::OK, Json(row)));
     }
     let row = state.store.insert(&new, now).await?;
     Ok((StatusCode::CREATED, Json(row)))
+}
+
+/// `DELETE /enrollment/node/{node_id}` — de-enrollment: revoke the
+/// **caller's own** live enrollment row for `node_id`. `204 No Content` on
+/// success, `404 Not Found` when the caller holds no live row for that node
+/// (someone else's row for the same node is invisible here — same
+/// no-existence-oracle stance as the ownership route's per-writer scoping).
+///
+/// This is the explicit half of the Q6 eviction story: the automatic sweep
+/// in [`enroll_node`] covers "device re-paired by its new owner"; this
+/// route covers "owner retires a device" without waiting for anyone else to
+/// re-pair it.
+pub async fn deenroll_node<V, Rd, O>(
+    State(state): State<Arc<EnrollmentState<V, Rd, O>>>,
+    headers: HeaderMap,
+    Path(node_id): Path<String>,
+) -> Result<StatusCode, RouteError>
+where
+    V: TokenVerifier + Send + Sync,
+    Rd: RevocationReader,
+    O: OwnershipStore,
+{
+    let now = now_unix();
+    let claims = authenticate(&headers, &state.edge, now).await?;
+    let principal = PrincipalId::user(claims.sub.into_inner());
+    let mine = state
+        .store
+        .list_for_principal(&principal)
+        .await?
+        .into_iter()
+        .find(|r| {
+            !r.is_revoked()
+                && r.resource_kind == NODE_RESOURCE_KIND
+                && r.resource_id == node_id
+                && r.relationship == OWNS_RELATIONSHIP
+        })
+        .ok_or(RouteError::UnknownOwnership)?;
+    state.store.revoke_by_id(&mine.id, now).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn now_unix() -> i64 {
