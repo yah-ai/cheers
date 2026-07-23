@@ -42,4 +42,9 @@ proptest = "1"
 # R592-F3 golden-token fixtures (shared with cheers-verify / cheers-mock /
 # kamaji-bin / yubaba's minter). A dev-dependency cycle back into this crate
 # is fine — Cargo explicitly supports cyclic dev-dependencies.
-cheers-test-support = { path = "../cheers-test-support", version = "0.8.20" }
+# Path-only (NO version): cheers-test-support is publish=false, and cargo keeps
+# a *versioned* dev-dep in the published manifest — which would make publishing
+# cheers-server impossible (the version never lands on the registry). A
+# version-less path dev-dep is stripped at publish instead. cheers-verify's dep
+# on this same crate is already path-only for exactly this reason.
+cheers-test-support = { path = "../cheers-test-support" }
