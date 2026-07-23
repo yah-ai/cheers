@@ -13,9 +13,9 @@ name = "cheers_test_support"
 path = "src/lib.rs"
 
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.20" }
-cheers-server = { path = "../cheers-server", version = "0.8.20" }
-cheers-verify = { path = "../cheers-verify", version = "0.8.20" }
+cheers-core = { path = "../cheers-core", version = "0.8.21" }
+cheers-server = { path = "../cheers-server", version = "0.8.21" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.21" }
 
 async-trait = "0.1"
 turso = { workspace = true }
@@ -33,5 +33,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-cheers-server = { path = "../cheers-server", version = "0.8.20" }
+cheers-server = { path = "../cheers-server", version = "0.8.21" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
