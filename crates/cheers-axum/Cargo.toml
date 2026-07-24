@@ -25,8 +25,12 @@ all-features = true
 [dependencies]
 cheers-core = { path = "../cheers-core", version = "0.8.21" }
 cheers-server = { path = "../cheers-server", version = "0.8.21" }
-# Optional — only pulled in under the `google`/`apple` features.
-cheers = { path = "../cheers", version = "0.8.21", default-features = false, optional = true }
+# Optional — only pulled in under the `google`/`apple` features. Published as
+# `cheers-providers` (the plain `cheers` name is squatted); the alias keeps
+# `use cheers::…` in this crate's source unchanged. NOTE: an optional dep is
+# still retained in the published manifest and must resolve from the registry,
+# so this edge is load-bearing for publishing even when the feature is off.
+cheers = { package = "cheers-providers", path = "../cheers", version = "0.8.21", default-features = false, optional = true }
 
 # axum 0.8 (hyper 1 / http 1) — dedupes against reqwest's hyper 1 in the tree.
 # default = ["json", "tokio", "http1", "matched-path", "original-uri", "form", "query", "tracing"] is

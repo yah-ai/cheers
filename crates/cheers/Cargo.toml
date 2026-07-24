@@ -1,5 +1,13 @@
 [package]
-name = "cheers"
+# The plain `cheers` name on crates.io is an unrelated crate (0.1.0-alpha.1,
+# owned by a different account), so publishing under it returns 403. This crate
+# is the identity-PROVIDERS library, so it ships under a name that says so —
+# matching the rest of the workspace, where every crate is named for its role.
+# The transport-bearing entry point third parties depend on is cheers-axum, not
+# this; nothing outside this workspace consumes it directly.
+# `[lib] name = "cheers"` below keeps `use cheers::…` working, so consumers
+# alias via `package =` and no .rs changed.
+name = "cheers-providers"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

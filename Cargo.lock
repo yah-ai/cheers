@@ -1031,46 +1031,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "cheers"
-version = "0.8.21"
-dependencies = [
- "argon2",
- "async-trait",
- "base64 0.22.1",
- "cheers-core",
- "chrono",
- "getrandom 0.3.4",
- "jsonwebtoken",
- "lettre",
- "mshr",
- "objc2 0.5.2",
- "objc2-authentication-services",
- "objc2-foundation 0.2.2",
- "openidconnect",
- "p256",
- "pasetors",
- "pollster",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha1 0.10.6",
- "thiserror 2.0.18",
- "tokio",
- "webauthn-authenticator-rs",
- "webauthn-rs",
- "webauthn-rs-proto",
- "wiremock",
-]
-
-[[package]]
 name = "cheers-axum"
 version = "0.8.21"
 dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "cheers",
  "cheers-core",
+ "cheers-providers",
  "cheers-server",
  "cheers-sqlx",
  "chrono",
@@ -1106,6 +1074,38 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cheers-providers"
+version = "0.8.21"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "base64 0.22.1",
+ "cheers-core",
+ "chrono",
+ "getrandom 0.3.4",
+ "jsonwebtoken",
+ "lettre",
+ "mshr",
+ "objc2 0.5.2",
+ "objc2-authentication-services",
+ "objc2-foundation 0.2.2",
+ "openidconnect",
+ "p256",
+ "pasetors",
+ "pollster",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "thiserror 2.0.18",
+ "tokio",
+ "webauthn-authenticator-rs",
+ "webauthn-rs",
+ "webauthn-rs-proto",
+ "wiremock",
 ]
 
 [[package]]
@@ -1189,8 +1189,8 @@ name = "cheers-test-identity"
 version = "0.8.21"
 dependencies = [
  "axum",
- "cheers",
  "cheers-axum",
+ "cheers-providers",
  "cheers-server",
  "cheers-sqlx",
  "http 1.4.0",
