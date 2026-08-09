@@ -19,8 +19,8 @@ path = "src/lib.rs"
 # the crypto. A verify-only consumer never depends on this crate, so it never gets
 # a minter. See .yah/docs/working/edge-verifiable-auth.md (Crate topology).
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.21" }
-cheers-verify = { path = "../cheers-verify", version = "0.8.21" }
+cheers-core = { path = "../cheers-core", version = "0.8.22" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.22" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
