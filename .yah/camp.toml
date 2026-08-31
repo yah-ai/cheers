@@ -1,4 +1,5 @@
 #:schema ./schema/camp.toml.schema.json
+camp_id = "dbb12347c3dd"
 
 # Per-camp config for yah. Replaces the pre-R179 trio of camp.json,
 # agent-settings.json, and approval.toml.

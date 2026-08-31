@@ -6,12 +6,24 @@
 //! Why this exists separately from `tests/sqlite.rs`: the `sqlite` feature
 //! drives the typed `Sqlite*Store` impls through sqlx's vanilla SQLite driver
 //! (rusqlite). sqlx has no libSQL driver, so we can't reuse the store types
-//! here. The production target for cheers-sqlx is libSQL (Turso) — per
-//! [[cheers-sqlx-backends]] — so the property we want to verify is that the
-//! SQLite-flavor migrations (CREATE TABLE / CHECK / FK CASCADE / partial
-//! indexes) apply cleanly to libSQL and that constraint enforcement matches.
-//! If/when sqlx ships a libsql driver, swap the raw client for it and lift
-//! the common store scenarios over (per the ticket).
+//! here — this harness applies the migrations through a raw Hrana client and
+//! checks that constraint enforcement matches.
+//!
+//! SUPERSEDED AS A DIRECTION — the harness still earns its keep, the claim
+//! around it does not. This file used to say libSQL (Turso Cloud / sqld) was
+//! "the production target for cheers-sqlx", and the plan was to lift the
+//! common store scenarios over here if sqlx ever grew a libsql driver. That
+//! is no longer where the account store is going: the target is the
+//! **in-process rust-native Turso engine**, and it now has a real store family
+//! in `cheers-turso` — seven typed stores running the *same*
+//! `cheers_test_support::store_scenarios` suite this file could only gesture
+//! at, plus `cheers-turso/tests/flip.rs`, which drives both families against
+//! one file to prove the schema is interchangeable.
+//!
+//! So: don't invest further here, and don't wait on a sqlx libsql driver.
+//! What this harness still proves — that the SQLite-flavor DDL is portable
+//! across the Turso lineage — is worth keeping for anyone pointing cheers at
+//! a managed sqld deployment.
 //!
 //! Coverage:
 //! - 0001 + 0002 + 0003 migrations apply in order, statement-by-statement

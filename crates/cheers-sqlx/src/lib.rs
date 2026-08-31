@@ -7,6 +7,21 @@
 //! chains + the revocation set when a deployment doesn't want a separate KV
 //! tier; for production-grade hot-path TTL state, swap in `cheers-redis`.
 //!
+//! ## Sibling: `cheers-turso`
+//!
+//! `cheers-turso` implements the same store traits over the in-process
+//! rust-native Turso engine, for the cell-hosted deployment. It is a separate
+//! crate rather than a feature here because `sqlx` has no driver for that
+//! engine — the boundary is below the store impls.
+//!
+//! The two families are interchangeable on disk by construction: identical
+//! migrations, identical `_sqlx_migrations` bookkeeping and checksums,
+//! identical id and provider encodings. Both run the same contract suite
+//! (`cheers_test_support::store_scenarios`), and `cheers-turso/tests/flip.rs`
+//! drives both against one file in both directions. Anything added here that
+//! changes on-disk shape — a migration, an id format, a provider string —
+//! must land there in the same commit.
+//!
 //! ## What's in here
 //!
 //! | Trait | Backend | Module |

@@ -211,6 +211,13 @@ async fn audit_store_batch_insert_round_trip() {
     common::audit_store_batch_insert_round_trip(&store).await;
 }
 
+#[tokio::test]
+async fn audit_store_query_by_on_behalf_of() {
+    let fx = fresh_pg().await;
+    let store = PgAuditStore::new(fx.pool.clone());
+    common::audit_store_query_by_on_behalf_of(&store).await;
+}
+
 #[cfg(feature = "passkey")]
 mod passkey {
     use super::*;

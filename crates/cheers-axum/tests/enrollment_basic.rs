@@ -7,8 +7,6 @@
 //! to make possible: an end-user device authenticates with the session it
 //! already holds from its own login, never a service-principal secret.
 
-mod common;
-
 use std::sync::Arc;
 
 use axum::Router;

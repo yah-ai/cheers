@@ -9,6 +9,7 @@ members = [
     "crates/cheers",
     "crates/cheers-store",
     "crates/cheers-sqlx",
+    "crates/cheers-turso",
     "crates/cheers-redis",
     "crates/cheers-axum",
     "crates/cheers-test-support",
@@ -17,14 +18,15 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.8.22"
+version = "0.8.29"
 edition = "2021"
 authors = ["yah Dev <human@yah.dev>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yah-ai/cheers"
 
 [workspace.dependencies]
-# Turso pin — lockstep with yah root workspace (0.6.1). `turso` is the async
+# Turso pin — lockstep with yah root workspace (0.7.2). `turso` is the async
 # wrapper; `turso_core` is the raw engine (turso depends on it internally).
 # features=[] for minimal binary size (no replication, no encryption at rest).
-turso = { version = "0.6.1", features = [] }
+# Bumped 0.6.1 -> 0.7.2 in R830 (0.6.1 loses writes behind a live Rows).
+turso = { version = "0.7.2", features = [] }

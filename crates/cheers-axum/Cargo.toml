@@ -8,10 +8,21 @@ repository.workspace = true
 description = "axum 0.8 route handlers for cheers — OIDC login/callback (Google, Apple), passkey, magic-link wiring into a SessionAuthority."
 keywords = ["auth", "axum", "oidc", "session", "cheers"]
 categories = ["authentication", "web-programming"]
+# R514 / W304 — one integration-test binary instead of nine. Cargo
+# auto-discovers every top-level `tests/*.rs` as its own target, so declaring
+# them as modules of `tests/main.rs` is not enough on its own; turning
+# autotests off is what actually collapses the targets. Adding a test file now
+# means adding a `mod` line to `tests/main.rs` — nothing is picked up
+# implicitly.
+autotests = false
 
 [lib]
 name = "cheers_axum"
 path = "src/lib.rs"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -23,14 +34,14 @@ all-features = true
 # etc. This crate stays product-agnostic — no cookie domain hardcoding,
 # no DATABASE_URL, no yubaba coupling.
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.22" }
-cheers-server = { path = "../cheers-server", version = "0.8.22" }
+cheers-core = { path = "../cheers-core", version = "0.8.29" }
+cheers-server = { path = "../cheers-server", version = "0.8.29" }
 # Optional — only pulled in under the `google`/`apple` features. Published as
 # `cheers-providers` (the plain `cheers` name is squatted); the alias keeps
 # `use cheers::…` in this crate's source unchanged. NOTE: an optional dep is
 # still retained in the published manifest and must resolve from the registry,
 # so this edge is load-bearing for publishing even when the feature is off.
-cheers = { package = "cheers-providers", path = "../cheers", version = "0.8.22", default-features = false, optional = true }
+cheers = { package = "cheers-providers", path = "../cheers", version = "0.8.29", default-features = false, optional = true }
 
 # axum 0.8 (hyper 1 / http 1) — dedupes against reqwest's hyper 1 in the tree.
 # default = ["json", "tokio", "http1", "matched-path", "original-uri", "form", "query", "tracing"] is
@@ -76,12 +87,20 @@ subtle = { version = "2", optional = true }
 uuid = { version = "1", default-features = false, features = ["v5"], optional = true }
 
 [dev-dependencies]
-# cheers-sqlx + sqlx (dev only) — the `me_basic` integration test backs the
-# session stores with a real SQLite file. (The W207 registration harness moved
-# out to the `cheers-test-identity` crate, R513-T8.)
-cheers-sqlx = { path = "../cheers-sqlx", version = "0.8.22", features = ["sqlite"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
+# NOTE (R514): cheers-sqlx + sqlx used to be dev-deps here, for a `me_basic`
+# that backed the session stores with a real SQLite file. R513-T8 moved that
+# harness out to `cheers-test-identity` and no test in this crate has touched
+# sqlx since — `rg 'sqlx' tests/` finds only prose. Dropped, which takes
+# sqlx-macros off this crate's dev build. Every store in `tests/common/` is
+# in-memory; that is also why the nine tests could be merged into one binary
+# with no on-disk contention (see `tests/main.rs`).
 serde_json = "1"
+# serde_urlencoded (dev only) — parses `?since=&method-prefix=` straight into
+# AuditReadQuery in a unit test, so the query-param contract (including the
+# hyphen spelling the design doc publishes) is pinned without standing up a
+# router. Same crate axum's own `Query` extractor uses, so the test exercises
+# the real parse path.
+serde_urlencoded = "0.7"
 # axum's `into_make_service` + `serve` for the round-trip tests; we drive the
 # router via tower's `Service::call` directly so a full tokio server isn't
 # needed. `body` reads/writes axum::body::Body.

@@ -5,11 +5,11 @@ jobs and sessions in this camp. Per-session and per-job content is
 injected via `--append-system-prompt` at process spawn instead of by
 rewriting this file (R268 race fix).
 
-## Tool availability
+## Environment quirks
 
-When you need a multiple-choice answer from the user, call `mcp__yah__ask_user`. The built-in `AskUserQuestion` tool is unavailable in this environment.
-
-Tool-use approvals (Bash, Write, etc.) are routed through the AnswerQueue UI automatically via `--permission-prompt-tool mcp__yah__approve_tool`. You will see a Continue/Revise form appear in the desktop panel when approval is needed.
+- **`mcp__yah__ask_user`** is the canonical user-choice affordance: use it for structured multiple-choice prompts (multi-option, multi-select, or multi-question forms). Do NOT use it for single free-form questions — just print those into chat. `AskUserQuestion` is not wired up in this host.
+- **Tool-use approvals** (Bash, Write, etc.) route through the AnswerQueue UI via `--permission-prompt-tool mcp__yah__approve_tool`; a Continue/Revise modal will appear in the desktop panel. To minimize Revise round-trips: name the target in the call's `description` ("Read app/yah/cli/src/main.rs" beats "Read file" — the user pattern-matches on description before clicking Continue); scope paths narrowly (`rg "foo" crates/yah/board/` is approvable, unbounded `rg "foo"` is a Revise); don't pre-stage destructive shapes (`rm -rf`, `git reset --hard`, `find … -delete`, `--no-verify`) unless the user has authorized that exact operation — they escalate to a hard review even when the target is harmless.
+- **Grep `type: "tsx"` returns zero results silently.** claude-cli's Grep wraps ripgrep, which only knows `ts` (covers `.ts` and `.tsx`). Use `type: "ts"` or `glob: "**/*.tsx"`. If a Grep you expect to match returns nothing, recheck the type field before concluding the pattern is absent.
 
 ## Inspecting live agents
 

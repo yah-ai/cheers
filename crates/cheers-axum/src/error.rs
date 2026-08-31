@@ -151,6 +151,24 @@ pub enum RouteError {
     #[error("audit_invalid: {0}")]
     AuditInvalid(#[from] AuditValidationError),
 
+    /// `GET /audit/by-on-behalf-of/{user}` was addressed to a principal the
+    /// caller may not read: a user asking for a different user's history, or
+    /// a principal kind with no defined audit subject (camp). 403 — the
+    /// caller authenticated and holds `audit:read`, it just may not read
+    /// *this* subject. Distinct from
+    /// [`InsufficientScope`](Self::InsufficientScope), which is about the
+    /// token lacking the scope at all.
+    #[error("not permitted to read this audit subject")]
+    AuditSubjectForbidden,
+
+    /// `GET /audit/by-on-behalf-of/{user}` carried a malformed path
+    /// principal, a non-user principal, or a cursor that didn't decode.
+    /// 400 — well-formed-but-invalid input the caller can fix without
+    /// re-authenticating (a stale cursor is fixed by dropping it and
+    /// restarting the page walk).
+    #[error("invalid audit query: {0}")]
+    InvalidAuditQuery(String),
+
     /// `POST /admin/service-principals` collided with an existing principal
     /// id. 409 — same shape as a database unique-key conflict.
     #[error("already exists: {0}")]
@@ -213,6 +231,10 @@ impl RouteError {
             RouteError::OwnershipInvalid(_) => (StatusCode::BAD_REQUEST, "ownership_invalid"),
             RouteError::UnknownOwnership => (StatusCode::NOT_FOUND, "unknown_ownership"),
             RouteError::AuditInvalid(_) => (StatusCode::BAD_REQUEST, "audit_invalid"),
+            RouteError::AuditSubjectForbidden => {
+                (StatusCode::FORBIDDEN, "audit_subject_forbidden")
+            }
+            RouteError::InvalidAuditQuery(_) => (StatusCode::BAD_REQUEST, "invalid_audit_query"),
             RouteError::AlreadyExists(_) => (StatusCode::CONFLICT, "already_exists"),
             RouteError::UnknownPrincipal(_) => (StatusCode::NOT_FOUND, "unknown_principal"),
             RouteError::NotOperator => (StatusCode::FORBIDDEN, "not_operator"),

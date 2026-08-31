@@ -54,9 +54,9 @@
 //! @yah:next("When kamaji's wire-side begins forwarding live batches, coordinate yah-side W159 / R428 to point at POST /audit/ingest + the AuditIngestBody shape (bare JSON array of records).")
 //! @yah:verify("cargo test -p cheers-server audit:: — 8/8 trait + memory-impl tests pass.")
 //! @yah:verify("cargo test -p cheers-sqlx --features sqlite audit_store_batch_insert_round_trip — sqlite trait conformance pass (100-record batch + act-bearing record + svc-sub record round-trip via SqliteAuditStore).")
-//! @yah:verify("cargo test -p cheers-axum --test audit_basic — 4/4 integration tests pass: batch POST 100 records all landed; forbidden shape returns 400 + corrected retry succeeds; token without audit:write → 403 before any store call; missing bearer → 401.")
 //! @yah:verify("cargo test -p cheers-core validate_grant_rejects_service_only_for_user — already pins composition rule (4) for AuditWrite at the grant-time edge (verify item 'User-principal token requesting audit:write at grant time is rejected').")
 //! @yah:verify("Parent relay smoke: cargo test -p cheers-core -p cheers-server -p cheers-verify -p cheers-axum + cargo test -p cheers-sqlx --features sqlite — all green; cargo check --workspace --all-features clean.")
+//! @yah:verify("cargo test -p cheers-axum --test main audit_basic:: — 4/4 integration tests pass: batch POST 100 records all landed; forbidden shape returns 400 + corrected retry succeeds; token without audit:write to 403 before any store call; missing bearer to 401. (Retargeted by R514: the nine cheers-axum test binaries were merged into one target named `main`; the old `--test audit_basic` no longer resolves.)")
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -373,6 +373,40 @@ Reads:
 - Authorization: `audit:read` (granted to W127-dashboard service principal
   and to the user themselves for self-queries).
 
+Shipped shape (R020-F14):
+
+```
+GET ${issuer}/audit/by-on-behalf-of/user:<id>
+      ?since=<unix-seconds>       # inclusive lower bound on record.at
+      &method-prefix=<literal>    # literal prefix, not a glob
+      &cursor=<opaque>            # echo back a previous page's next_cursor
+      &limit=<n>                  # clamped to 1..=500, default 100
+  Authorization: Bearer <MCP token; scope=audit:read>
+
+200 { "rows": [<AuditRow>, ...], "next_cursor": "<opaque>" }   # newest first
+```
+
+- `<user>` is the full wire principal (`user:alice`), parsed by the same
+  `PrincipalId` parser as the `sub` claim. A non-user principal is `400`
+  (`invalid_audit_query`) — the `on_behalf_of` lane is user-only, matching the
+  ownership table's `CHECK (... LIKE 'user:%')`.
+- "On behalf of `U`" means `record.sub == user:U`. `act` names the *agent* that
+  carried the call out (RFC 8693), so an agent-mediated deploy is still the
+  user's row. Camp-subject rows are **not** rolled up to the camp's `bound_to`
+  user — §Principal kinds requires the two trails to stay distinguishable.
+- Subject authorization is a second gate on top of the scope: service
+  principals read any user (W127's dashboard); a user principal reads only
+  itself; a camp principal is refused. Anything else is `403`
+  (`audit_subject_forbidden`) — `audit:read` is user-grantable, so holding the
+  scope cannot by itself mean "read anyone".
+- Paging is **keyset**, ordered `(at DESC, id DESC)` — `at` alone is kamaji's
+  clock and not unique, so the row id makes the order total and rows appended
+  mid-walk never shift the ones behind the cursor. `next_cursor` is absent on
+  the last page (the server over-fetches one row rather than costing a final
+  empty round-trip). The cursor is opaque and unsigned: it names a position in
+  a result set the caller is already authorized to read, and authorization is
+  re-checked per request.
+
 ## Wire envelope
 
 **Decision (R020-S1, 2026-06-03): PASETO v4.public.**

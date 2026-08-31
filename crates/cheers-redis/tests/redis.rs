@@ -3,7 +3,7 @@
 
 #![cfg(feature = "redis-integration")]
 
-use cheers_core::{DeviceId, StoreError, UserId};
+use cheers_core::{DeviceId, UserId};
 use cheers_redis::{RedisRefreshStore, RedisRevocationStore};
 use cheers_server::store::{RefreshStore, RefreshTokenRecord};
 use cheers_server::RevocationWriter;
@@ -79,13 +79,20 @@ async fn refresh_store_put_get_consume_revoke() {
     assert_eq!(back, r1);
     assert!(refresh.get("missing").await.unwrap().is_none());
 
-    refresh.mark_consumed("tok-1").await.expect("consume");
+    // The CAS returns true only for the call that actually flipped the flag.
+    assert!(
+        refresh.mark_consumed("tok-1").await.expect("consume"),
+        "the first consume wins the CAS",
+    );
     let back = refresh.get("tok-1").await.unwrap().unwrap();
     assert!(back.consumed);
     assert!(!back.revoked);
 
-    // Idempotent re-consume.
-    refresh.mark_consumed("tok-1").await.expect("idempotent");
+    // Idempotent re-consume — Ok(false), the losing side of a rotation race.
+    assert!(
+        !refresh.mark_consumed("tok-1").await.expect("idempotent"),
+        "a second consume must report it did not flip the flag",
+    );
 
     // Successor in same chain.
     let r2 = fixture_refresh(
@@ -109,11 +116,21 @@ async fn refresh_store_put_get_consume_revoke() {
     // Re-revoke is idempotent.
     refresh.revoke_chain("chain-A").await.expect("idempotent");
 
-    // mark_consumed on a missing token => NotFound.
-    match refresh.mark_consumed("never-existed").await {
-        Err(StoreError::NotFound) => {}
-        other => panic!("expected NotFound, got {other:?}"),
-    }
+    // mark_consumed on a missing token is Ok(false), not an error. The
+    // RefreshStore contract (cheers-server/src/store.rs) folds "already
+    // consumed" and "absent" into the same `false` on purpose: both mean "no
+    // unconsumed row matched", which is what the rotator acts on. This test
+    // asserted `Err(NotFound)` — the pre-CAS contract — and had been failing
+    // against every current impl; the sqlx backends return
+    // `rows_affected() > 0` and the Redis Lua script returns 0 for a missing
+    // key, so `NotFound` is unreachable here.
+    assert!(
+        !refresh
+            .mark_consumed("never-existed")
+            .await
+            .expect("absent token is not an error"),
+        "consuming an absent token reports false, not NotFound",
+    );
 }
 
 #[tokio::test]

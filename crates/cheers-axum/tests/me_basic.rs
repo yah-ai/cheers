@@ -11,7 +11,7 @@
 //!    leaves the caller's token alive; revoking the current device flips
 //!    the in-flight `jti` into the revocation set so the next request 401s.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

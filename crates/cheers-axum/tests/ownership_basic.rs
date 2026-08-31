@@ -11,8 +11,6 @@
 //! 3. Negative invariant: a body whose `on_behalf_of` names a non-user
 //!    principal surfaces as a 4xx via `NewOwnership::new()`, not a 500.
 
-mod common;
-
 use std::sync::Arc;
 
 use axum::Router;

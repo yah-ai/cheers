@@ -1,0 +1,62 @@
+[package]
+name = "cheers-turso"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-process Turso-backed UserStore / RefreshStore / Revocation / Ownership / ServicePrincipal / Audit / Passkey impls for cheers — the cell-hosted account store."
+keywords = ["auth", "session", "turso", "sqlite", "embedded"]
+categories = ["authentication", "database"]
+
+[lib]
+name = "cheers_turso"
+path = "src/lib.rs"
+
+[dependencies]
+cheers-core = { path = "../cheers-core", version = "0.8.29" }
+cheers-server = { path = "../cheers-server", version = "0.8.29" }
+# RevocationReader (the edge-readable half) is re-exported from cheers-verify;
+# our Revocation impl supplies both sides.
+cheers-verify = { path = "../cheers-verify", version = "0.8.29" }
+
+# The in-process rust-native engine. Pinned in lockstep with the yah root
+# workspace (0.6.1) — same engine roadcase cells and turso-backup use.
+turso = { workspace = true }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# Serializes access to the single engine connection (see `conn`), and is the
+# runtime cheers-axum / cheers-server already assume.
+tokio = { version = "1", features = ["sync"] }
+# Structured server-side logging of the raw engine error in the error mapper —
+# the opaque `StoreError::Backend` handed to callers never carries driver detail.
+tracing = "0.1"
+# OS CSPRNG for default user_id / row id generation. Matches cheers-sqlx.
+getrandom = "0.3"
+# SHA-384 of each migration's SQL — the checksum column `_sqlx_migrations`
+# stores, so a database migrated by cheers-sqlx and one migrated by
+# cheers-turso are byte-identical in their bookkeeping. See `migrate`.
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+# Throwaway on-disk databases for the file-backed tests (the engine takes a
+# process-wide exclusive lock, so each test that needs a file gets its own).
+tempfile = "3"
+# The shared store-contract scenarios — the same suite cheers-sqlx runs, so
+# "passes against both backends" is a mechanically checked property.
+cheers-test-support = { path = "../cheers-test-support" }
+# tests/flip.rs drives BOTH store families against one file, in both
+# directions, to prove the noisetable-account flip needs no schema change or
+# data migration. That test is the crate's actual success criterion, so the
+# sqlx side is a dev-dependency here rather than an exercise left to the
+# reader. Nothing outside tests/flip.rs touches either of these.
+cheers-sqlx = { path = "../cheers-sqlx", features = ["sqlite", "passkey"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "migrate",
+] }

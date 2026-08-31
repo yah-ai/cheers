@@ -4,7 +4,7 @@
 
 #![cfg(feature = "passkey")]
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

@@ -20,11 +20,11 @@ all-features = true
 [dependencies]
 # Identity types + StoreError live in cheers-core; the persistence traits live
 # in cheers-server. cheers-sqlx is the relational-DB home for both layers.
-cheers-core = { path = "../cheers-core", version = "0.8.22" }
-cheers-server = { path = "../cheers-server", version = "0.8.22" }
+cheers-core = { path = "../cheers-core", version = "0.8.29" }
+cheers-server = { path = "../cheers-server", version = "0.8.29" }
 # RevocationReader (the edge-readable half) is re-exported from cheers-verify;
 # our pg/sqlite Revocation impls supply both sides.
-cheers-verify = { path = "../cheers-verify", version = "0.8.22" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.29" }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -66,6 +66,10 @@ features = ["clock", "serde"]
 [dev-dependencies]
 # Drives the async store traits in tests.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The shared store-contract scenarios (formerly tests/common/mod.rs). They live
+# in cheers-test-support so cheers-turso runs the identical suite rather than a
+# copy that drifts; tests/common/mod.rs is now a re-export of them.
+cheers-test-support = { path = "../cheers-test-support" }
 # Throwaway sqlite files for sqlite-backend tests.
 tempfile = "3"
 # pg-backend tests stand up a real Postgres in Docker via testcontainers-rs.

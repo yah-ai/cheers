@@ -4,7 +4,7 @@
 
 #![cfg(feature = "google")]
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

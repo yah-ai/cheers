@@ -186,8 +186,9 @@
 //! @yah:verify("cargo check --workspace --all-features clean")
 //!
 //! @yah:ticket(R020-F14, "Audit read endpoint: GET /audit/by-on-behalf-of/&lt;user&gt; (W127 'who deployed what')")
-//! @yah:at(2026-06-04T01:36:44Z)
-//! @yah:status(open)
+//! @yah:status(review)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:at(2026-08-13T20:08:34Z)
 //! @yah:phase(P4)
 //! @yah:parent(R020)
 //! @yah:next("GET /audit/by-on-behalf-of/<user>?since=&method-prefix= paged.")
@@ -197,6 +198,21 @@
 //! @yah:verify("Random user A queries user B's audit — 403.")
 //! @arch:see(.yah/docs/working/mcp-auth-and-ownership.md)
 //! @yah:depends_on(R020-F13)
+//! @yah:handoff("LANDED. cheers-server/src/audit.rs: AuditCursor{at,id} with to_wire/from_wire (base64url-no-pad, opaque, unsigned) + AuditCursorError; AuditQuery::new(PrincipalId) rejecting non-user + with_since/with_method_prefix/with_cursor/with_limit + AuditQueryError::OnBehalfOfNotUser; AuditPage{rows,next_cursor} + from_overfetch; DEFAULT_AUDIT_PAGE_LIMIT=100, MAX_AUDIT_PAGE_LIMIT=500. New trait method AuditStore::query_by_on_behalf_of plus the MemoryAuditStore impl. All re-exported from cheers_server.")
+//! @yah:verify("Parent relay smoke: cargo test -p cheers-core -p cheers-server -p cheers-verify -p cheers-axum, all green (64 + 136 + 4 + 65 unit, 38 integration, proptest/fixture/doctests included).")
+//! @yah:handoff("cheers-sqlx/src/audit_store.rs: query_by_on_behalf_of for PgAuditStore + SqliteAuditStore over the existing 0004_audit schema, leading on sub = ? so the planner walks ix_audit_sub_at. Shared RawAuditRow + assemble_row + AUDIT_COLUMNS + parse_pid decode one row identically for both backends; a stored row that no longer parses fails loudly as StoreError::Backend naming the row id rather than silently vanishing from the page. like_prefix_pattern escapes % _ and backslash and pairs with ESCAPE, so method-prefix stays a literal prefix on both engines.")
+//! @yah:handoff("cheers-axum/src/audit.rs: GET /audit/by-on-behalf-of/{user} on the existing AuditState (same router as ingest) + AuditReadQuery (since, method-prefix with a method_prefix serde alias, cursor, limit) + AuditPageResponse {rows, next_cursor} + pub authorize_audit_subject(caller, target). error.rs gains RouteError::AuditSubjectForbidden (403 audit_subject_forbidden) and RouteError::InvalidAuditQuery(String) (400 invalid_audit_query).")
+//! @yah:handoff("TWO SEMANTIC CALLS, both documented at the code site and in the doc. (1) On-behalf-of is DERIVED, not stored: a row is user U's exactly when record.sub == user:U. act names the agent that carried the call out (RFC 8693), so an agent-mediated deploy is still the user's row; camp-subject rows are NOT rolled up to the camp's bound_to user, because the design doc requires camp-took-this-action and user-took-this-action to stay distinguishable. (2) Scope is necessary but not sufficient: audit:read is user-grantable, so authorize_audit_subject adds the subject gate — service reads any user (W127 dashboard), user reads only itself, camp and any future kind denied (deny is the reversible direction).")
+//! @yah:handoff("PAGING IS KEYSET, ordered (at DESC, id DESC). at alone is kamaji's clock and not unique, so the row id makes the order total — without it a page boundary landing inside an at-tie skips or repeats rows. Impls over-fetch limit+1 and hand it to AuditPage::from_overfetch, so next_cursor is present only when a further row genuinely exists and the last page costs no extra empty round-trip. The cursor is opaque (base64url over at:id) but deliberately unsigned: it names a position in a result set the caller is already authorized to read, and authorization is re-checked per request.")
+//! @yah:handoff("WIRE-CONTRACT COORDINATION: this ADDS to the consumer surface — a new endpoint, not a change to existing claim shapes. Propagate into yah-side W159 / R426 before W127's dashboard wiring: GET ${issuer}/audit/by-on-behalf-of/user:<id>?since=&method-prefix=&cursor=&limit=, Authorization: Bearer MCP token scope=audit:read, 200 {rows:[AuditRow], next_cursor?}. Path segment is the FULL wire principal (user:alice), parsed by the same PrincipalId parser as the sub claim — a bare id or a camp:/svc: principal is 400 invalid_audit_query, not 403. The shipped shape is now written into .yah/docs/working/mcp-auth-and-ownership.md §Audit ingest > Reads.")
+//! @yah:handoff("DISCOVERED AND FIXED IN THE SAME PASS (outside F14, in cheers-redis/tests/redis.rs): refresh_store_put_get_consume_revoke asserted mark_consumed on a missing token returns Err(StoreError::NotFound). That is the PRE-CAS contract — RefreshStore::mark_consumed has returned Result<bool> since the atomic consume gate landed, and both sqlx backends (rows_affected() > 0) and the Redis Lua script (returns 0 for a missing key) make NotFound unreachable. The test made cargo test --workspace --all-features red for the whole camp. Retargeted to assert Ok(false), plus a new Ok(true) assertion on the winning consume; dropped the now-unused StoreError import.")
+//! @yah:verify("Verify line #1 (W127 dashboard service queries another user's audit — succeeds): cargo test -p cheers-axum --test main audit_basic::dashboard_service_reads_another_users_audit — also asserts bob's rows never appear in alice's page and that rows come back newest-first.")
+//! @yah:verify("Verify line #2 (random user A queries user B's audit — 403): cargo test -p cheers-axum --test main audit_basic::user_a_querying_user_b_audit_is_403 — asserts 403 audit_subject_forbidden AND that no row text leaks into the denied response body. Paired with user_reads_their_own_audit (self-query succeeds) so the gate is pinned in both directions.")
+//! @yah:verify("cargo test -p cheers-axum --test main audit_basic — 14/14 (10 new): the two verify lines, self-query, missing-scope 403 insufficient_scope, no-bearer 401, since + method-prefix composing, cursor paging over HTTP walking 10 rows at limit=4 in 3 pages with no repeat, malformed cursor 400, non-user and unprefixed path principal 400, and ingest-then-read-back end to end.")
+//! @yah:verify("cargo test -p cheers-server --lib audit — 17/17 (10 new), including cursor_paging_walks_every_row_exactly_once (10 rows all at the SAME at, so the id tie-break is what is under test) and rows_appended_during_paging_do_not_shift_the_rows_behind_the_cursor (the property an offset pager would fail).")
+//! @yah:verify("Real backends, not just the memory impl: cargo test --workspace --all-features runs common::audit_store_query_by_on_behalf_of against BOTH SqliteAuditStore and PgAuditStore (Docker up) — sqlite.rs 13/13, pg.rs 13/13, libsql.rs 7/7. That scenario covers the SQL decode path (sub/act_sub/scope JSON out of the DB), both filters, the LIKE-metacharacter escape, keyset paging, and sub-scoping.")
+//! @yah:verify("cargo test --workspace --all-features — fully green after the cheers-redis test fix (it was 1 failed before). cargo check --workspace --all-features clean. cargo doc --no-deps -p cheers-axum --all-features introduces no new warning (authorize_audit_subject is pub precisely so the module doc can link it).")
+//! @yah:cleanup("Pre-existing, left alone (different crate, not blocking): cheers-test-support/src/lib.rs:217 has an unused `policy` binding that warns on every --all-features test build.")
 //!
 //! @yah:ticket(R020-T16, "Bearer/McpClaims authentication middleware in cheers-axum")
 //! @yah:assignee(agent:claude)
@@ -260,6 +276,26 @@
 //! @yah:next("Claim R020-T18 (cheers-sqlx PgServicePrincipalStore + Turso path, see [[cheers-sqlx-backends]] memory). Note backend is Postgres + Turso (libSQL), not vanilla SQLite — verify libSQL-compat for any SQLite-only pragmas.")
 //! @yah:next("Claim R020-F11 (JWKS extension) — depends on F9, can run in parallel with T18.")
 //! @yah:next("Claim R020-F10 (camp bootstrap endpoint) — depends on F2/F4/F9, parallelizable.")
+//!
+//! @yah:relay(R514, "cheers-axum: consolidate 9 integration-test binaries to 1")
+//! @yah:status(review)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:at(2026-08-13T19:07:55Z)
+//! @yah:next("Set autotests = false under [package] in crates/cheers-axum/Cargo.toml, add [[test]] name = \"main\" path = \"tests/main.rs\", and mod all 9 existing siblings from that root. Files do not move.")
+//! @yah:next("Audit first: the 9 now share one address space and libtest's thread pool. These spin real axum servers and SQLite session stores — check for a listener not bound to port 0 and for a shared on-disk DB path.")
+//! @yah:verify("cargo test -p cheers-axum -- --list line count identical before/after; three consecutive green runs.")
+//! @yah:gotcha("mod alone does NOT reduce the binary count: cargo auto-discovers every top-level tests/*.rs as its own target even when another root declares it a module. autotests = false is the load-bearing part.")
+//! @yah:gotcha("tests/common/ is a module dir, not a target — it survives the merge unchanged as an ordinary sibling module.")
+//! @yah:next("Part of the parent camp's W304 / R743 (integration-test consolidation, 146 to 70 binaries). This crate is filed here rather than as R743-T because oss/cheers is its own subcamp — .yah/camp.toml prunes it from the parent camp's scan set, so a ticket homed here is invisible to the parent board and vice versa. Design + audit checklist: ../../.yah/docs/working/W304-integration-test-consolidation.md")
+//! @yah:handoff("LANDED. cheers-axum integration-test targets 9 to 1. Cargo.toml: autotests = false under [package] plus [[test]] name = \"main\" path = \"tests/main.rs\". New tests/main.rs declares mod common plus the nine siblings; no test file moved. Each sibling's `mod common;` became `use crate::common;` (dropped again in audit_basic / enrollment_basic / ownership_basic, which already spell paths as crate::common::… and warned unused). tests/common/ was already a module dir, not a target, and is unchanged.")
+//! @yah:verify("cargo test -p cheers-axum --all-features -- --list: 120 test names before, 120 after; set diff empty after stripping the module prefix each name now carries. Default-features: 98 to 98, also identical.")
+//! @yah:verify("Three consecutive `cargo test -p cheers-axum --all-features`: 63 lib + 43 integration + 12 doc, 0 failed each run, zero compiler warnings. Neighbour smoke `cargo test -p cheers-core -p cheers-server -p cheers-verify -p cheers-axum --all-features` all green.")
+//! @yah:verify("Binary count confirmed from cargo's own output: nine `Running tests/<name>.rs` lines collapsed to one `Running tests/main.rs`.")
+//! @yah:gotcha("Test names now carry a module prefix (audit_basic::foo) because the binary name no longer supplies it. Any `--test <old-name>` invocation is dead; the equivalent is `--test main <old-name>::`. One such reference existed repo-wide, R020-F13's @yah:verify in cheers-server/src/store.rs:59 — retargeted in place, and its replacement command was run (4 passed, 24 filtered out).")
+//! @yah:gotcha("Adding a test file now requires a `mod` line in tests/main.rs. autotests = false means nothing under tests/ is picked up implicitly any more.")
+//! @yah:assumes("Merge-safety audit found nothing to fix, so no test was modified beyond the mod-to-use line: no fixed port (the OIDC tests use wiremock::MockServer::start(), ephemeral per instance; everything else drives the router via tower::Service with no listener), no on-disk DB, no env/CWD mutation, no statics. Every store in tests/common/ is in-memory.")
+//! @yah:cleanup("Discovered and fixed in the same pass: cheers-sqlx + sqlx were dead dev-deps here. The Cargo.toml comment claimed me_basic backed the session stores with a real SQLite file, but R513-T8 moved that harness to cheers-test-identity and `rg sqlx tests/` now finds only prose. Dropped both, which takes sqlx-macros off this crate's dev build; Cargo.lock loses exactly those two edges.")
+//! @yah:cleanup("`cargo fmt -p cheers-axum -- --check` disagrees with every file in the crate (import ordering, e.g. base64::Engine placement) — pre-existing toolchain style-edition drift, not from this change. Left alone rather than reformatting 26 files across a shared tree.")
 
 #![warn(missing_debug_implementations)]
 #![warn(unreachable_pub)]
@@ -292,7 +328,10 @@ pub mod magic_link;
 pub use admin::{
     AdminAuthState, CreateServicePrincipalBody, OperatorPolicy, ProvisionResponse,
 };
-pub use audit::{AuditIngestBody, AuditIngestResponse, AuditState};
+pub use audit::{
+    AuditIngestBody, AuditIngestResponse, AuditPageResponse, AuditReadQuery, AuditState,
+    authorize_audit_subject,
+};
 pub use camps::{CampAdminState, CampBootstrapResponse, CreateCampBootstrapBody};
 pub use cookie::CsrfCookieConfig;
 pub use enrollment::{

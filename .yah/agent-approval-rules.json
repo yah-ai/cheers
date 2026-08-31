@@ -79,6 +79,90 @@
       "kind": "tool_path",
       "name": "Edit",
       "glob": "/Users/user/ss/yah/external/cheers/crates/cheers-axum/**"
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "tool",
+      "name": "mcp__yah__party_dispatch"
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "tool",
+      "name": "mcp__yah__party_assist"
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "tool",
+      "name": "mcp__yah__subagent_send"
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "tool",
+      "name": "mcp__yah__doc_unarchive"
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "path_predicate",
+      "tool": {
+        "kind": "exact",
+        "value": "Read"
+      },
+      "path": {
+        "kind": "not_gitignored"
+      }
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "path_predicate",
+      "tool": {
+        "kind": "exact",
+        "value": "Glob"
+      },
+      "path": {
+        "kind": "not_gitignored"
+      }
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "path_predicate",
+      "tool": {
+        "kind": "exact",
+        "value": "Grep"
+      },
+      "path": {
+        "kind": "not_gitignored"
+      }
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "path_predicate",
+      "tool": {
+        "kind": "exact",
+        "value": "LS"
+      },
+      "path": {
+        "kind": "not_gitignored"
+      }
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "bash_cmd",
+      "cmd": "ls"
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "bash_cmd",
+      "cmd": "wc"
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "bash_cmd",
+      "cmd": "file"
+    },
+    {
+      "source": "camp_init_default",
+      "kind": "bash_cmd",
+      "cmd": "tree"
     }
   ]
 }

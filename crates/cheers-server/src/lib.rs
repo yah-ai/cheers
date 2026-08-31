@@ -35,7 +35,11 @@ pub mod service_principal;
 pub mod session;
 pub mod store;
 
-pub use audit::{AuditRecord, AuditRow, AuditStore, AuditValidationError, MemoryAuditStore};
+pub use audit::{
+    AuditCursor, AuditCursorError, AuditPage, AuditQuery, AuditQueryError, AuditRecord, AuditRow,
+    AuditStore, AuditValidationError, DEFAULT_AUDIT_PAGE_LIMIT, MAX_AUDIT_PAGE_LIMIT,
+    MemoryAuditStore,
+};
 pub use bundles::{
     BundleExpansionError, BundleName, BundleStore, MemoryBundleStore, ScopeOrBundle,
     expand_scopes,

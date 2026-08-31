@@ -176,6 +176,11 @@ fn row_to_record(row: &turso::Row) -> Result<RefreshTokenRecord, StoreError> {
 pub mod fixtures;
 pub mod mem;
 
+/// The backend-agnostic store-contract suite every persistence backend runs.
+/// See the module docs for why it lives here rather than in one backend's
+/// `tests/` directory.
+pub mod store_scenarios;
+
 // ── integration tests ────────────────────────────────────────────────────────
 
 #[cfg(test)]
