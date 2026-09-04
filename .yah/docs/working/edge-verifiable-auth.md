@@ -82,6 +82,54 @@ shard holds a user's data) travels as a separate plaintext hint (cookie /
 subdomain) the edge routes on; the origin authoritatively validates entitlement.
 Keeping the identity token about identity is the guidance.
 
+### 6. Peer-key binding — the token names the key, not the connection (R515)
+
+§5 says routing metadata stays out of the identity token. A **peer public key**
+is the one addition that is *not* metadata-creep, and the distinction is worth
+stating because it looks like a counterexample: routing is a hint about where
+data lives, while a peer key is a statement about *who holds this token*. It
+belongs to identity.
+
+`Claims` carries an optional `peer_key: Option<PeerKey>` — raw bytes plus an
+algorithm discriminant (`{"alg": "ed25519", "key": "<base64url-no-pad>"}`),
+`skip_serializing_if` so an unbound token is byte-identical to a pre-R515 one.
+Not an `ed25519-dalek` type: consumers straddle a real version split (iroh
+resolves 3.0.0-pre, other trust crates 2.2), and cheers only ever *compares*
+these bytes — it never verifies a signature under them, so it needs no crypto
+to hold one.
+
+What it buys: a verifier that has already authenticated the connecting peer
+under that key — which a QUIC/TLS handshake does by construction — can prove
+**token holder == connecting peer**. Without it a stolen token replays under
+the thief's own node key and they become the victim user. Binding *at
+presentation* (client signs a challenge with the node key) was rejected: it
+needs a live round-trip and a challenge cache, which is exactly the coordination
+the locality contract above buys freedom from. Verification stays offline —
+`PasetoV4PublicVerifier` against a pinned issuer pubkey plus a byte compare — so
+a LAN peer with no internet still checks a week-old token.
+
+Surface:
+
+- mint — `SessionAuthority::establish_bound` / `rotate_bound` (peer key supplied
+  by the caller, like `binding`: the refresh chain is about *which session*, so
+  a plain `rotate` yields an unbound token rather than a stale binding).
+- door — `EdgeVerifier::verify_bound_at(token, presented, now)`: signature,
+  then binding, then the revocation read. An **unbound** token fails it; a
+  deployment that also admits unbound tokens calls `verify_at` and branches on
+  `peer_key` itself, so that choice is visible at the call site.
+
+Not in cheers: the **enrollment ceremony** that populates the field. None of
+cheers's HTTP ceremonies can — a browser passkey or magic-link sign-in has no
+node key, because the key lives in a different process (a desktop app, a
+headless appliance). The flow is "app proves possession of key `N`, presents
+the user's existing session, receives a token binding `U` to `N`", and it lives
+in the consuming service. cheers ships the field and both sides of the wire.
+
+Layering, for the consumer that drove this (noisetable society rooms): the
+Ed25519 roster is layer 1 and remains the *only* admission door. A bound user
+token is layer 2 — it may only ADD a claim about which human a machine key
+belongs to. It must never become a second way in.
+
 ## Consumer mapping (yah side)
 
 - mesofact CF Worker (yah **R327**) = `EdgeVerifier` (public key + revocation reader).

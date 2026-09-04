@@ -131,7 +131,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use cheers_core::{Claims, DeviceBinding, DeviceId, Error, TokenMinter, UserId};
+use cheers_core::{Claims, DeviceBinding, DeviceId, Error, PeerKey, TokenMinter, UserId};
 
 use crate::refresh::{RefreshRotator, Rotated};
 use crate::revocation::RevocationWriter;
@@ -271,7 +271,49 @@ where
         binding: DeviceBinding,
         now: i64,
     ) -> Result<NewSession, Error> {
-        let claims = self.mint_access(sub.clone(), device.clone(), binding, now)?;
+        self.establish_inner(sub, device, binding, None, now).await
+    }
+
+    /// Establish a session whose access token is **bound to `peer_key`** — the
+    /// mint half of R515.
+    ///
+    /// Identical to [`establish`](Self::establish) except the minted claims
+    /// carry [`Claims::peer_key`], so a verifier that has already authenticated
+    /// the connecting peer under that key can prove *token holder == connecting
+    /// peer* (see `EdgeVerifier::verify_bound_at`). A token stolen from this
+    /// client is then useless to a thief connecting under their own key.
+    ///
+    /// cheers does **not** establish that the caller possesses `peer_key` —
+    /// that proof belongs to the enrollment ceremony in the consuming service
+    /// (the app proves possession of the key, presents its existing session,
+    /// and *then* calls this). cheers's own HTTP ceremonies can't do it: a
+    /// browser passkey or magic-link sign-in has no node key at all.
+    ///
+    /// The refresh chain is unchanged, and deliberately does not record the
+    /// key: like `binding`, the peer key is a fact about *this* access token,
+    /// not about the chain — so [`rotate_bound`](Self::rotate_bound) takes it
+    /// from the caller again.
+    pub async fn establish_bound(
+        &self,
+        sub: UserId,
+        device: DeviceId,
+        binding: DeviceBinding,
+        peer_key: PeerKey,
+        now: i64,
+    ) -> Result<NewSession, Error> {
+        self.establish_inner(sub, device, binding, Some(peer_key), now)
+            .await
+    }
+
+    async fn establish_inner(
+        &self,
+        sub: UserId,
+        device: DeviceId,
+        binding: DeviceBinding,
+        peer_key: Option<PeerKey>,
+        now: i64,
+    ) -> Result<NewSession, Error> {
+        let claims = self.mint_access(sub.clone(), device.clone(), binding, peer_key, now)?;
         let refresh = RefreshRotator::new(&self.refresh, self.policy.refresh_ttl_seconds)
             .mint_root(sub, device, now)
             .await?;
@@ -293,6 +335,35 @@ where
         binding: DeviceBinding,
         now: i64,
     ) -> Result<NewSession, Error> {
+        self.rotate_inner(presented_refresh, binding, None, now)
+            .await
+    }
+
+    /// Rotate into a fresh access token that is **bound to `peer_key`** (R515).
+    ///
+    /// The peer key is supplied by the caller for the same reason `binding` is:
+    /// the refresh record is about *which session*, not about how this
+    /// particular access token is being presented. A node re-binds on every
+    /// rotation, which is what keeps the binding honest if the node key
+    /// changes.
+    pub async fn rotate_bound(
+        &self,
+        presented_refresh: &str,
+        binding: DeviceBinding,
+        peer_key: PeerKey,
+        now: i64,
+    ) -> Result<NewSession, Error> {
+        self.rotate_inner(presented_refresh, binding, Some(peer_key), now)
+            .await
+    }
+
+    async fn rotate_inner(
+        &self,
+        presented_refresh: &str,
+        binding: DeviceBinding,
+        peer_key: Option<PeerKey>,
+        now: i64,
+    ) -> Result<NewSession, Error> {
         let refresh = RefreshRotator::new(&self.refresh, self.policy.refresh_ttl_seconds)
             .rotate(presented_refresh, now)
             .await?;
@@ -300,6 +371,7 @@ where
             refresh.record.user_id.clone(),
             refresh.record.device_id.clone(),
             binding,
+            peer_key,
             now,
         )?;
         Ok(NewSession {
@@ -331,18 +403,22 @@ where
         Ok(())
     }
 
-    /// Build access-token claims with a fresh `jti` and the policy's access TTL.
+    /// Build access-token claims with a fresh `jti`, the policy's access TTL,
+    /// and — when the caller asked for one — a peer-key binding (R515).
     fn mint_access(
         &self,
         sub: UserId,
         device: DeviceId,
         binding: DeviceBinding,
+        peer_key: Option<PeerKey>,
         now: i64,
     ) -> Result<Claims, Error> {
-        Ok(
-            Claims::new(sub, device, binding, now, now + self.policy.access_ttl_seconds)
-                .with_jti(generate_jti()),
-        )
+        let claims = Claims::new(sub, device, binding, now, now + self.policy.access_ttl_seconds)
+            .with_jti(generate_jti());
+        Ok(match peer_key {
+            Some(key) => claims.with_peer_key(key),
+            None => claims,
+        })
     }
 }
 
@@ -619,6 +695,134 @@ mod tests {
                 .unwrap();
             let recorded = authority.users().revoked.lock().unwrap().clone();
             assert_eq!(recorded, vec![("u1".to_string(), "d1".to_string())]);
+        });
+    }
+
+    // ---- R515: peer-key binding, mint → wire → door ------------------------
+
+    fn node_key(byte: u8) -> PeerKey {
+        PeerKey::ed25519([byte; 32])
+    }
+
+    #[test]
+    fn establish_bound_survives_the_wire_and_proves_holder_is_the_peer() {
+        let (authority, edge, _) = rig();
+        pollster::block_on(async {
+            let s = authority
+                .establish_bound(
+                    UserId::new("u1"),
+                    DeviceId::new("d1"),
+                    DeviceBinding::LanPair,
+                    node_key(0x11),
+                    1_000,
+                )
+                .await
+                .unwrap();
+
+            // The binding is in the *signed* token, not just the local claims —
+            // it survives serialization through the minter and back out of the
+            // public verifier at the edge.
+            assert_eq!(s.claims.peer_key.as_ref(), Some(&node_key(0x11)));
+            let back = edge
+                .verify_bound_at(&s.access_token, &node_key(0x11), 1_100)
+                .await
+                .unwrap();
+            assert_eq!(back.peer_key.as_ref(), Some(&node_key(0x11)));
+            assert_eq!(back.sub, UserId::new("u1"));
+
+            // The whole point: the same token presented by a peer that
+            // handshook under a *different* node key is refused. This is the
+            // stolen-token replay.
+            let err = edge
+                .verify_bound_at(&s.access_token, &node_key(0x22), 1_100)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::PeerKeyMismatch), "got {err:?}");
+
+            // Binding is layer 2, not a second admission door: revocation still
+            // kills a correctly-bound token.
+            authority.revoke_session(&s.claims.jti).await.unwrap();
+            let err = edge
+                .verify_bound_at(&s.access_token, &node_key(0x11), 1_100)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Revoked), "got {err:?}");
+        });
+    }
+
+    #[test]
+    fn unbound_token_is_wire_compatible_but_fails_a_binding_check() {
+        let (authority, edge, _) = rig();
+        pollster::block_on(async {
+            let s = authority
+                .establish(
+                    UserId::new("u1"),
+                    DeviceId::new("d1"),
+                    DeviceBinding::Passkey,
+                    1_000,
+                )
+                .await
+                .unwrap();
+
+            // Unchanged for every existing consumer…
+            assert_eq!(s.claims.peer_key, None);
+            assert!(edge.verify_at(&s.access_token, 1_100).await.is_ok());
+            // …and fails closed at a door that demands a binding.
+            let err = edge
+                .verify_bound_at(&s.access_token, &node_key(0x11), 1_100)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::PeerKeyMismatch), "got {err:?}");
+        });
+    }
+
+    #[test]
+    fn rotate_bound_rebinds_from_the_caller_not_the_refresh_chain() {
+        let (authority, edge, _) = rig();
+        pollster::block_on(async {
+            let first = authority
+                .establish_bound(
+                    UserId::new("u1"),
+                    DeviceId::new("d1"),
+                    DeviceBinding::LanPair,
+                    node_key(0x11),
+                    1_000,
+                )
+                .await
+                .unwrap();
+
+            // A plain rotate drops the binding — the refresh chain never
+            // carried it, so an unaware caller gets an unbound token rather
+            // than a silently stale binding.
+            let plain = authority
+                .rotate(first.refresh.token.as_str(), DeviceBinding::LanPair, 1_050)
+                .await
+                .unwrap();
+            assert_eq!(plain.claims.peer_key, None);
+
+            // rotate_bound re-binds — and to whatever key the node presents
+            // *now*, so a rekeyed node rebinds instead of inheriting.
+            let rebound = authority
+                .rotate_bound(
+                    plain.refresh.token.as_str(),
+                    DeviceBinding::LanPair,
+                    node_key(0x22),
+                    1_100,
+                )
+                .await
+                .unwrap();
+            assert_eq!(rebound.claims.peer_key.as_ref(), Some(&node_key(0x22)));
+            assert_ne!(rebound.claims.jti, first.claims.jti);
+            assert!(
+                edge.verify_bound_at(&rebound.access_token, &node_key(0x22), 1_150)
+                    .await
+                    .is_ok()
+            );
+            let err = edge
+                .verify_bound_at(&rebound.access_token, &node_key(0x11), 1_150)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::PeerKeyMismatch), "got {err:?}");
         });
     }
 }

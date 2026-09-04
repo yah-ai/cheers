@@ -78,6 +78,14 @@ pub enum Error {
     #[error("session revoked")]
     Revoked,
 
+    /// A token verified cryptographically but is not bound to the peer public
+    /// key the caller presented — either it carries no
+    /// [`peer_key`](crate::Claims::peer_key) at all, or it names a different
+    /// one. Surfaced by `cheers-verify`'s `EdgeVerifier::verify_bound_at`
+    /// (R515): the token holder is not the connecting peer.
+    #[error("token is not bound to the presented peer key")]
+    PeerKeyMismatch,
+
     /// Caller passed invalid input that no specific subsystem owns
     /// (e.g. an empty subject string, a timestamp outside i64 range).
     #[error("invalid input: {0}")]

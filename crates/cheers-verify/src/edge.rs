@@ -1,6 +1,6 @@
 //! The [`EdgeVerifier`] facade — what a CF Worker holds.
 
-use cheers_core::{Claims, Error, TokenVerifier};
+use cheers_core::{Claims, Error, PeerKey, TokenVerifier};
 
 use crate::revocation::RevocationReader;
 
@@ -35,6 +35,43 @@ where
     /// is revoked returns [`Error::Revoked`].
     pub async fn verify_at(&self, token: &str, now: i64) -> Result<Claims, Error> {
         let claims = self.verifier.verify_at(token, now)?;
+        if self.revoked.is_revoked(&claims.jti).await? {
+            return Err(Error::Revoked);
+        }
+        Ok(claims)
+    }
+
+    /// [`verify_at`](Self::verify_at), plus: the token must be bound to
+    /// `presented` — the long-lived public key the *connecting peer* already
+    /// proved possession of in the transport handshake (R515).
+    ///
+    /// This is what turns a bearer token into a proof that **token holder ==
+    /// connecting peer**. Without it a stolen token replays under the thief's
+    /// own node key and they become the victim user; with it the stolen token
+    /// names a key the thief cannot present, and this returns
+    /// [`Error::PeerKeyMismatch`].
+    ///
+    /// Three stages, cheapest and most local first: signature (stateless),
+    /// binding (a byte compare, still local), then the revocation read (the
+    /// only I/O). An **unbound** token is rejected here too — it asserts
+    /// nothing about any node key, so it cannot satisfy a binding check. A
+    /// deployment that also admits unbound tokens must call
+    /// [`verify_at`](Self::verify_at) and branch on
+    /// [`Claims::peer_key`](cheers_core::Claims::peer_key) itself, so that
+    /// choice is visible at the call site.
+    ///
+    /// The caller supplies `presented` from its own transport — cheers has no
+    /// view of the connection and never infers the peer key from the token.
+    pub async fn verify_bound_at(
+        &self,
+        token: &str,
+        presented: &PeerKey,
+        now: i64,
+    ) -> Result<Claims, Error> {
+        let claims = self.verifier.verify_at(token, now)?;
+        if !claims.is_bound_to(presented) {
+            return Err(Error::PeerKeyMismatch);
+        }
         if self.revoked.is_revoked(&claims.jti).await? {
             return Err(Error::Revoked);
         }

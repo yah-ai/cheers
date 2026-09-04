@@ -71,7 +71,10 @@ pub mod mcp;
 pub mod principal;
 pub mod store;
 
-pub use claims::{Claims, Credential, DeviceBinding, DeviceId, User, UserId};
+pub use claims::{
+    Claims, Credential, DeviceBinding, DeviceId, PeerKey, PeerKeyAlgorithm, PeerKeyError, User,
+    UserId,
+};
 pub use delegation::{DelegationError, UserDelegation};
 // The keyless capability traits + the codec error. The verify/mint impls that
 // satisfy these live in cheers-verify / cheers-server — cheers-core ships only
