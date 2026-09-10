@@ -54,6 +54,7 @@ use cheers::email::magic_link::{
 };
 use cheers::email::{CapturingMailer, MagicLinkEmail};
 use cheers_axum::magic_link::{router as magic_link_router, MagicLinkAuthState};
+use cheers_axum::me::NoSessionRecorder;
 use cheers_server::{PasetoV4SecretMinter, SessionAuthority};
 use cheers_sqlx::{SqliteRefreshStore, SqliteRevocationStore, SqliteUserStore, SQLITE_MIGRATIONS};
 use sqlx::sqlite::SqlitePoolOptions;
@@ -196,6 +197,9 @@ pub async fn build_router(config: &TestIdentityConfig) -> Result<Router, TestIde
         mailer: Arc::clone(&mailer),
         authority,
         template,
+        // This harness mounts no `/me/sessions`, so there is nothing to serve
+        // a recorded device list to.
+        recorder: Arc::new(NoSessionRecorder),
     });
 
     let app = Router::new()

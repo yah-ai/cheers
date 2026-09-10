@@ -30,6 +30,7 @@
 //! # use cheers::email::magic_link::{MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryUsedJtiStore};
 //! # use cheers::email::{CapturingMailer, MagicLinkEmail};
 //! # use cheers_axum::magic_link::{router, MagicLinkAuthState};
+//! # use cheers_axum::me::NoSessionRecorder;
 //! # use cheers_server::SessionAuthority;
 //! # async fn run<M, R, U, W>(
 //! #     authority: Arc<SessionAuthority<M, R, U, W>>,
@@ -53,6 +54,8 @@
 //!     mailer,
 //!     authority,
 //!     template,
+//!     // Swap in your own `SessionRecorder` to power `GET /me/sessions`.
+//!     recorder: Arc::new(NoSessionRecorder),
 //! };
 //!
 //! let app: Router = Router::new().nest("/auth", router(Arc::new(state)));
@@ -76,6 +79,7 @@ use cheers_server::{
 };
 
 use crate::error::RouteError;
+use crate::me::SessionRecorder;
 use crate::session::SessionBody;
 
 /// State bundle held by the magic-link handlers.
@@ -84,6 +88,14 @@ pub struct MagicLinkAuthState<M, R, U, W, S, MA> {
     pub mailer: Arc<MA>,
     pub authority: Arc<SessionAuthority<M, R, U, W>>,
     pub template: MagicLinkEmail,
+    /// Where a freshly established session is handed to the product, so it
+    /// can answer `GET /me/sessions` later. Required rather than optional:
+    /// this ceremony is one of only three places a [`DeviceBinding`] exists,
+    /// and a product that silently skipped it would show the user a device
+    /// list missing the device they just signed in on. Wire
+    /// [`NoSessionRecorder`](crate::me::NoSessionRecorder) to opt out on
+    /// purpose.
+    pub recorder: Arc<dyn SessionRecorder>,
 }
 
 impl<M, R, U, W, S, MA> std::fmt::Debug for MagicLinkAuthState<M, R, U, W, S, MA> {
@@ -195,6 +207,7 @@ where
             now,
         )
         .await?;
+    state.recorder.record_new_session(&session).await?;
     Ok(Json(SessionBody::from_new_session(session)))
 }
 

@@ -35,6 +35,7 @@
 //! # use axum::Router;
 //! # use cheers::passkey::{PasskeyRelyingParty, Url};
 //! # use cheers_axum::passkey::{router, MemoryPasskeyFlowStore, PasskeyAuthState};
+//! # use cheers_axum::me::NoSessionRecorder;
 //! # use cheers_server::{PasskeyCredentialStore, SessionAuthority};
 //! # async fn run<M, R, U, W, P>(
 //! #     rp: Arc<PasskeyRelyingParty>,
@@ -53,6 +54,8 @@
 //!     authority,
 //!     credentials,
 //!     flows: Arc::new(MemoryPasskeyFlowStore::new()),
+//!     // Swap in your own `SessionRecorder` to power `GET /me/sessions`.
+//!     recorder: Arc::new(NoSessionRecorder),
 //! };
 //!
 //! let app: Router = Router::new().nest("/auth", router(Arc::new(state)));
@@ -82,6 +85,7 @@ use cheers_server::{
 };
 
 use crate::error::RouteError;
+use crate::me::SessionRecorder;
 use crate::session::SessionBody;
 
 /// Server-side stash for a passkey registration ceremony in flight.
@@ -190,6 +194,13 @@ pub struct PasskeyAuthState<M, R, U, W, P, F> {
     pub authority: Arc<SessionAuthority<M, R, U, W>>,
     pub credentials: Arc<P>,
     pub flows: Arc<F>,
+    /// Where a freshly established session is handed to the product, so it
+    /// can answer `GET /me/sessions` later. Both ceremonies here establish a
+    /// session (register and authenticate), and both report through it.
+    /// Required rather than optional — wire
+    /// [`NoSessionRecorder`](crate::me::NoSessionRecorder) to opt out on
+    /// purpose.
+    pub recorder: Arc<dyn SessionRecorder>,
 }
 
 impl<M, R, U, W, P, F> std::fmt::Debug for PasskeyAuthState<M, R, U, W, P, F> {
@@ -345,6 +356,7 @@ where
             now,
         )
         .await?;
+    state.recorder.record_new_session(&session).await?;
     Ok(Json(SessionBody::from_new_session(session)))
 }
 
@@ -460,6 +472,7 @@ where
         .authority
         .establish(stashed.user_id, device_id, DeviceBinding::Passkey, now)
         .await?;
+    state.recorder.record_new_session(&session).await?;
     Ok(Json(SessionBody::from_new_session(session)))
 }
 

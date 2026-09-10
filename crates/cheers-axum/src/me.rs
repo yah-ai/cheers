@@ -14,13 +14,20 @@
 //! `DeviceBinding` (the cheers refresh chain is about *which session*, not
 //! *how it authenticated*). To surface
 //! `[{device_id, binding, issued_at, expires_at, is_current}]` per the ticket
-//! spec, the join lives in product code: the product implements
-//! [`SessionDirectory`] over its own data (a SQL query joining
-//! `refresh_tokens` with whatever table records the last-known binding, or a
-//! `last_binding` column on the refresh row itself). This trait stays in
-//! `cheers-axum` rather than `cheers-server` so the cheers-server trait
-//! surface remains minimal — no new `SessionStore` trait, per the R018
-//! design call.
+//! spec, the row lives in product code: the product implements
+//! [`SessionDirectory`] over its own table. Both halves of that table are
+//! product-owned — [`SessionRecorder`] is how the rows get written, and it is
+//! the reason this is implementable at all. The binding is known in exactly
+//! three places (magic-link verify, passkey register, passkey authenticate),
+//! all of them inside this crate, so a product that merely *mounts* those
+//! routers is never on the stack when a session is established; the recorder
+//! is the seam that hands it out. Both traits stay in `cheers-axum` rather
+//! than `cheers-server` so the cheers-server trait surface remains minimal —
+//! no new `SessionStore` trait, per the R018 design call, and the refresh
+//! chain goes on saying nothing about how a session authenticated.
+//!
+//! A service that wants no session list wires [`NoSessionRecorder`] and skips
+//! [`router`].
 //!
 //! ## Revoke semantics
 //!
@@ -60,6 +67,32 @@
 //! let app: Router = Router::new().nest("/api", router(Arc::new(state)));
 //! # Ok(()) }
 //! ```
+//!
+//! @yah:relay(R516, "SessionRecorder seam in cheers-axum so a product can populate SessionDirectory")
+//! @yah:at(2026-09-09T06:03:22Z)
+//! @yah:status(open)
+//! @yah:assignee(agent:claude)
+//! @yah:parent(Q003)
+//! @yah:gotcha("The three establish call sites are all INSIDE cheers-axum, so no product code is ever on the stack when a binding is known: crates/cheers-axum/src/magic_link.rs:189 (DeviceBinding::EmailMagicLink, device id freshly minted there by generate_device_id), crates/cheers-axum/src/passkey.rs:341 (register, Passkey) and passkey.rs:461 (authenticate, Passkey). This is the whole gap — not a missing store impl, a missing observation point. The only SessionDirectory impl in the tree today is the test one at crates/cheers-axum/tests/common/mod.rs.")
+//! @yah:next("ALTERNATIVE CONSIDERED AND NOT RECOMMENDED — put binding on RefreshTokenRecord plus a binding column on refresh_tokens. It is the more faithful data model but it contradicts the guide-by-omission call stated twice in crates/cheers-server/src/session.rs (rotate and establish_bound both argue the chain is about which session, not how this token authenticated), and its blast radius is cheers-server, cheers/src/store/memory.rs, cheers-sqlx, cheers-redis, cheers-turso, the shared crates/cheers-test-support/src/store_scenarios.rs suite, plus a migration that must land byte-identically in crates/cheers-turso/migrations/sqlite/ and crates/cheers-sqlx/migrations/{sqlite,pg}/ — enforced by migrations_match_cheers_sqlx at crates/cheers-turso/tests/turso.rs:211. The recorder shape touches one crate and no migrations.")
+//! @yah:next("FIRST CONSUMER, and why this is filed from outside: noisetable's account service (noisetable camp R131-F7) merges both provider routers at web/services/account/src/auth.rs:258-259 and wants GET /me/sessions for an account-UI device list. It consumes the cheers family as plain crates.io deps at 0.8.32 (web/services/account/Cargo.toml:47-52, no [patch.crates-io] since the R131-T11 graduation), so this landing needs a published release before noisetable can move. Note establish_bound needs no seam: noisetable's node-enrollment route calls it from product code (web/services/account/src/node_token.rs), so the product already holds the binding there.")
+//! @yah:verify("cargo test -p cheers-axum — the /me tests at crates/cheers-axum/tests/me_basic.rs must go on passing against a real recorder-backed directory rather than only the hand-rolled one in tests/common/mod.rs")
+//! @yah:next("The shape is settled in R516-F1: a SessionRecorder trait in cheers-axum plus a required recorder field on the two provider states. This relay holds the why and the rejected alternative; the work unit is the child.")
+//! @yah:gotcha("WHY THIS EXISTS (verified 2026-09-08 against the working tree). SessionDirectory at crates/cheers-axum/src/me.rs was unimplementable by a product that only mounts the provider routers. SessionListEntry requires a binding, but SessionAuthority::establish_inner in crates/cheers-server/src/session.rs hands the binding to mint_access and then writes the root refresh row without it; RefreshTokenRecord in crates/cheers-server/src/store.rs has no binding field, deliberately — 'guide by omission, the refresh chain is about which session, not how it authenticated', per rotate's doc comment. UserStore::list_devices returns bare device ids with no binding either. Hence a recorder rather than a store change.")
+//!
+//! @yah:ticket(R516-F1, "Add SessionRecorder trait + required state field, call it from the three establish sites")
+//! @yah:status(review)
+//! @yah:at(2026-09-09T06:21:45Z)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:parent(R516)
+//! @yah:next("Declare `#[async_trait] pub trait SessionRecorder: Send + Sync { async fn record_established(&self, user_id: &UserId, device_id: &DeviceId, binding: &DeviceBinding, issued_at: i64, expires_at: i64) -> Result<(), StoreError>; }` in crates/cheers-axum/src/me.rs beside SessionDirectory (me.rs:141) and re-export it from crates/cheers-axum/src/lib.rs where SessionDirectory is already re-exported. Same crate for the same reason me.rs:21-24 gives — the cheers-server trait surface stays minimal, no new SessionStore, per the R018 design call.")
+//! @yah:next("Add the recorder as a REQUIRED field (not Option) on MagicLinkAuthState (crates/cheers-axum/src/magic_link.rs:82) and PasskeyAuthState (crates/cheers-axum/src/passkey.rs:188), and call it after establish() returns Ok at magic_link.rs:189, passkey.rs:341 and passkey.rs:461. Ship a no-op impl for services that do not list sessions. Both structs are plain pub-field bundles, so a required field is a compile error at every construction site rather than a silent None — and a missed recorder means a device the user can neither see nor revoke. Breaking for yubaba/passway/cloud-admin, but mechanical: one field, one NoRecorder.")
+//! @yah:next("Decide and document the failure policy for record_established. Recommend propagating the error so the sign-in request fails: a session that was minted but not recorded is one the user can neither see on /me/sessions nor revoke from it, which is worse than a failed sign-in the client can retry. The alternative (log and continue) trades a silent security hole for availability and should be an explicit product choice, not the default. Whichever wins, say so in the trait's doc comment — this is the kind of call me.rs already documents rather than leaves to the reader.")
+//! @yah:verify("cargo test -p cheers-axum — extend crates/cheers-axum/tests/me_basic.rs so the SessionDirectory under test is fed by a SessionRecorder wired into the magic-link and passkey routers, rather than the hand-populated one in tests/common/mod.rs. That end-to-end path (sign in, then list) is the thing this ticket exists to make possible, so it is the test that proves it.")
+//! @yah:handoff("LANDED. `SessionRecorder` + `NoSessionRecorder` in crates/cheers-axum/src/me.rs, re-exported from lib.rs beside SessionDirectory. Required `recorder: Arc<dyn SessionRecorder>` field on MagicLinkAuthState and PasskeyAuthState — `Arc<dyn …>` rather than a seventh generic, matching AdminAuthState's `Arc<dyn OperatorPolicy>` precedent in admin.rs. Called at all three establish sites (magic_link.rs verify, passkey.rs register/finish, passkey.rs authenticate/finish) via the trait's provided `record_new_session(&NewSession)`, which reads the refresh chain's issued_at/expires_at so no caller can pick the access token's minutes-long TTL by mistake. Errors propagate through `From<StoreError> for RouteError`, so a failed record fails the sign-in — documented on the trait with the reasoning and the opt-out.")
+//! @yah:handoff("TESTS. crates/cheers-axum/tests/common/mod.rs: MemSessionDirectory now impls SessionRecorder over the same map, which is the product shape — one table, written at establish, read at list. me_basic.rs: seed_session switched to record_new_session (the fixture stopped duplicating the timestamp mapping), plus a new end-to-end magic_link_sign_in_then_list_sessions_round_trip that mounts the magic-link router and the /me router over one authority and one directory, signs in for real, and asserts GET /me/sessions returns that device with binding kind email_magic_link and is_current true — nothing seeded by hand. magic_link_basic.rs asserts one row per sign-in with the refresh-chain lifetime (not the access TTL); passkey_basic.rs asserts register records the device and re-authenticating on it upserts rather than adding a second row. cheers-test-identity mounts NoSessionRecorder — it has no /me surface.")
+//! @yah:verify("cargo test --workspace --all-features: cheers-axum 69 unit + 54 integration + 12 doctests green, cheers-server 161 green, whole workspace green except cheers-redis's 5 tests, which fail on SocketNotFoundError(\"/var/run/docker.sock\") — testcontainers with no docker on this host, pre-existing and untouched by this change (no store crate was modified). cargo clippy -p cheers-axum -p cheers-test-identity --all-features --all-targets: no new warnings (the 12 'very complex type' ones are the pre-existing 6-generic handlers; the borrowed-expression one is camps.rs:238). cargo doc: 53 pre-existing warnings crate-wide, none in me.rs / magic_link.rs / passkey.rs. cargo fmt deliberately not run — lib.rs:298 records that the crate is already fmt-dirty tree-wide.")
+//! @yah:gotcha("BREAKING for anyone constructing MagicLinkAuthState or PasskeyAuthState — that is the design (a forgotten recorder would be a device the user can neither see nor revoke, so the compiler asks). The only construction sites in the yah monorepo were inside this repo: the two module doctests, the two integration-test rigs, and cheers-test-identity. Grepped /Users/leif/ss/yah for both type names and found nothing else — yubaba, passway and cloud-admin do not construct them, contrary to the guess recorded on the parent relay. Outside the monorepo, noisetable's account service does (web/services/account/src/auth.rs), and it needs a published release to pick this up.")
 
 use std::sync::Arc;
 
@@ -75,7 +108,8 @@ use cheers_core::{
     Claims, DeviceBinding, DeviceId, Error, StoreError, TokenMinter, TokenVerifier, UserId,
 };
 use cheers_server::{
-    EdgeVerifier, RefreshStore, RevocationReader, RevocationWriter, SessionAuthority, UserStore,
+    EdgeVerifier, NewSession, RefreshStore, RevocationReader, RevocationWriter, SessionAuthority,
+    UserStore,
 };
 
 use crate::error::RouteError;
@@ -144,6 +178,94 @@ pub trait SessionDirectory: Send + Sync {
         user_id: &UserId,
         now: i64,
     ) -> Result<Vec<SessionDescriptor>, StoreError>;
+}
+
+/// Product-side observation of a session at the moment it is established.
+///
+/// The counterpart to [`SessionDirectory`]: the directory reads a device list
+/// back, and this is where the rows come from. cheers calls it from the
+/// provider ceremonies (magic-link verify, passkey register/authenticate) —
+/// the only points at which a [`DeviceBinding`] is known, and points the
+/// product has no call site inside, since it mounts those routers rather than
+/// writing them. Without it a product literally cannot implement
+/// `SessionDirectory`: the refresh row carries no binding
+/// ([`RefreshTokenRecord`](cheers_server::RefreshTokenRecord)), and
+/// [`UserStore::list_devices`] hands back bare
+/// [`DeviceId`]s.
+///
+/// `issued_at` / `expires_at` are the refresh chain's, not the access token's
+/// — they are the lifetime `SessionDescriptor` reports, and the access TTL is
+/// minutes.
+///
+/// **Called on every establish, including a re-authentication on a device the
+/// user already has.** Impls should upsert on `(user_id, device_id)` rather
+/// than insert, and are free to overwrite `binding` — the latest ceremony is
+/// the honest answer to "how is this device signed in".
+///
+/// **An error fails the sign-in.** That is deliberate: a session that minted
+/// but did not record is one the user can neither see on `GET /me/sessions`
+/// nor revoke from it, which is a worse outcome than a failed sign-in the
+/// client can retry. A product that would rather trade that away can swallow
+/// the error inside its own impl and return `Ok(())` — but it makes that call
+/// explicitly, in its own code.
+///
+/// Services that surface no session list wire [`NoSessionRecorder`].
+#[async_trait]
+pub trait SessionRecorder: Send + Sync {
+    async fn record_established(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        binding: &DeviceBinding,
+        issued_at: i64,
+        expires_at: i64,
+    ) -> Result<(), StoreError>;
+
+    /// Record a [`NewSession`] straight off
+    /// [`SessionAuthority::establish`](cheers_server::SessionAuthority::establish).
+    ///
+    /// Provided, not implemented by products: it exists so the caller cannot
+    /// pick the wrong timestamps. The lifetime recorded is the refresh
+    /// chain's (minted alongside the access token, and what
+    /// [`SessionDescriptor`] reports), never the access token's minutes-long
+    /// TTL. The provider ceremonies in this crate call this; a product that
+    /// runs its own ceremony over `establish` / `establish_bound` should call
+    /// it too.
+    async fn record_new_session(&self, session: &NewSession) -> Result<(), StoreError> {
+        self.record_established(
+            &session.refresh.record.user_id,
+            &session.refresh.record.device_id,
+            &session.claims.binding,
+            session.refresh.record.issued_at,
+            session.refresh.record.expires_at,
+        )
+        .await
+    }
+}
+
+/// A [`SessionRecorder`] that records nothing, for services with no
+/// `/me/sessions` surface.
+///
+/// The recorder field on the provider states is deliberately required rather
+/// than `Option`, so a product that wants a session list cannot forget to
+/// wire one — the compiler asks. This is the explicit way to answer "I don't
+/// want one", and pairing it with [`me::router`](router) is a contradiction:
+/// the directory will stay empty.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoSessionRecorder;
+
+#[async_trait]
+impl SessionRecorder for NoSessionRecorder {
+    async fn record_established(
+        &self,
+        _user_id: &UserId,
+        _device_id: &DeviceId,
+        _binding: &DeviceBinding,
+        _issued_at: i64,
+        _expires_at: i64,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 /// State bundle held by the `/me/sessions` handlers.

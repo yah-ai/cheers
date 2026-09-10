@@ -22,7 +22,7 @@ use cheers_core::{DeviceBinding, DeviceId, UserId};
 use cheers_server::{SessionAuthority, SessionPolicy};
 use tower::ServiceExt;
 
-use cheers_axum::me::{MeAuthState, router as me_router};
+use cheers_axum::me::{MeAuthState, router as me_router, SessionRecorder};
 
 use crate::common::{
     body_to_string, MemRefreshStore, MemRevocations, MemSessionDirectory, MemUserStore,
@@ -91,13 +91,13 @@ async fn seed_session(
         .establish(user_id.clone(), device_id.clone(), binding.clone(), now)
         .await
         .expect("establish session");
-    directory.record(
-        user_id.clone(),
-        device_id.clone(),
-        binding,
-        session.refresh.record.issued_at,
-        session.refresh.record.expires_at,
-    );
+    // Same call the provider ceremonies make — it picks the refresh chain's
+    // lifetime rather than the access token's, so the fixture can't drift
+    // from what a real sign-in records.
+    directory
+        .record_new_session(&session)
+        .await
+        .expect("record session");
     (session.access_token, session.claims)
 }
 
@@ -363,3 +363,116 @@ async fn revoke_unknown_device_returns_404() {
     assert!(body.contains("unknown_device"), "expected unknown_device: {body}");
 }
 
+
+// ---------------------------------------------------------------------------
+// End-to-end: sign in through a provider ceremony, then list.
+//
+// The two halves of the feature meeting — a real magic-link sign-in writes
+// the row through `SessionRecorder`, and `GET /me/sessions` reads it back
+// through `SessionDirectory`. Nothing in this test seeds the directory by
+// hand, which is the point: before the recorder existed there was no way for
+// a product to get the `DeviceBinding` out of a ceremony it only mounts.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "email")]
+#[tokio::test]
+async fn magic_link_sign_in_then_list_sessions_round_trip() {
+    use cheers::email::magic_link::{
+        MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryUsedJtiStore,
+    };
+    use cheers::email::{CapturingMailer, MagicLinkEmail};
+    use cheers_axum::magic_link::{router as magic_link_router, MagicLinkAuthState};
+
+    const VERIFY_BASE: &str = "/auth/magic-link/verify";
+
+    let revocations = MemRevocations::default();
+    let authority = Arc::new(SessionAuthority::new(
+        test_minter(),
+        MemRefreshStore::default(),
+        MemUserStore::default(),
+        revocations.clone(),
+    ));
+    // One object, both traits — the shape a product takes: the ceremony
+    // writes the row, /me/sessions reads it.
+    let sessions = Arc::new(MemSessionDirectory::default());
+
+    let mailer = Arc::new(CapturingMailer::new());
+    let magic_link = Arc::new(MagicLinkAuthState {
+        provider: Arc::new(MagicLinkProvider::new(
+            MagicLinkCodec::new(&[9u8; 32], 900).unwrap(),
+            MagicLinkUrlBuilder::new(format!("https://app.example{VERIFY_BASE}")),
+            MemoryUsedJtiStore::new(),
+        )),
+        mailer: mailer.clone(),
+        authority: authority.clone(),
+        template: MagicLinkEmail::new("Acme", "Acme <noreply@acme.example>"),
+        recorder: sessions.clone(),
+    });
+    let me = Arc::new(MeAuthState {
+        edge: Arc::new(test_edge(revocations.clone())),
+        authority: authority.clone(),
+        directory: sessions.clone(),
+    });
+    let app = Router::new()
+        .nest("/auth", magic_link_router(magic_link))
+        .nest("/api", me_router(me));
+
+    // Sign in.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/magic-link/request")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"email":"carol@example.com"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = mailer.last().expect("mailer captured a send").text;
+    let start = text
+        .find("https://app.example/auth/magic-link/verify?token=")
+        .expect("click-through url in body");
+    let url = text[start..].split_whitespace().next().unwrap();
+    let token = url.split_once("token=").expect("token param").1;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{VERIFY_BASE}?token={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let session: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    let access_token = session["access_token"].as_str().unwrap().to_owned();
+    let device_id = session["device_id"].as_str().unwrap().to_owned();
+
+    // List — the device the user just signed in on is there, flagged current,
+    // carrying the binding only the ceremony knew.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/me/sessions")
+                .header(header::AUTHORIZATION, auth_header(&access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    let rows = rows.as_array().expect("array body");
+    assert_eq!(rows.len(), 1, "one session listed: {rows:?}");
+    assert_eq!(rows[0]["device_id"].as_str().unwrap(), device_id);
+    assert_eq!(rows[0]["binding"]["kind"], serde_json::json!("email_magic_link"));
+    assert_eq!(rows[0]["is_current"], serde_json::json!(true));
+}

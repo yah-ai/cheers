@@ -22,7 +22,10 @@ use cheers::passkey::{
 use cheers_axum::passkey::{MemoryPasskeyFlowStore, PasskeyAuthState, router};
 use cheers_server::PasskeyCredentialStore;
 
-use common::{MemPasskeyStore, TestAuthority, body_to_string, test_authority};
+use cheers_axum::me::SessionDirectory;
+use cheers_core::{DeviceBinding, UserId};
+
+use common::{MemPasskeyStore, MemSessionDirectory, TestAuthority, body_to_string, test_authority};
 
 const RP_ID: &str = "example.com";
 const ORIGIN: &str = "https://example.com";
@@ -37,18 +40,34 @@ type RouterState =
         MemoryPasskeyFlowStore,
     >;
 
-fn build_app() -> (Router, Arc<RouterState>, Arc<TestAuthority>) {
+/// Wall-clock seconds, matching the `now_unix()` the route handlers use.
+fn now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .expect("clock past epoch")
+}
+
+fn build_app() -> (
+    Router,
+    Arc<RouterState>,
+    Arc<TestAuthority>,
+    Arc<MemSessionDirectory>,
+) {
     let rp = PasskeyRelyingParty::new(RP_ID, Url::parse(ORIGIN).unwrap())
         .expect("valid relying-party config");
     let authority = Arc::new(test_authority());
+    let sessions = Arc::new(MemSessionDirectory::default());
     let state = Arc::new(PasskeyAuthState {
         relying_party: Arc::new(rp),
         authority: authority.clone(),
         credentials: Arc::new(MemPasskeyStore::default()),
         flows: Arc::new(MemoryPasskeyFlowStore::new()),
+        recorder: sessions.clone(),
     });
     let app = Router::new().nest("/auth", router(state.clone()));
-    (app, state, authority)
+    (app, state, authority, sessions)
 }
 
 async fn json_post(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -76,7 +95,7 @@ async fn json_post(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) 
 
 #[tokio::test]
 async fn register_then_authenticate_round_trip_mints_a_session() {
-    let (app, state, _authority) = build_app();
+    let (app, state, _authority, sessions) = build_app();
     let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
 
     // 1) register/start — returns flow_id + challenge.
@@ -128,6 +147,16 @@ async fn register_then_authenticate_round_trip_mints_a_session() {
         .unwrap();
     assert_eq!(stored.len(), 1);
 
+    // Registration established a session, so the recorder holds the row the
+    // product's SessionDirectory will serve.
+    let recorded = sessions
+        .list_sessions(&UserId::new("u-1"), now())
+        .await
+        .expect("directory read");
+    assert_eq!(recorded.len(), 1, "one device recorded: {recorded:?}");
+    assert_eq!(recorded[0].binding, DeviceBinding::Passkey);
+    assert_eq!(recorded[0].device_id.clone().into_inner(), "phone");
+
     // 4) authenticate/start — returns a challenge over the registered cred.
     let (status, auth_start) = json_post(
         &app,
@@ -164,11 +193,26 @@ async fn register_then_authenticate_round_trip_mints_a_session() {
         auth_finish["jti"].as_str().unwrap(),
         finish_body["jti"].as_str().unwrap()
     );
+
+    // Both ceremonies reported to the recorder, and re-authenticating on a
+    // device the user already has upserts on `(user, device)` rather than
+    // adding a second row — otherwise a sessions UI would grow one entry per
+    // sign-in on the same phone.
+    let recorded = sessions
+        .list_sessions(&UserId::new("u-1"), now())
+        .await
+        .expect("directory read");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "re-auth on a known device stays one row: {recorded:?}"
+    );
+    assert_eq!(recorded[0].binding, DeviceBinding::Passkey);
 }
 
 #[tokio::test]
 async fn register_finish_rejects_unknown_flow_id() {
-    let (app, _state, _authority) = build_app();
+    let (app, _state, _authority, _sessions) = build_app();
     let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
 
     // Drive a real start_registration so we have a credential to send.
@@ -204,7 +248,7 @@ async fn register_finish_rejects_unknown_flow_id() {
 
 #[tokio::test]
 async fn authenticate_start_rejects_user_with_no_passkeys() {
-    let (app, _state, _authority) = build_app();
+    let (app, _state, _authority, _sessions) = build_app();
     let (status, body) = json_post(
         &app,
         "/auth/passkey/authenticate/start",

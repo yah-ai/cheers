@@ -20,8 +20,10 @@ use cheers::email::magic_link::{
 };
 use cheers::email::{CapturingMailer, MagicLinkEmail};
 use cheers_axum::magic_link::{MagicLinkAuthState, router};
+use cheers_axum::me::SessionDirectory;
+use cheers_core::{DeviceBinding, UserId};
 
-use common::{TestAuthority, body_to_string, test_authority};
+use common::{MemSessionDirectory, TestAuthority, body_to_string, test_authority};
 
 type RouterState = MagicLinkAuthState<
     cheers_server::HmacBlobCodec,
@@ -34,7 +36,21 @@ type RouterState = MagicLinkAuthState<
 
 const VERIFY_BASE: &str = "/auth/magic-link/verify";
 
-fn build_app() -> (Router, Arc<RouterState>, Arc<TestAuthority>) {
+/// Wall-clock seconds, matching the `now_unix()` the route handlers use.
+fn now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .expect("clock past epoch")
+}
+
+fn build_app() -> (
+    Router,
+    Arc<RouterState>,
+    Arc<TestAuthority>,
+    Arc<MemSessionDirectory>,
+) {
     let codec = MagicLinkCodec::new(&[7u8; 32], 900).unwrap();
     let urls = MagicLinkUrlBuilder::new(format!("https://app.example{VERIFY_BASE}"));
     let provider = Arc::new(MagicLinkProvider::new(codec, urls, MemoryUsedJtiStore::new()));
@@ -42,14 +58,17 @@ fn build_app() -> (Router, Arc<RouterState>, Arc<TestAuthority>) {
     let authority = Arc::new(test_authority());
     let template = MagicLinkEmail::new("Acme", "Acme <noreply@acme.example>");
 
+    let sessions = Arc::new(MemSessionDirectory::default());
+
     let state = Arc::new(MagicLinkAuthState {
         provider,
         mailer,
         authority: authority.clone(),
         template,
+        recorder: sessions.clone(),
     });
     let app = Router::new().nest("/auth", router(state.clone()));
-    (app, state, authority)
+    (app, state, authority, sessions)
 }
 
 async fn json_post(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -111,7 +130,7 @@ fn extract_token(url: &str) -> String {
 
 #[tokio::test]
 async fn request_then_verify_creates_user_and_mints_session() {
-    let (app, state, authority) = build_app();
+    let (app, state, authority, sessions) = build_app();
 
     let (status, body) = json_post(
         &app,
@@ -151,6 +170,28 @@ async fn request_then_verify_creates_user_and_mints_session() {
         .expect("user persisted");
     assert_eq!(stored.email.as_deref(), Some("alice@example.com"));
 
+    // The ceremony reported the session to the recorder — this row is what a
+    // product's SessionDirectory later serves from GET /me/sessions, and the
+    // binding is the one only this ceremony knows.
+    let recorded = sessions
+        .list_sessions(&UserId::new(user_id.to_owned()), now())
+        .await
+        .expect("directory read");
+    assert_eq!(recorded.len(), 1, "one device recorded: {recorded:?}");
+    assert_eq!(recorded[0].binding, DeviceBinding::EmailMagicLink);
+    assert_eq!(
+        recorded[0].device_id.clone().into_inner(),
+        verify_body["device_id"].as_str().unwrap(),
+        "recorded device is the one the client was handed"
+    );
+    // The recorded lifetime is the refresh chain's, not the minutes-long
+    // access TTL — that is the window a sessions UI reports.
+    assert!(
+        recorded[0].expires_at - recorded[0].issued_at > 3600,
+        "refresh-chain lifetime, got {}s",
+        recorded[0].expires_at - recorded[0].issued_at
+    );
+
     // Replay of the same token is rejected (single-use).
     let (status, body) = http_get(&app, &format!("{VERIFY_BASE}?token={token}")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -159,7 +200,7 @@ async fn request_then_verify_creates_user_and_mints_session() {
 
 #[tokio::test]
 async fn request_rejects_invalid_email() {
-    let (app, _state, _authority) = build_app();
+    let (app, _state, _authority, _sessions) = build_app();
     let (status, body) = json_post(
         &app,
         "/auth/magic-link/request",
@@ -172,7 +213,7 @@ async fn request_rejects_invalid_email() {
 
 #[tokio::test]
 async fn verify_rejects_malformed_token() {
-    let (app, _state, _authority) = build_app();
+    let (app, _state, _authority, _sessions) = build_app();
     let (status, body) = http_get(&app, &format!("{VERIFY_BASE}?token=not-a-real-token")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "magic_link_token");
@@ -180,7 +221,7 @@ async fn verify_rejects_malformed_token() {
 
 #[tokio::test]
 async fn verify_returns_same_user_on_repeated_logins() {
-    let (app, state, authority) = build_app();
+    let (app, state, authority, sessions) = build_app();
 
     // First request → first user row created.
     let _ = json_post(
@@ -214,4 +255,16 @@ async fn verify_returns_same_user_on_repeated_logins() {
     assert_eq!(status, StatusCode::OK, "got {second}");
     assert_eq!(first["user_id"], second["user_id"]);
     assert_eq!(authority.users().user_count(), 1);
+
+    // One user, two sign-ins, two device rows: verify mints a fresh device id
+    // per click, so the recorder's `(user, device)` key does not collapse them
+    // and the user can see (and revoke) each one separately.
+    let recorded = sessions
+        .list_sessions(&UserId::new(second["user_id"].as_str().unwrap().to_owned()), now())
+        .await
+        .expect("directory read");
+    assert_eq!(recorded.len(), 2, "one row per sign-in: {recorded:?}");
+    assert!(recorded
+        .iter()
+        .all(|r| r.binding == DeviceBinding::EmailMagicLink));
 }

@@ -1,4 +1,80 @@
 {
+  "hooks": {
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "input": {
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}"
+            },
+            "server": "yah",
+            "timeout": 5,
+            "tool": "steer.collect",
+            "type": "mcp_tool"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "input": {
+              "background_task_id": "${tool_response.backgroundTaskId}",
+              "command": "${tool_input.command}",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}"
+            },
+            "server": "yah",
+            "timeout": 15,
+            "tool": "build.guard",
+            "type": "mcp_tool"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "input": {
+              "command": "${tool_input.command}",
+              "description": "${tool_input.description}",
+              "hook_event_name": "${hook_event_name}",
+              "run_in_background": "${tool_input.run_in_background}",
+              "session_id": "${session_id}",
+              "timeout": "${tool_input.timeout}"
+            },
+            "server": "yah",
+            "timeout": 45,
+            "tool": "build.guard",
+            "type": "mcp_tool"
+          }
+        ],
+        "matcher": "Bash"
+      },
+      {
+        "hooks": [
+          {
+            "input": {
+              "file_path": "${tool_input.file_path}",
+              "hook_event_name": "${hook_event_name}",
+              "limit": "${tool_input.limit}",
+              "offset": "${tool_input.offset}",
+              "session_id": "${session_id}"
+            },
+            "server": "yah",
+            "timeout": 5,
+            "tool": "read.cap",
+            "type": "mcp_tool"
+          }
+        ],
+        "matcher": "Read"
+      }
+    ]
+  },
   "mcpServers": {
     "yah": {
       "args": [

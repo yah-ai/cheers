@@ -14,11 +14,11 @@ name = "cheers_turso"
 path = "src/lib.rs"
 
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.34" }
-cheers-server = { path = "../cheers-server", version = "0.8.34" }
+cheers-core = { path = "../cheers-core", version = "0.8.36" }
+cheers-server = { path = "../cheers-server", version = "0.8.36" }
 # RevocationReader (the edge-readable half) is re-exported from cheers-verify;
 # our Revocation impl supplies both sides.
-cheers-verify = { path = "../cheers-verify", version = "0.8.34" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.36" }
 
 # The in-process rust-native engine. Pinned in lockstep with the yah root
 # workspace (0.6.1) — same engine roadcase cells and turso-backup use.

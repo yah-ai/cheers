@@ -19,7 +19,7 @@ use cheers_server::{
     RevocationWriter, SessionAuthority, UserStore,
 };
 
-use cheers_axum::me::{SessionDescriptor, SessionDirectory};
+use cheers_axum::me::{SessionDescriptor, SessionDirectory, SessionRecorder};
 
 // ---------------------------------------------------------------------------
 // In-memory stores — same shape `cheers-server`'s session.rs tests use, lifted
@@ -227,7 +227,10 @@ pub fn test_edge(revocations: MemRevocations) -> TestEdgeVerifier {
 
 // ---------------------------------------------------------------------------
 // MemSessionDirectory — products implement `SessionDirectory` over their own
-// data; for the integration tests we keep a small in-memory map.
+// data; for the integration tests we keep a small in-memory map. It also
+// impls `SessionRecorder` over the same map, which is the shape a real
+// product takes: one table, written at establish time and read back by
+// `GET /me/sessions`.
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -265,6 +268,27 @@ impl MemSessionDirectory {
     pub fn forget(&self, user_id: &UserId, device_id: &DeviceId) {
         let mut g = self.rows.lock().unwrap();
         g.remove(&(user_id.clone(), device_id.clone()));
+    }
+}
+
+#[async_trait]
+impl SessionRecorder for MemSessionDirectory {
+    async fn record_established(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        binding: &DeviceBinding,
+        issued_at: i64,
+        expires_at: i64,
+    ) -> Result<(), StoreError> {
+        self.record(
+            user_id.clone(),
+            device_id.clone(),
+            binding.clone(),
+            issued_at,
+            expires_at,
+        );
+        Ok(())
     }
 }
 

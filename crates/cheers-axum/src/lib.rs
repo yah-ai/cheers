@@ -345,6 +345,9 @@ pub use discovery::{
 pub use error::RouteError;
 pub use jwks::{Jwk, JwkSet, JwksState, PlatformSigningKey, DEFAULT_JWKS_MAX_AGE_SECONDS};
 pub use mcp::{authenticate_mcp, McpAuthState, McpClaimsExt};
-pub use me::{MeAuthState, SessionDescriptor, SessionDirectory, SessionListEntry};
+pub use me::{
+    MeAuthState, NoSessionRecorder, SessionDescriptor, SessionDirectory, SessionListEntry,
+    SessionRecorder,
+};
 pub use ownership::{CreateOwnershipBody, OwnershipState};
 pub use session::SessionBody;
