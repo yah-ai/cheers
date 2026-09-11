@@ -30,6 +30,8 @@ use cheers::providers::google::GoogleProvider;
 use cheers::providers::oidc_generic::{MemoryOidcFlowStore, OidcFlowStore};
 use cheers_axum::cookie::CsrfCookieConfig;
 use cheers_axum::google::{router, GoogleAuthState};
+use cheers_core::UserId;
+use cheers_server::UserStore;
 
 use common::{
     body_to_string, build_http_client, mount_discovery_and_jwks, signing_key, now_seconds,
@@ -220,10 +222,16 @@ async fn full_round_trip_creates_user_and_mints_session() {
     assert!(body["access_expires_at"].as_i64().unwrap() > now_seconds());
     assert!(body["refresh_expires_at"].as_i64().unwrap() > now_seconds());
 
+    // Resolve through the id the callback returned, not through the email —
+    // that pins that the id in the response body is the key the store answers
+    // to, which is what a bearer's `sub` will later carry.
     let stored = authority
         .users()
-        .lookup_email("alice@example.com")
-        .expect("user persisted");
+        .get(&UserId::new(body["user_id"].as_str().unwrap()))
+        .await
+        .expect("get by id")
+        .expect("user persisted under the id the callback returned");
+    assert_eq!(stored.email.as_deref(), Some("alice@example.com"));
     assert_eq!(stored.name.as_deref(), Some("Alice Anderson"));
     assert_eq!(authority.users().user_count(), 1);
 }

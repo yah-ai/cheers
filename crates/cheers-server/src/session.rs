@@ -480,6 +480,9 @@ mod tests {
 
     #[async_trait]
     impl UserStore for StubUsers {
+        async fn get(&self, _: &UserId) -> Result<Option<User>, StoreError> {
+            Ok(None)
+        }
         async fn find_by_provider(
             &self,
             _: &ProviderKey,

@@ -56,6 +56,22 @@ impl std::fmt::Debug for TursoUserStore {
 
 #[async_trait]
 impl UserStore for TursoUserStore {
+    async fn get(&self, user_id: &UserId) -> Result<Option<User>, StoreError> {
+        let row = self
+            .conn
+            .query_one(
+                "SELECT user_id, email, name FROM users WHERE user_id = ?",
+                vec![user_id.as_str().into()],
+            )
+            .await?;
+
+        let Some(row) = row else { return Ok(None) };
+        let mut user = User::new(UserId::new(col::<String>(&row, 0, "user_id")?));
+        user.email = col::<Option<String>>(&row, 1, "email")?;
+        user.name = col::<Option<String>>(&row, 2, "name")?;
+        Ok(Some(user))
+    }
+
     async fn find_by_provider(
         &self,
         provider: &ProviderKey,

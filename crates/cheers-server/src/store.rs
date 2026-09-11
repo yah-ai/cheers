@@ -57,6 +57,27 @@
 //! @yah:verify("cargo test -p cheers-core validate_grant_rejects_service_only_for_user — already pins composition rule (4) for AuditWrite at the grant-time edge (verify item 'User-principal token requesting audit:write at grant time is rejected').")
 //! @yah:verify("Parent relay smoke: cargo test -p cheers-core -p cheers-server -p cheers-verify -p cheers-axum + cargo test -p cheers-sqlx --features sqlite — all green; cargo check --workspace --all-features clean.")
 //! @yah:verify("cargo test -p cheers-axum --test main audit_basic:: — 4/4 integration tests pass: batch POST 100 records all landed; forbidden shape returns 400 + corrected retry succeeds; token without audit:write to 403 before any store call; missing bearer to 401. (Retargeted by R514: the nine cheers-axum test binaries were merged into one target named `main`; the old `--test audit_basic` no longer resolves.)")
+//!
+//! @yah:relay(R517, "User-by-id lookup on UserStore")
+//! @yah:at(2026-09-10T07:02:42Z)
+//! @yah:status(open)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:next("UserStore can find a user by (provider, subject) but never by UserId, so a service holding a verified bearer cannot recover the user record behind it. Downstream consumers are keyed on email as a workaround. Close the gap with a by-id accessor.")
+//!
+//! @yah:ticket(R517-F1, "UserStore::get(&UserId) — the missing user-by-id accessor")
+//! @yah:status(review)
+//! @yah:at(2026-09-10T07:32:34Z)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:parent(R517)
+//! @yah:next("ADD ONE METHOD TO THE UserStore TRAIT: `async fn get(&self, user_id: &UserId) -> Result<Option<User>, StoreError>`. The trait is at crates/cheers-server/src/store.rs:121 and today has exactly five methods — find_by_provider :124, create :132, link_provider :137, list_devices :145, revoke_device :155. Only find_by_provider and create return a User and both key on (ProviderKey, subject); UserId appears ONLY as an input to link_provider / list_devices / revoke_device. There is no &UserId -> User mapping anywhere, under any name (no get, find, find_by_id, lookup, load).")
+//! @yah:assumes("Tier: Warrior — one trait method, but seven implementors across five crates, three of them real database backends (Turso, Postgres, SQLite) each needing a correct by-id query, and it is a published-trait change and therefore a semver event.")
+//! @yah:handoff("LANDED. `UserStore::get(&UserId) -> Result<Option<User>, StoreError>` declared at crates/cheers-server/src/store.rs:147 and implemented in all seven implementors: TursoUserStore (cheers-turso/src/user_store.rs:59), PgUserStore (cheers-sqlx/src/user_store.rs:102), SqliteUserStore (:306), MemUserStore in cheers-test-support (mem.rs:33), the in-crate test double (cheers-server/src/store.rs:339), StubUsers (cheers-server/src/session.rs:483), and the cheers-axum test double (tests/common/mod.rs:50). Required method, no default body — pre-1.0, and a defaulted `Ok(None)` would let an unmigrated backend silently answer \"no such user\" for every live user. The three DB backends each get a real single-table `SELECT user_id, email, name FROM users WHERE user_id = ?` and deliberately do NOT join oauth_identities, so a user with no provider link is still reachable by id. Unknown id is Ok(None), matching find_by_provider; consistent with revocation being per-device, so a fully-revoked user still resolves.")
+//! @yah:handoff("TESTS: new shared contract scenario `user_store_get_by_id` at crates/cheers-test-support/src/store_scenarios.rs:118, run by all three real backends (turso.rs:51, sqlite.rs:69, pg.rs:73) — that file's header explains why one shared suite beats per-backend copies, and this follows it. It pins five things a backend can plausibly get wrong: unknown id is Ok(None) not an error; a fetched user carries the same email AND name the create returned (not just a matching id); NULL email/name round-trip as None rather than empty strings; the id discriminates, so a too-loose WHERE hands back the wrong row and fails; and an UNLINKED user is still reachable by id, which is the assertion that fails if someone later \"optimizes\" the query into a JOIN on oauth_identities. Separate unit test at cheers-server/src/store.rs:474 covers the in-crate double.")
+//! @yah:handoff("DISCOVERED WORK, fixed in this pass — the email workaround the ticket description names was real and is now gone. cheers-axum's test double carried a bespoke non-trait helper `MemUserStore::lookup_email`, and its two callers each already HELD the user id and reached for email anyway, purely because UserStore had no by-id accessor: magic_link_basic.rs:163 read `verify_body[\"user_id\"]` on the line above, and google_round_trip.rs:217 asserted on `body[\"user_id\"]` six lines above. Both now resolve through `users().get(&UserId::new(...))`, which strengthens the assertion — it pins that the id the route hands the client is the key the store actually answers to (the same value a bearer later carries as `sub`), rather than trusting that the single row bearing that email is the right one. `lookup_email` deleted (tests/common/mod.rs); grep confirms zero remaining references. Its sibling `user_count` is still used and stays.")
+//! @yah:verify("GREEN, measured. `cargo test --workspace --all-features` in oss/cheers: 33 test binaries, 0 failures — includes cheers-server 140, cheers-axum 69+54+12, and the new by-id scenario passing under both real engines (turso `test user_store_get_by_id ... ok`, sqlx-sqlite `test user_store_get_by_id ... ok`). Postgres is compile-verified only (`cargo test -p cheers-sqlx --features pg --no-run` builds tests/pg.rs clean); a live pg run needs Docker, which matches how the existing pg scenarios in this crate are already gated.")
+//! @yah:verify("`cargo clippy --workspace --all-targets --all-features` exits 0. Its warnings are pre-existing (very-complex-type, missing-Safety-section); the one needless-borrow in cheers-server resolves to camp.rs:1031, not to anything I wrote. rustfmt --check is clean on every hunk I authored — I checked each edited file's diff line numbers against my own line ranges. The ~19 remaining diffs across store.rs / session.rs / store_scenarios.rs / pg.rs / sqlite.rs / turso.rs / tests-common-mod.rs are pre-existing drift outside those ranges and were left untouched. I did NOT run `cargo fmt`: on this tree it follows path deps into peers' crates, which is the 2026-08-28 incident the root CLAUDE.md documents.")
+//! @yah:gotcha("FOR THE REVIEWER, READ BEFORE THE DIFF: `git diff --stat -- oss/cheers` shows only 4 of the 12 files I touched. The other 8 (the trait declaration and every DB-backend impl) were swept into a peer's wip-commit mid-session — normal on this shared tree, and exactly the case where `git status` proves nothing. Verified by CONTENT instead: grepping `async fn get(&self, user_id: &UserId)` across oss/cheers returns the trait decl (store.rs:147) plus all 7 impls, and `user_store_get_by_id` returns the scenario definition plus all 3 backend call sites plus the unit test. Do not read the short diffstat as \"the backends went unimplemented\".")
+//! @yah:gotcha("Build-infra noise, not a code defect, recorded so it isn't re-diagnosed: one mid-session `cargo test -p cheers-axum` died with `could not write output to oss/cheers/target/debug/deps/main-59a3a7ff85ffe626.<session>.rcgu.o: No such file or directory` — the compiler unable to write into its own incremental-session dir. Textbook R770, and green on an identical immediate re-run with no source change between the two. Per the root CLAUDE.md procedure I checked `cargo orphan-gc log -n 2000` FIRST rather than cleaning, so the evidence survived: the log does NOT name that path, that hash, or the cheers-axum `main` family. Appended to R770 as a fresh occurrence, along with the observation that its `collected N surplus incremental sessions` line never records WHICH session dirs it swept — which is precisely why a confirmed hit is currently indistinguishable from a miss in that log.")
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -119,6 +140,20 @@ impl NewUser {
 /// to end-users on an /account/sessions page (P12).
 #[async_trait]
 pub trait UserStore: Send + Sync {
+    /// Look up a user by its `UserId`. `None` if no such user exists.
+    ///
+    /// This is the accessor a service reaches for when it already holds a
+    /// verified bearer: `Claims::sub` *is* a `UserId`, so everything past
+    /// authentication has the id and nothing else. Without this, recovering the
+    /// record behind a token meant re-deriving it from `(provider, subject)` —
+    /// which the token doesn't carry — or keying downstream state on `email`,
+    /// which is nullable on `User` and not the identity.
+    ///
+    /// A revoked *device* does not hide the user: revocation is per-device
+    /// (`revoke_device`), and the user row outlives it. `None` here means the
+    /// id names no user at all.
+    async fn get(&self, user_id: &UserId) -> Result<Option<User>, StoreError>;
+
     /// Look up the user reachable via `(provider, subject)`. `None` if no
     /// such link exists.
     async fn find_by_provider(
@@ -309,6 +344,11 @@ mod tests {
 
     #[async_trait]
     impl UserStore for MemUserStore {
+        async fn get(&self, user_id: &UserId) -> Result<Option<User>, StoreError> {
+            let g = self.inner.lock().unwrap();
+            Ok(g.users.get(user_id).cloned())
+        }
+
         async fn find_by_provider(
             &self,
             provider: &ProviderKey,
@@ -435,6 +475,29 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(found.id, u.id);
+        });
+    }
+
+    #[test]
+    fn user_store_get_by_id() {
+        let s = MemUserStore::default();
+        pollster::block_on(async {
+            // An id that names no user is a miss, not an error.
+            assert!(s.get(&UserId::new("nope")).await.unwrap().is_none());
+
+            let u = s
+                .create(NewUser::new().with_email("a@b").with_name("A"))
+                .await
+                .unwrap();
+            let got = s.get(&u.id).await.unwrap().expect("created user by id");
+            assert_eq!(got.id, u.id);
+            assert_eq!(got.email.as_deref(), Some("a@b"));
+            assert_eq!(got.name.as_deref(), Some("A"));
+
+            // The id discriminates between users.
+            let u2 = s.create(NewUser::new()).await.unwrap();
+            assert_ne!(u2.id, u.id);
+            assert_eq!(s.get(&u2.id).await.unwrap().map(|x| x.id), Some(u2.id));
         });
     }
 

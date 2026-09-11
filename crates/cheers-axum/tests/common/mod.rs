@@ -43,19 +43,15 @@ impl MemUserStore {
     pub fn user_count(&self) -> usize {
         self.inner.lock().unwrap().users.len()
     }
-    pub fn lookup_email(&self, email: &str) -> Option<User> {
-        self.inner
-            .lock()
-            .unwrap()
-            .users
-            .values()
-            .find(|u| u.email.as_deref() == Some(email))
-            .cloned()
-    }
 }
 
 #[async_trait]
 impl UserStore for MemUserStore {
+    async fn get(&self, user_id: &UserId) -> Result<Option<User>, StoreError> {
+        let g = self.inner.lock().unwrap();
+        Ok(g.users.get(user_id).cloned())
+    }
+
     async fn find_by_provider(
         &self,
         provider: &ProviderKey,

@@ -107,6 +107,80 @@ pub async fn user_store_lifecycle<U: UserStore + ?Sized>(users: &U) {
     assert_eq!(found_b.map(|u| u.id), Some(u2.id.clone()));
 }
 
+/// The by-id accessor — the path a service takes when it holds a verified
+/// bearer and nothing else. `Claims::sub` is a `UserId`, so this is the only
+/// way back to the record without re-deriving `(provider, subject)`.
+///
+/// Pins three things a backend can plausibly get wrong: an unknown id is
+/// `Ok(None)` and not an error; a fetched user carries the same `email`/`name`
+/// the create returned (not just a matching id); and the id is a discriminating
+/// key, so a second user's row never comes back for the first user's id.
+pub async fn user_store_get_by_id<U: UserStore + ?Sized>(users: &U) {
+    // Unknown id is a miss, not a failure.
+    let missing = users
+        .get(&UserId::new("no-such-user"))
+        .await
+        .expect("get should not error on a missing id");
+    assert!(missing.is_none(), "unknown id must be Ok(None)");
+
+    let created = users
+        .create(
+            NewUser::new()
+                .with_email("bob@example.com")
+                .with_name("Bob"),
+        )
+        .await
+        .expect("create user");
+
+    // Round-trip: every field the create returned survives the fetch.
+    let fetched = users
+        .get(&created.id)
+        .await
+        .expect("get")
+        .expect("just-created user must be findable by its own id");
+    assert_eq!(fetched.id, created.id);
+    assert_eq!(fetched.email.as_deref(), Some("bob@example.com"));
+    assert_eq!(fetched.name.as_deref(), Some("Bob"));
+
+    // A NULL email/name round-trips as None rather than an empty string.
+    let sparse = users
+        .create(NewUser::new())
+        .await
+        .expect("create sparse user");
+    let fetched_sparse = users
+        .get(&sparse.id)
+        .await
+        .expect("get sparse")
+        .expect("sparse user must be findable");
+    assert_eq!(fetched_sparse.id, sparse.id);
+    assert!(
+        fetched_sparse.email.is_none(),
+        "absent email must stay None"
+    );
+    assert!(fetched_sparse.name.is_none(), "absent name must stay None");
+
+    // The id discriminates — a WHERE clause that matched too loosely would
+    // hand back the wrong row here.
+    assert_ne!(created.id, sparse.id);
+    assert_eq!(
+        users.get(&created.id).await.expect("re-get").map(|u| u.id),
+        Some(created.id.clone()),
+    );
+
+    // A provider link does not gate the by-id path: a user with no link is
+    // still reachable by id (`find_by_provider` is the only linked-only view).
+    users
+        .link_provider(&created.id, &ProviderKey::Email, "bob@example.com")
+        .await
+        .expect("link email provider");
+    let after_link = users
+        .get(&sparse.id)
+        .await
+        .expect("get unlinked user")
+        .expect("an unlinked user is still reachable by id");
+    assert_eq!(after_link.id, sparse.id);
+}
+
 // ---------------------------------------------------------------------------
 // RefreshStore
 // ---------------------------------------------------------------------------

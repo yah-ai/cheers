@@ -22,6 +22,7 @@ use cheers::email::{CapturingMailer, MagicLinkEmail};
 use cheers_axum::magic_link::{MagicLinkAuthState, router};
 use cheers_axum::me::SessionDirectory;
 use cheers_core::{DeviceBinding, UserId};
+use cheers_server::UserStore;
 
 use common::{MemSessionDirectory, TestAuthority, body_to_string, test_authority};
 
@@ -163,11 +164,15 @@ async fn request_then_verify_creates_user_and_mints_session() {
     let user_id = verify_body["user_id"].as_str().unwrap();
     assert!(user_id.starts_with("u-"));
 
-    // The user landed in the store, linked on the Email provider.
+    // The user landed in the store, and the id the route handed back is the
+    // one that resolves to it — the by-id accessor is the path a service takes
+    // when all it holds is a verified bearer, whose `sub` is this same id.
     let stored = authority
         .users()
-        .lookup_email("alice@example.com")
-        .expect("user persisted");
+        .get(&UserId::new(user_id))
+        .await
+        .expect("get by id")
+        .expect("user persisted under the id the route returned");
     assert_eq!(stored.email.as_deref(), Some("alice@example.com"));
 
     // The ceremony reported the session to the recorder — this row is what a

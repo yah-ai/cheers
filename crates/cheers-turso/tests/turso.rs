@@ -48,6 +48,12 @@ async fn user_store_lifecycle() {
 }
 
 #[tokio::test]
+async fn user_store_get_by_id() {
+    let users = TursoUserStore::new(fresh().await);
+    common::user_store_get_by_id(&users).await;
+}
+
+#[tokio::test]
 async fn refresh_store_put_get_consume_revoke() {
     let conn = fresh().await;
     let user = seeded_user(&TursoUserStore::new(conn.clone())).await;

@@ -66,6 +66,13 @@ async fn user_store_lifecycle() {
 }
 
 #[tokio::test]
+async fn user_store_get_by_id() {
+    let pool = fresh_pool().await;
+    let users = SqliteUserStore::new(pool);
+    common::user_store_get_by_id(&users).await;
+}
+
+#[tokio::test]
 async fn refresh_store_put_get_consume_revoke() {
     let pool = fresh_pool().await;
     let users = SqliteUserStore::new(pool.clone());

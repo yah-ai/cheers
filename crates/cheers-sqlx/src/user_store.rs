@@ -99,6 +99,24 @@ mod pg {
 
     #[async_trait]
     impl UserStore for PgUserStore {
+        async fn get(&self, user_id: &UserId) -> Result<Option<User>, StoreError> {
+            let row = sqlx::query("SELECT user_id, email, name FROM users WHERE user_id = $1")
+                .bind(user_id.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+
+            Ok(row.map(|row| {
+                let user_id: String = row.get("user_id");
+                let email: Option<String> = row.get("email");
+                let name: Option<String> = row.get("name");
+                let mut user = User::new(UserId::new(user_id));
+                user.email = email;
+                user.name = name;
+                user
+            }))
+        }
+
         async fn find_by_provider(
             &self,
             provider: &ProviderKey,
@@ -285,6 +303,24 @@ mod sqlite {
 
     #[async_trait]
     impl UserStore for SqliteUserStore {
+        async fn get(&self, user_id: &UserId) -> Result<Option<User>, StoreError> {
+            let row = sqlx::query("SELECT user_id, email, name FROM users WHERE user_id = ?")
+                .bind(user_id.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+
+            Ok(row.map(|row| {
+                let user_id: String = row.get("user_id");
+                let email: Option<String> = row.get("email");
+                let name: Option<String> = row.get("name");
+                let mut user = User::new(UserId::new(user_id));
+                user.email = email;
+                user.name = name;
+                user
+            }))
+        }
+
         async fn find_by_provider(
             &self,
             provider: &ProviderKey,

@@ -30,6 +30,11 @@ struct MemUserInner {
 
 #[async_trait]
 impl UserStore for MemUserStore {
+    async fn get(&self, user_id: &UserId) -> Result<Option<User>, StoreError> {
+        let g = self.inner.lock().unwrap();
+        Ok(g.users.get(user_id).cloned())
+    }
+
     async fn find_by_provider(
         &self,
         provider: &ProviderKey,
