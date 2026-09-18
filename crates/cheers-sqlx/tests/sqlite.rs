@@ -26,7 +26,7 @@ use cheers_core::{DeviceId, UserId};
 use cheers_server::store::{NewUser, UserStore};
 use cheers_sqlx::{
     SqliteAuditStore, SqliteOwnershipStore, SqliteRefreshStore, SqliteRevocationStore,
-    SqliteServicePrincipalStore, SqliteUserStore, SQLITE_MIGRATIONS,
+    SqliteServicePrincipalStore, SqliteUserStore, SqliteUserTokenStore, SQLITE_MIGRATIONS,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -250,4 +250,39 @@ mod passkey {
         let passkeys = SqlitePasskeyCredentialStore::new(pool);
         super::common::passkey_store_round_trip(&passkeys, &user).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// UserTokenStore (R728-F1) — user_tokens.user_id carries a FK to users, so
+// every scenario seeds a real user first.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn user_token_store_insert_and_scoped_list() {
+    let pool = fresh_pool().await;
+    let users = SqliteUserStore::new(pool.clone());
+    let user = seeded_user(&users).await;
+    let other = users
+        .create(NewUser::new().with_email("other@example.com"))
+        .await
+        .expect("seed second user")
+        .id;
+    let tokens = SqliteUserTokenStore::new(pool);
+    common::user_token_store_insert_and_scoped_list(&tokens, &user, &other).await;
+}
+
+#[tokio::test]
+async fn user_token_store_revoked_and_expired_leave_the_live_list() {
+    let pool = fresh_pool().await;
+    let user = seeded_user(&SqliteUserStore::new(pool.clone())).await;
+    let tokens = SqliteUserTokenStore::new(pool);
+    common::user_token_store_revoked_and_expired_leave_the_live_list(&tokens, &user).await;
+}
+
+#[tokio::test]
+async fn user_token_store_revoke_is_idempotent_and_touch_stamps() {
+    let pool = fresh_pool().await;
+    let user = seeded_user(&SqliteUserStore::new(pool.clone())).await;
+    let tokens = SqliteUserTokenStore::new(pool);
+    common::user_token_store_revoke_is_idempotent_and_touch_stamps(&tokens, &user).await;
 }

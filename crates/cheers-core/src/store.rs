@@ -30,6 +30,8 @@
 //! @yah:handoff("Facade-level wiring (SessionAuthority composing revoke_chain + revoke; EdgeVerifier consulting is_revoked after signature check) is R019-F3 — picked up next per the maintainer's F4-first ordering.")
 
 use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::claims::Credential;
 
@@ -60,6 +62,66 @@ pub trait CredentialStore: Send + Sync {
     async fn put(&self, key: &str, cred: &Credential) -> Result<(), StoreError>;
     async fn get(&self, key: &str) -> Result<Option<Credential>, StoreError>;
     async fn delete(&self, key: &str) -> Result<(), StoreError>;
+}
+
+/// Single-use tracking for magic-link tokens (`cheers::email::magic_link`).
+///
+/// Implementors should hold each `jti` until at least `expires_at` so a
+/// token cannot be replayed before it would have expired anyway. After
+/// expiry the entry can be GC'd — the codec's own expiry check will reject
+/// any token whose record is missing.
+///
+/// R727-B1: declared here (not in the `cheers` crate, where the magic-link
+/// codec lives) so `cheers-turso` and `cheers-sqlx` — which depend on
+/// `cheers-core` but not on `cheers` — can implement it directly. Re-exported
+/// from `cheers::email::magic_link` so existing call sites keep resolving.
+#[async_trait]
+pub trait UsedJtiStore: Send + Sync {
+    /// Atomically: if `jti` has not been seen, record it (with `expires_at`
+    /// for GC) and return `true`. If it has been seen, return `false`.
+    /// `Err(_)` is reserved for backend failures, not replay.
+    async fn try_mark_used(&self, jti: &str, expires_at: i64) -> Result<bool, String>;
+}
+
+/// In-process [`UsedJtiStore`] backed by a `Mutex<HashMap>`. For tests, dev,
+/// and single-replica deployments. Production multi-replica deployments
+/// want a shared backend — see `cheers_turso::TursoUsedJtiStore` /
+/// `cheers_sqlx::SqliteUsedJtiStore`.
+#[derive(Default)]
+pub struct MemoryUsedJtiStore {
+    inner: Mutex<HashMap<String, i64>>,
+}
+
+impl MemoryUsedJtiStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drop entries whose `expires_at <= now`. Callers wire this on a timer
+    /// if they care about the unbounded-growth case.
+    pub fn gc(&self, now: i64) {
+        self.inner.lock().unwrap().retain(|_, exp| *exp > now);
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap().is_empty()
+    }
+}
+
+#[async_trait]
+impl UsedJtiStore for MemoryUsedJtiStore {
+    async fn try_mark_used(&self, jti: &str, expires_at: i64) -> Result<bool, String> {
+        let mut g = self.inner.lock().unwrap();
+        if g.contains_key(jti) {
+            return Ok(false);
+        }
+        g.insert(jti.to_owned(), expires_at);
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

@@ -94,6 +94,18 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/sqlite/0005_hash_refresh_tokens.sql"),
         filename: "0005_hash_refresh_tokens.sql",
     },
+    Migration {
+        version: 6,
+        description: "used jti",
+        sql: include_str!("../migrations/sqlite/0006_used_jti.sql"),
+        filename: "0006_used_jti.sql",
+    },
+    Migration {
+        version: 7,
+        description: "user tokens",
+        sql: include_str!("../migrations/sqlite/0007_user_tokens.sql"),
+        filename: "0007_user_tokens.sql",
+    },
 ];
 
 /// The bookkeeping table, verbatim from `sqlx-sqlite`'s

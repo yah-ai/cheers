@@ -12,7 +12,10 @@
 //! ## Modules
 //!
 //! - [`google`] (feature `google`) — `GET /auth/login/google` + `GET /auth/callback/google`
-//!   for Google's standard OIDC Authorization Code + PKCE flow.
+//!   for Google's standard OIDC Authorization Code + PKCE flow, plus
+//!   `GET /auth/google/id-token/nonce` + `POST /auth/google/id-token` for the
+//!   native shape (Android Credential Manager), where the IdP hands the app a
+//!   signed `id_token` and there is no code to redeem.
 //! - [`apple`] (feature `apple`) — `GET /auth/login/apple` + `POST /auth/callback/apple`
 //!   for Apple's form-post variant with one-shot first-login name capture.
 //! - [`passkey`] (feature `passkey`) — `POST /auth/passkey/{register,authenticate}/{start,finish}`
@@ -312,6 +315,7 @@ pub mod mcp;
 pub mod me;
 pub mod ownership;
 pub mod session;
+pub mod tokens;
 
 #[cfg(feature = "google")]
 pub mod google;
@@ -344,10 +348,14 @@ pub use discovery::{
 };
 pub use error::RouteError;
 pub use jwks::{Jwk, JwkSet, JwksState, PlatformSigningKey, DEFAULT_JWKS_MAX_AGE_SECONDS};
-pub use mcp::{authenticate_mcp, McpAuthState, McpClaimsExt};
+pub use mcp::{authenticate_mcp, verify_mcp_bearer, McpAuthState, McpClaimsExt};
 pub use me::{
     MeAuthState, NoSessionRecorder, SessionDescriptor, SessionDirectory, SessionListEntry,
     SessionRecorder,
 };
 pub use ownership::{CreateOwnershipBody, OwnershipState};
 pub use session::SessionBody;
+pub use tokens::{
+    authenticate_any, router as tokens_router, ApiTokenTrust, Caller, CreateTokenBody,
+    CreatedToken, Credential, MeTokensState, RotateTokenBody, SharedTokensState, TokenListEntry,
+};

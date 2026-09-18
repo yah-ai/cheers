@@ -17,7 +17,7 @@ use cheers_test_support::store_scenarios as common;
 use cheers_turso::{
     migrate, AccountStores, TursoAuditStore, TursoConn, TursoOwnershipStore,
     TursoPasskeyCredentialStore, TursoRefreshStore, TursoRevocationStore,
-    TursoServicePrincipalStore, TursoUserStore, MIGRATIONS,
+    TursoServicePrincipalStore, TursoUserStore, TursoUserTokenStore, MIGRATIONS,
 };
 
 /// A freshly migrated in-memory database. Each call gets its own.
@@ -142,6 +142,41 @@ async fn audit_store_batch_insert_round_trip() {
 async fn audit_store_query_by_on_behalf_of() {
     let store = TursoAuditStore::new(fresh().await);
     common::audit_store_query_by_on_behalf_of(&store).await;
+}
+
+// ---------------------------------------------------------------------------
+// UserTokenStore (R728-F1) — user_tokens.user_id carries a FK to users, so
+// every scenario seeds a real user first.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn user_token_store_insert_and_scoped_list() {
+    let conn = fresh().await;
+    let users = TursoUserStore::new(conn.clone());
+    let user = seeded_user(&users).await;
+    let other = users
+        .create(NewUser::new().with_email("other@example.com"))
+        .await
+        .expect("seed second user")
+        .id;
+    let tokens = TursoUserTokenStore::new(conn);
+    common::user_token_store_insert_and_scoped_list(&tokens, &user, &other).await;
+}
+
+#[tokio::test]
+async fn user_token_store_revoked_and_expired_leave_the_live_list() {
+    let conn = fresh().await;
+    let user = seeded_user(&TursoUserStore::new(conn.clone())).await;
+    let tokens = TursoUserTokenStore::new(conn);
+    common::user_token_store_revoked_and_expired_leave_the_live_list(&tokens, &user).await;
+}
+
+#[tokio::test]
+async fn user_token_store_revoke_is_idempotent_and_touch_stamps() {
+    let conn = fresh().await;
+    let user = seeded_user(&TursoUserStore::new(conn.clone())).await;
+    let tokens = TursoUserTokenStore::new(conn);
+    common::user_token_store_revoke_is_idempotent_and_touch_stamps(&tokens, &user).await;
 }
 
 #[tokio::test]

@@ -124,6 +124,10 @@ pub mod service_principal_store;
 pub mod audit_store;
 #[cfg(all(feature = "passkey", any(feature = "pg", feature = "sqlite")))]
 pub mod passkey_store;
+#[cfg(any(feature = "pg", feature = "sqlite"))]
+pub mod used_jti_store;
+#[cfg(any(feature = "pg", feature = "sqlite"))]
+pub mod user_token_store;
 
 #[cfg(feature = "pg")]
 pub use user_store::PgUserStore;
@@ -153,3 +157,9 @@ pub use audit_store::SqliteAuditStore;
 pub use passkey_store::PgPasskeyCredentialStore;
 #[cfg(all(feature = "passkey", feature = "sqlite"))]
 pub use passkey_store::SqlitePasskeyCredentialStore;
+#[cfg(feature = "sqlite")]
+pub use used_jti_store::SqliteUsedJtiStore;
+#[cfg(feature = "pg")]
+pub use user_token_store::PgUserTokenStore;
+#[cfg(feature = "sqlite")]
+pub use user_token_store::SqliteUserTokenStore;

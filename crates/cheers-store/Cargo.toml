@@ -25,10 +25,16 @@ all-features = true
 # impls live in cheers-verify/cheers-server, not behind a cheers-core feature),
 # so a device target that only acquires and stores an opaque credential never
 # compiles pasetors/hmac/sha2/…
-cheers-core = { path = "../cheers-core", version = "0.8.37" }
+cheers-core = { path = "../cheers-core", version = "0.8.40" }
 
 async-trait = { version = "0.1", optional = true }
 serde_json = { version = "1", optional = true }
+
+# Derive only — the AndroidKeystoreStore vault is a struct (credential map +
+# app_install_id) rather than a bare map, so it needs its own Serialize impl.
+# cheers-core already re-exports serde-derived types, so this adds no new crate
+# to a build that was already carrying serde_json.
+serde = { version = "1", features = ["derive"], optional = true }
 
 # OS CSPRNG for the atomic-write temp-file suffix (headless/EncryptedFileStore) —
 # an unpredictable name so the `create_new` (O_EXCL) open can't be pre-empted by
@@ -68,6 +74,17 @@ keyring = { version = "3", default-features = false, features = [
     "crypto-rust",
 ], optional = true }
 
+# android (R726-F20) — AndroidKeystoreStore. Android has no Secret Service the
+# `keyring` crate can front, so the backend goes to the JCA provider directly
+# over JNI. Both deps are target-gated: on every other platform the `android`
+# feature still compiles (and its tests still run) against an injected
+# KeySealer, and neither crate is linked. `jni` is pinned to the 0.22 line
+# already resolved in this workspace via hickory-resolver /
+# rustls-platform-verifier, so an Android build links one copy rather than two.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.22", optional = true }
+ndk-context = { version = "0.1", optional = true }
+
 [dev-dependencies]
 # pollster drives the async CredentialStore methods in tests without a full
 # async runtime — matches cheers-core's store-trait tests.
@@ -86,3 +103,15 @@ keyring = ["dep:keyring", "dep:async-trait", "dep:serde_json"]
 # encodes the credential map; async-trait for the impl; getrandom names the
 # unpredictable atomic-write temp-file suffix.
 headless = ["dep:age", "dep:async-trait", "dep:serde_json", "dep:getrandom"]
+# AndroidKeystoreStore over a file sealed by an AES-256-GCM key held in Android
+# Keystore. `jni`/`ndk-context` are only declared for target_os = "android", so
+# on any other target this feature is the platform-independent half of the
+# backend — which is exactly what its tests exercise.
+android = [
+    "dep:jni",
+    "dep:ndk-context",
+    "dep:async-trait",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:getrandom",
+]

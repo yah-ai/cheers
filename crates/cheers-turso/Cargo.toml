@@ -14,11 +14,11 @@ name = "cheers_turso"
 path = "src/lib.rs"
 
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.37" }
-cheers-server = { path = "../cheers-server", version = "0.8.37" }
+cheers-core = { path = "../cheers-core", version = "0.8.40" }
+cheers-server = { path = "../cheers-server", version = "0.8.40" }
 # RevocationReader (the edge-readable half) is re-exported from cheers-verify;
 # our Revocation impl supplies both sides.
-cheers-verify = { path = "../cheers-verify", version = "0.8.37" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.40" }
 
 # The in-process rust-native engine. Pinned in lockstep with the yah root
 # workspace (0.6.1) — same engine roadcase cells and turso-backup use.
@@ -59,4 +59,11 @@ sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",
     "migrate",
+] }
+# tests/magic_link_replay.rs drives the real MagicLinkProvider (request +
+# consume) against TursoUsedJtiStore — the R727-B1 acceptance test. `email`
+# only, no default features: MagicLinkCodec/MagicLinkProvider don't need
+# password/google/apple's argon2/openidconnect.
+cheers = { package = "cheers-providers", path = "../cheers", version = "0.8.40", default-features = false, features = [
+    "email",
 ] }

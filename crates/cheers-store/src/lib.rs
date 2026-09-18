@@ -20,11 +20,20 @@
 //! - [`EncryptedFileStore`] (`headless` feature) — an `age`-encrypted file for
 //!   headless hosts with no OS keyring. **R015-T2.** (TPM-sealed keys are a
 //!   deferred seam — see the module docs.)
+//! - [`AndroidKeystoreStore`] (`android` feature) — a file sealed by an
+//!   AES-256-GCM key held in Android Keystore, since Android has no secret
+//!   store [`KeyringStore`] can front. **R726-F20.**
 //! - `MemoryStore` — a process-local map for tests. *R015-T3, pending.*
 //!
 //! See the design doc at `.yah/docs/working/cheers.md`, the build plan at
 //! `.yah/docs/working/cheers-plan.md`, and the crate topology in
 //! `.yah/docs/working/edge-verifiable-auth.md`.
+
+// Crash-safe file replacement, shared by every backend that keeps its map in a
+// file. Crate-private: the guarantee is part of those backends' contract, not a
+// surface this crate offers.
+#[cfg(any(feature = "headless", feature = "android"))]
+mod atomic_file;
 
 #[cfg(feature = "keyring")]
 pub mod keyring;
@@ -37,3 +46,9 @@ pub mod encrypted_file;
 
 #[cfg(feature = "headless")]
 pub use encrypted_file::{tpm_device_present, EncryptedFileStore};
+
+#[cfg(feature = "android")]
+pub mod android;
+
+#[cfg(feature = "android")]
+pub use android::{AndroidKeystoreStore, KeySealer, DEFAULT_KEY_ALIAS, VAULT_FILE_NAME};

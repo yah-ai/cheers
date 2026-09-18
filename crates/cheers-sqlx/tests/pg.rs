@@ -10,7 +10,7 @@ use cheers_core::{DeviceId, UserId};
 use cheers_server::store::{NewUser, UserStore};
 use cheers_sqlx::{
     PgAuditStore, PgOwnershipStore, PgRefreshStore, PgRevocationStore, PgServicePrincipalStore,
-    PgUserStore,
+    PgUserStore, PgUserTokenStore,
     PG_MIGRATIONS,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -238,4 +238,39 @@ mod passkey {
         let passkeys = PgPasskeyCredentialStore::new(fx.pool.clone());
         super::common::passkey_store_round_trip(&passkeys, &user).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// UserTokenStore (R728-F1) — user_tokens.user_id carries a FK to users, so
+// every scenario seeds a real user first.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn user_token_store_insert_and_scoped_list() {
+    let fx = fresh_pg().await;
+    let users = PgUserStore::new(fx.pool.clone());
+    let user = seeded_user(&users).await;
+    let other = users
+        .create(NewUser::new().with_email("other@example.com"))
+        .await
+        .expect("seed second user")
+        .id;
+    let tokens = PgUserTokenStore::new(fx.pool.clone());
+    common::user_token_store_insert_and_scoped_list(&tokens, &user, &other).await;
+}
+
+#[tokio::test]
+async fn user_token_store_revoked_and_expired_leave_the_live_list() {
+    let fx = fresh_pg().await;
+    let user = seeded_user(&PgUserStore::new(fx.pool.clone())).await;
+    let tokens = PgUserTokenStore::new(fx.pool.clone());
+    common::user_token_store_revoked_and_expired_leave_the_live_list(&tokens, &user).await;
+}
+
+#[tokio::test]
+async fn user_token_store_revoke_is_idempotent_and_touch_stamps() {
+    let fx = fresh_pg().await;
+    let user = seeded_user(&PgUserStore::new(fx.pool.clone())).await;
+    let tokens = PgUserTokenStore::new(fx.pool.clone());
+    common::user_token_store_revoke_is_idempotent_and_touch_stamps(&tokens, &user).await;
 }

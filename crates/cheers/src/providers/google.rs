@@ -233,6 +233,27 @@ mod tests {
         email_verified: bool,
         name: NameClaim,
     ) -> CoreIdToken {
+        build_id_token_full(
+            issuer,
+            nonce,
+            CLIENT_ID,
+            Duration::seconds(600),
+            email_verified,
+            name,
+        )
+    }
+
+    /// Audience and lifetime as parameters — the native `id_token` tests need
+    /// tokens Google would *not* have minted for this server (wrong `aud`,
+    /// already expired) to prove the verifier rejects them.
+    fn build_id_token_full(
+        issuer: &str,
+        nonce: &Nonce,
+        audience: &str,
+        lifetime: Duration,
+        email_verified: bool,
+        name: NameClaim,
+    ) -> CoreIdToken {
         let now = Utc::now();
         let mut std_claims =
             StandardClaims::new(SubjectIdentifier::new("user-1234567890".to_owned()))
@@ -259,8 +280,8 @@ mod tests {
 
         let claims = CoreIdTokenClaims::new(
             IssuerUrl::new(issuer.to_owned()).expect("test issuer URL parses"),
-            vec![Audience::new(CLIENT_ID.to_owned())],
-            now + Duration::seconds(600),
+            vec![Audience::new(audience.to_owned())],
+            now + lifetime,
             now,
             std_claims,
             EmptyAdditionalClaims {},
@@ -440,6 +461,195 @@ mod tests {
 
         assert_eq!(verified.email_verified, Some(false));
         assert_eq!(verified.name.as_deref(), Some("Bob Localized"));
+    }
+
+    // -- native id_token exchange (Credential Manager) -----------------------
+
+    /// Android's Credential Manager hands the app a token minted for the
+    /// *server* client id, with no redirect and no code. The nonce round-trip
+    /// is what makes that token unreplayable.
+    #[tokio::test]
+    async fn id_token_round_trip_verifies_claims() {
+        let http = dummy_http();
+        let server = MockServer::start().await;
+        let base = server.uri();
+        mount_discovery_and_jwks(&server, &base).await;
+
+        let provider = build_provider_via_discovery(&server, &http).await;
+        let now = Utc::now().timestamp();
+        let nonce = provider.begin_id_token(now).await.expect("nonce minted");
+
+        let raw = build_id_token(&base, &nonce, true, NameClaim::UnTagged("Alice Anderson"))
+            .to_string();
+
+        let verified = provider
+            .finish_id_token(&raw, nonce.secret(), now)
+            .await
+            .expect("id_token exchange");
+
+        assert_eq!(verified.issuer, base);
+        assert_eq!(verified.subject, "user-1234567890");
+        assert_eq!(verified.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(verified.email_verified, Some(true));
+        assert_eq!(verified.name.as_deref(), Some("Alice Anderson"));
+    }
+
+    /// Replay defense: the stash is taken one-shot, so re-posting the very same
+    /// (still unexpired) token fails even though its signature is still good.
+    #[tokio::test]
+    async fn id_token_nonce_is_single_use() {
+        let http = dummy_http();
+        let server = MockServer::start().await;
+        let base = server.uri();
+        mount_discovery_and_jwks(&server, &base).await;
+
+        let provider = build_provider_via_discovery(&server, &http).await;
+        let now = Utc::now().timestamp();
+        let nonce = provider.begin_id_token(now).await.expect("nonce minted");
+        let raw = build_id_token(&base, &nonce, true, NameClaim::UnTagged("Alice")).to_string();
+
+        provider
+            .finish_id_token(&raw, nonce.secret(), now)
+            .await
+            .expect("first exchange succeeds");
+        let err = provider
+            .finish_id_token(&raw, nonce.secret(), now)
+            .await
+            .expect_err("replay is refused");
+        assert!(matches!(err, OidcError::UnknownFlow), "{err:?}");
+    }
+
+    /// A nonce the *client* chose proves nothing — the token must carry the
+    /// one this server stashed.
+    #[tokio::test]
+    async fn id_token_rejects_client_chosen_nonce() {
+        let http = dummy_http();
+        let server = MockServer::start().await;
+        let base = server.uri();
+        mount_discovery_and_jwks(&server, &base).await;
+
+        let provider = build_provider_via_discovery(&server, &http).await;
+        let now = Utc::now().timestamp();
+        let server_nonce = provider.begin_id_token(now).await.expect("nonce minted");
+
+        let attacker_nonce = Nonce::new("attacker-picked-this".to_owned());
+        let raw = build_id_token(&base, &attacker_nonce, true, NameClaim::UnTagged("Mallory"))
+            .to_string();
+
+        let err = provider
+            .finish_id_token(&raw, server_nonce.secret(), now)
+            .await
+            .expect_err("nonce mismatch is refused");
+        assert!(matches!(err, OidcError::IdToken(_)), "{err:?}");
+    }
+
+    /// `aud` must be the server (web) client id. A token minted for the
+    /// Android client id — which any app bundling that client id could get —
+    /// is not a credential for this server.
+    #[tokio::test]
+    async fn id_token_rejects_foreign_audience() {
+        let http = dummy_http();
+        let server = MockServer::start().await;
+        let base = server.uri();
+        mount_discovery_and_jwks(&server, &base).await;
+
+        let provider = build_provider_via_discovery(&server, &http).await;
+        let now = Utc::now().timestamp();
+        let nonce = provider.begin_id_token(now).await.expect("nonce minted");
+
+        let raw = build_id_token_full(
+            &base,
+            &nonce,
+            "some-other-app.apps.googleusercontent.com",
+            Duration::seconds(600),
+            true,
+            NameClaim::UnTagged("Mallory"),
+        )
+        .to_string();
+
+        let err = provider
+            .finish_id_token(&raw, nonce.secret(), now)
+            .await
+            .expect_err("foreign audience is refused");
+        assert!(matches!(err, OidcError::IdToken(_)), "{err:?}");
+    }
+
+    /// The token's own `exp` is checked by the same verifier the redirect flow
+    /// uses — an expired token loses regardless of the nonce being live.
+    #[tokio::test]
+    async fn id_token_rejects_expired_token() {
+        let http = dummy_http();
+        let server = MockServer::start().await;
+        let base = server.uri();
+        mount_discovery_and_jwks(&server, &base).await;
+
+        let provider = build_provider_via_discovery(&server, &http).await;
+        let now = Utc::now().timestamp();
+        let nonce = provider.begin_id_token(now).await.expect("nonce minted");
+
+        let raw = build_id_token_full(
+            &base,
+            &nonce,
+            CLIENT_ID,
+            Duration::seconds(-60),
+            true,
+            NameClaim::UnTagged("Alice"),
+        )
+        .to_string();
+
+        let err = provider
+            .finish_id_token(&raw, nonce.secret(), now)
+            .await
+            .expect_err("expired token is refused");
+        assert!(matches!(err, OidcError::IdToken(_)), "{err:?}");
+    }
+
+    /// The stash has its own TTL, shorter than Google's hour-wide `exp`.
+    #[tokio::test]
+    async fn id_token_rejects_expired_nonce_stash() {
+        let http = dummy_http();
+        let server = MockServer::start().await;
+        let base = server.uri();
+        mount_discovery_and_jwks(&server, &base).await;
+
+        let provider = build_provider_via_discovery(&server, &http).await;
+        let now = Utc::now().timestamp();
+        let nonce = provider.begin_id_token(now).await.expect("nonce minted");
+        let raw = build_id_token(&base, &nonce, true, NameClaim::UnTagged("Alice")).to_string();
+
+        let too_late = now + provider.flow_ttl_seconds() + 1;
+        let err = provider
+            .finish_id_token(&raw, nonce.secret(), too_late)
+            .await
+            .expect_err("stale stash is refused");
+        assert!(matches!(err, OidcError::FlowExpired), "{err:?}");
+    }
+
+    /// A nonce-only stash carries no PKCE verifier, so it can't be walked into
+    /// the code-exchange path by posting its secret as `?state=`.
+    #[tokio::test]
+    async fn code_callback_refuses_a_nonce_only_flow() {
+        let http = dummy_http();
+        let server = MockServer::start().await;
+        let base = server.uri();
+        mount_discovery_and_jwks(&server, &base).await;
+
+        let provider = build_provider_via_discovery(&server, &http).await;
+        let now = Utc::now().timestamp();
+        let nonce = provider.begin_id_token(now).await.expect("nonce minted");
+
+        let err = provider
+            .finish(
+                OidcCallback::new(
+                    AuthorizationCode::new("auth-code-xyz".into()),
+                    openidconnect::CsrfToken::new(nonce.secret().clone()),
+                ),
+                &http,
+                now,
+            )
+            .await
+            .expect_err("nonce-only flow is not a code flow");
+        assert!(matches!(err, OidcError::NotACodeFlow), "{err:?}");
     }
 
     // -- newtype shape -------------------------------------------------------

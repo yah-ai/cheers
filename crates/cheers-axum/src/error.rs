@@ -122,6 +122,36 @@ pub enum RouteError {
     #[error("unknown device")]
     UnknownDevice,
 
+    /// `DELETE /me/tokens/{id}` targeted a token id the user does not own, or
+    /// that does not exist. 404, and the two are deliberately the same answer
+    /// — same reason [`UnknownDevice`](Self::UnknownDevice) is: a probe must
+    /// not be able to enumerate other users' token ids.
+    #[error("unknown token")]
+    UnknownToken,
+
+    /// `POST /me/tokens` asked for scopes the caller does not currently hold
+    /// for the requested audience. 400, naming every unheld scope — a token
+    /// silently narrower than the one requested is a debugging trap that
+    /// surfaces days later as an unexplained 403.
+    #[error("unentitled_scopes: {0}")]
+    UnentitledScopes(String),
+
+    /// `POST /me/tokens` named an audience the caller holds no grant for at
+    /// all (composition rule (5)). 403 — the caller is authenticated, they
+    /// simply have no entitlement to attenuate from, so there is no token
+    /// that could be minted. Distinct from
+    /// [`UnentitledScopes`](Self::UnentitledScopes), which is "you hold
+    /// *something* here, just not that".
+    #[error("aud_not_entitled: {0}")]
+    NotEntitledForAud(String),
+
+    /// `POST /me/tokens` body parsed as JSON but was invalid: empty `name`, a
+    /// scope string outside the closed vocabulary, or an `expires_in_secs`
+    /// outside the policy range. 400 — distinct from 401/403 so a caller can
+    /// tell a bad request from an auth failure.
+    #[error("invalid_token_request: {0}")]
+    InvalidTokenRequest(String),
+
     /// An MCP-call token authenticated but lacks a scope the handler requires
     /// (e.g. `ownership:write` on `POST /ownership`). 403 — the principal is
     /// known, the request is just not authorized.
@@ -225,6 +255,12 @@ impl RouteError {
             RouteError::MalformedBearer => (StatusCode::UNAUTHORIZED, "malformed_bearer"),
             RouteError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             RouteError::UnknownDevice => (StatusCode::NOT_FOUND, "unknown_device"),
+            RouteError::UnknownToken => (StatusCode::NOT_FOUND, "unknown_token"),
+            RouteError::UnentitledScopes(_) => (StatusCode::BAD_REQUEST, "unentitled_scopes"),
+            RouteError::NotEntitledForAud(_) => (StatusCode::FORBIDDEN, "aud_not_entitled"),
+            RouteError::InvalidTokenRequest(_) => {
+                (StatusCode::BAD_REQUEST, "invalid_token_request")
+            }
             RouteError::InsufficientScope { .. } => {
                 (StatusCode::FORBIDDEN, "insufficient_scope")
             }

@@ -27,6 +27,20 @@ where
         Self { verifier, revoked }
     }
 
+    /// The revocation set this verifier reads — **read-only**.
+    ///
+    /// Exposed (R728-F2) so a surface that also admits a *different* claim
+    /// shape checks the SAME set. `McpClaims` is verified by an inherent
+    /// method on [`PasetoV4PublicVerifier`](crate::PasetoV4PublicVerifier)
+    /// rather than through [`TokenVerifier`], so it cannot ride
+    /// [`verify_at`](Self::verify_at); handing such a caller its own second
+    /// reader would let the two halves of one route disagree about what is
+    /// dead. Returning the reader cannot widen anyone —
+    /// [`RevocationReader`] can ask, never revoke.
+    pub fn revocations(&self) -> &Rd {
+        &self.revoked
+    }
+
     /// Verify `token` against `now`, then reject it if its `jti` is revoked.
     ///
     /// Two stages, cheapest first: cryptographic verification (stateless, local

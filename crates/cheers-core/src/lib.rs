@@ -88,4 +88,4 @@ pub use mcp::{
 pub use principal::{
     Principal, PrincipalError, PrincipalId, PrincipalIdParseError, PrincipalKind, PrincipalStatus,
 };
-pub use store::{CredentialStore, StoreError};
+pub use store::{CredentialStore, MemoryUsedJtiStore, StoreError, UsedJtiStore};

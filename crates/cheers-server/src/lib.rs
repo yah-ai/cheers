@@ -34,6 +34,7 @@ pub mod revocation;
 pub mod service_principal;
 pub mod session;
 pub mod store;
+pub mod user_tokens;
 
 pub use audit::{
     AuditCursor, AuditCursorError, AuditPage, AuditQuery, AuditQueryError, AuditRecord, AuditRow,
@@ -61,6 +62,9 @@ pub use service_principal::{
     SigningKeyStatus,
 };
 pub use session::{NewSession, SessionAuthority, SessionPolicy};
+pub use user_tokens::{
+    decode_scopes, encode_scopes, MemoryUserTokenStore, UserTokenRecord, UserTokenStore,
+};
 pub use store::{
     NewUser, PasskeyCredentialStore, ProviderKey, RefreshStore, RefreshTokenRecord, UserStore,
 };

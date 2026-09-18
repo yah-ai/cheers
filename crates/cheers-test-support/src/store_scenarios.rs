@@ -23,8 +23,8 @@
 //! its `sqlite.rs` / `pg.rs` call sites are unchanged.
 
 use cheers_core::{
-    Credential, DeviceBinding, DeviceId, Principal, PrincipalId, PrincipalStatus, StoreError,
-    UserId,
+    Credential, DeviceBinding, DeviceId, Principal, PrincipalId, PrincipalStatus, Scope,
+    StoreError, UserId,
 };
 use cheers_server::audit::{AuditQuery, AuditRecord, AuditStore};
 use cheers_server::ownership::{NewOwnership, OwnershipStore};
@@ -32,6 +32,7 @@ use cheers_server::store::{
     NewUser, PasskeyCredentialStore, ProviderKey, RefreshStore, RefreshTokenRecord, UserStore,
 };
 use cheers_server::{ServicePrincipalStore, SigningKey, SigningKeyStatus};
+use cheers_server::user_tokens::{UserTokenRecord, UserTokenStore};
 use cheers_server::RevocationWriter;
 use cheers_verify::RevocationReader;
 
@@ -926,3 +927,225 @@ pub async fn audit_store_query_by_on_behalf_of<A: AuditStore + ?Sized>(store: &A
     assert_eq!(empty.next_cursor, None);
 }
 
+
+// ---------------------------------------------------------------------------
+// UserTokenStore (R728-F1)
+// ---------------------------------------------------------------------------
+
+/// Build a token row for `user`. `expires_at` is what decides liveness, so the
+/// scenarios below vary it rather than fiddling with a clock.
+pub fn fixture_user_token(
+    jti: &str,
+    user: &UserId,
+    name: &str,
+    scopes: Vec<Scope>,
+    created_at: i64,
+    expires_at: i64,
+) -> UserTokenRecord {
+    UserTokenRecord::new(
+        jti,
+        user.clone(),
+        name,
+        scopes,
+        "https://kamaji.example",
+        created_at,
+        expires_at,
+    )
+}
+
+/// Insert / read-back, plus the two properties the `/me/tokens` routes lean
+/// on: the list is scoped to one user, and the scope vector survives the
+/// column encoding intact.
+///
+/// `user` and `other` must both already exist — `user_tokens.user_id` carries
+/// a FK to `users` with `ON DELETE CASCADE`.
+pub async fn user_token_store_insert_and_scoped_list<T: UserTokenStore + ?Sized>(
+    tokens: &T,
+    user: &UserId,
+    other: &UserId,
+) {
+    let scopes = vec![Scope::CloudRead, Scope::CloudDeploy, Scope::BoardWrite];
+    tokens
+        .insert(&fixture_user_token(
+            "j-mine-1",
+            user,
+            "ci",
+            scopes.clone(),
+            1_000,
+            9_000,
+        ))
+        .await
+        .unwrap();
+    tokens
+        .insert(&fixture_user_token(
+            "j-mine-2",
+            user,
+            "laptop",
+            vec![Scope::CloudRead],
+            1_100,
+            9_000,
+        ))
+        .await
+        .unwrap();
+    tokens
+        .insert(&fixture_user_token(
+            "j-theirs",
+            other,
+            "not-yours",
+            vec![Scope::CampAdmin],
+            1_050,
+            9_000,
+        ))
+        .await
+        .unwrap();
+
+    let mine = tokens.list_live_for_user(user, 2_000).await.unwrap();
+    assert_eq!(mine.len(), 2, "list must be scoped to one user: {mine:?}");
+    assert!(mine.iter().all(|r| &r.user_id == user));
+    assert!(mine.iter().all(|r| !r.revoked));
+
+    // Newest first — the (user_id, created_at DESC) index exists for this.
+    assert_eq!(mine[0].jti, "j-mine-2");
+    assert_eq!(mine[1].jti, "j-mine-1");
+
+    // Every field survives the round trip, scope vector included and in order.
+    let full = mine.iter().find(|r| r.jti == "j-mine-1").unwrap();
+    assert_eq!(full.name, "ci");
+    assert_eq!(full.scopes, scopes);
+    assert_eq!(full.aud, "https://kamaji.example");
+    assert_eq!(full.created_at, 1_000);
+    assert_eq!(full.expires_at, 9_000);
+    assert_eq!(full.last_used_at, None, "cheers never writes last_used_at");
+
+    // A token with no scopes at all is a legal (if useless) row, and must not
+    // decode as a NULL or a one-element list containing "".
+    tokens
+        .insert(&fixture_user_token(
+            "j-empty",
+            user,
+            "none",
+            vec![],
+            1_200,
+            9_000,
+        ))
+        .await
+        .unwrap();
+    let empty = tokens.get("j-empty").await.unwrap().unwrap();
+    assert!(empty.scopes.is_empty());
+}
+
+/// Revoked and expired rows leave the live list but remain `get`-able.
+///
+/// That asymmetry is load-bearing, not incidental: `DELETE /me/tokens/{id}`
+/// distinguishes "not yours" (404) from "already dead" (204) by reading the
+/// row, so a store that deleted on revoke would turn every second revoke into
+/// a 404 about a token the caller does own.
+pub async fn user_token_store_revoked_and_expired_leave_the_live_list<T>(tokens: &T, user: &UserId)
+where
+    T: UserTokenStore + ?Sized,
+{
+    tokens
+        .insert(&fixture_user_token(
+            "live",
+            user,
+            "live",
+            vec![Scope::CloudRead],
+            1_000,
+            9_000,
+        ))
+        .await
+        .unwrap();
+    tokens
+        .insert(&fixture_user_token(
+            "expired",
+            user,
+            "expired",
+            vec![Scope::CloudRead],
+            1_000,
+            1_500,
+        ))
+        .await
+        .unwrap();
+    tokens
+        .insert(&fixture_user_token(
+            "revoked",
+            user,
+            "revoked",
+            vec![Scope::CloudRead],
+            1_000,
+            9_000,
+        ))
+        .await
+        .unwrap();
+    tokens.mark_revoked("revoked").await.unwrap();
+
+    let live = tokens.list_live_for_user(user, 2_000).await.unwrap();
+    assert_eq!(live.len(), 1, "expected only the live row: {live:?}");
+    assert_eq!(live[0].jti, "live");
+
+    // Revocation is not deletion.
+    let dead = tokens.get("revoked").await.unwrap().expect("row survives");
+    assert!(dead.revoked);
+    assert!(tokens.get("expired").await.unwrap().is_some());
+
+    // An expiry boundary is exclusive: `expires_at == now` is already dead.
+    let at_boundary = tokens.list_live_for_user(user, 9_000).await.unwrap();
+    assert!(
+        at_boundary.is_empty(),
+        "expires_at == now must not be live: {at_boundary:?}"
+    );
+
+    // Unknown jti is None, not an error.
+    assert!(tokens.get("no-such-jti").await.unwrap().is_none());
+}
+
+/// `mark_revoked` is idempotent, and an unknown `jti` is
+/// [`StoreError::NotFound`]. `touch_last_used` carries the same contract — it
+/// is the one write cheers itself never makes, so the store is the only place
+/// it can be pinned.
+pub async fn user_token_store_revoke_is_idempotent_and_touch_stamps<T>(tokens: &T, user: &UserId)
+where
+    T: UserTokenStore + ?Sized,
+{
+    tokens
+        .insert(&fixture_user_token(
+            "j1",
+            user,
+            "ci",
+            vec![Scope::CloudRead],
+            1_000,
+            9_000,
+        ))
+        .await
+        .unwrap();
+
+    tokens.mark_revoked("j1").await.unwrap();
+    tokens
+        .mark_revoked("j1")
+        .await
+        .expect("re-revoking an already-revoked row is a no-op, not an error");
+    assert!(tokens.get("j1").await.unwrap().unwrap().revoked);
+
+    match tokens.mark_revoked("nope").await {
+        Err(StoreError::NotFound) => {}
+        other => panic!("expected NotFound revoking an unknown jti, got {other:?}"),
+    }
+
+    assert_eq!(tokens.get("j1").await.unwrap().unwrap().last_used_at, None);
+    tokens.touch_last_used("j1", 4_242).await.unwrap();
+    assert_eq!(
+        tokens.get("j1").await.unwrap().unwrap().last_used_at,
+        Some(4_242)
+    );
+    // Latest wins — the column is "last used", not "first used".
+    tokens.touch_last_used("j1", 5_000).await.unwrap();
+    assert_eq!(
+        tokens.get("j1").await.unwrap().unwrap().last_used_at,
+        Some(5_000)
+    );
+
+    match tokens.touch_last_used("nope", 1).await {
+        Err(StoreError::NotFound) => {}
+        other => panic!("expected NotFound touching an unknown jti, got {other:?}"),
+    }
+}

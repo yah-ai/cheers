@@ -28,8 +28,10 @@ use cheers_core::{DeviceId, UserId};
 use cheers_server::store::{
     NewUser, ProviderKey, RefreshStore, RefreshTokenRecord, UserStore,
 };
-use cheers_sqlx::{SqliteRefreshStore, SqliteUserStore, SQLITE_MIGRATIONS};
-use cheers_turso::{migrate, TursoConn, TursoRefreshStore, TursoUserStore};
+use cheers_sqlx::{
+    SqliteRefreshStore, SqliteUserStore, SqliteUserTokenStore, SQLITE_MIGRATIONS,
+};
+use cheers_turso::{migrate, TursoConn, TursoRefreshStore, TursoUserStore, TursoUserTokenStore};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
@@ -309,4 +311,104 @@ async fn turso_migration_rows(conn: &TursoConn) -> Vec<(i64, String, Vec<u8>)> {
         )
     })
     .collect()
+}
+
+/// The `user_tokens` table specifically — R728-F1.
+///
+/// It is the one table whose column format is not a primitive: `scopes` holds
+/// the space-joined wire strings, encoded by
+/// [`cheers_server::encode_scopes`] and decoded by its inverse. Both families
+/// call those same two functions, and this is what proves that sharing them
+/// was sufficient — a PAT minted before a flip must still list, and still
+/// revoke, after it.
+#[tokio::test]
+async fn user_token_rows_survive_the_flip_in_both_directions() {
+    use cheers_core::Scope;
+    use cheers_server::{UserTokenRecord, UserTokenStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("accounts.db");
+
+    // --- written by sqlx
+    let pool = sqlx_pool(&path).await;
+    SQLITE_MIGRATIONS.run(&pool).await.expect("sqlx migrate");
+    let user = SqliteUserStore::new(pool.clone())
+        .create(NewUser::new().with_email("pat@example.com"))
+        .await
+        .expect("create via sqlx");
+    let scopes = vec![Scope::CloudRead, Scope::CloudDeploy, Scope::BoardWrite];
+    SqliteUserTokenStore::new(pool.clone())
+        .insert(&UserTokenRecord::new(
+            "jti-sqlx",
+            user.id.clone(),
+            "ci",
+            scopes.clone(),
+            "https://kamaji.example",
+            1_000,
+            9_000,
+        ))
+        .await
+        .expect("insert via sqlx");
+    hand_over(pool).await;
+
+    // --- read back by the engine
+    let conn = Arc::new(TursoConn::open(&path).await.expect("turso open"));
+    migrate::run(&conn).await.expect("turso migrate is a no-op here");
+    let turso_tokens = TursoUserTokenStore::new(conn.clone());
+
+    let row = turso_tokens
+        .get("jti-sqlx")
+        .await
+        .expect("lookup via turso")
+        .expect("the sqlx-written token row must be visible");
+    assert_eq!(row.user_id, user.id);
+    assert_eq!(row.name, "ci");
+    assert_eq!(row.aud, "https://kamaji.example");
+    assert!(!row.revoked);
+    assert_eq!(row.last_used_at, None);
+    assert_eq!(
+        row.scopes, scopes,
+        "the scopes column must decode identically across families"
+    );
+
+    // Live list agrees, and a revoke written by the engine sticks.
+    let live = turso_tokens.list_live_for_user(&user.id, 2_000).await.unwrap();
+    assert_eq!(live.len(), 1);
+    turso_tokens.mark_revoked("jti-sqlx").await.unwrap();
+
+    // A row written by the engine, for the reverse direction.
+    turso_tokens
+        .insert(&UserTokenRecord::new(
+            "jti-turso",
+            user.id.clone(),
+            "laptop",
+            vec![Scope::CampAdmin],
+            "https://kamaji.example",
+            1_100,
+            9_000,
+        ))
+        .await
+        .expect("insert via turso");
+    drop(turso_tokens);
+    drop(conn);
+
+    // --- and back to sqlx: the revoke is visible, the engine's row decodes.
+    let pool = sqlx_pool(&path).await;
+    let sqlx_tokens = SqliteUserTokenStore::new(pool.clone());
+    assert!(
+        sqlx_tokens.get("jti-sqlx").await.unwrap().unwrap().revoked,
+        "a revoke written by the engine must be visible to sqlx"
+    );
+    let back = sqlx_tokens
+        .get("jti-turso")
+        .await
+        .unwrap()
+        .expect("the turso-written token row must be visible");
+    assert_eq!(back.scopes, vec![Scope::CampAdmin]);
+    assert_eq!(back.name, "laptop");
+
+    let live = sqlx_tokens.list_live_for_user(&user.id, 2_000).await.unwrap();
+    assert_eq!(live.len(), 1, "only the un-revoked row is live: {live:?}");
+    assert_eq!(live[0].jti, "jti-turso");
+    hand_over(pool).await;
 }

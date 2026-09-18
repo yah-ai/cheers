@@ -45,18 +45,16 @@
 //! # });
 //! ```
 
-use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cheers_core::CodecError;
+pub use cheers_core::{MemoryUsedJtiStore, UsedJtiStore};
 use pasetors::claims::{Claims as PasetoClaims, ClaimsValidationRules};
 use pasetors::keys::SymmetricKey;
 use pasetors::local;
 use pasetors::token::{Local, UntrustedToken};
 use pasetors::version4::V4;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Wire-level value of the [`MagicLinkClaims::purpose`] field.
 ///
@@ -110,8 +108,12 @@ impl MagicLinkClaims {
 #[non_exhaustive]
 pub enum MagicLinkError {
     /// Token failed PASETO decryption / shape validation. Wraps
-    /// [`CodecError`] so the underlying cause (Malformed / SignatureMismatch
-    /// / Expired / Crypto / Serde) is preserved.
+    /// [`CodecError`] so the underlying cause is preserved — all SEVEN of
+    /// `Malformed` / `SignatureMismatch` / `Expired` / `Crypto` / `Serde` /
+    /// `MissingKid` / `UnknownKid`, each carrying a distinct `Display` string.
+    /// `cheers-axum` deliberately collapses them into the single client code
+    /// `magic_link_token`; the per-cause text survives in its
+    /// `cheers-axum route error` warn line.
     #[error("codec: {0}")]
     Codec(#[from] CodecError),
     /// The token decoded but its `purpose` claim wasn't `magic-link`.
@@ -268,62 +270,12 @@ impl MagicLinkUrlBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// UsedJtiStore + memory impl
+// UsedJtiStore lives in cheers-core (R727-B1) alongside CredentialStore, the
+// other client-facing store trait — re-exported above so
+// `cheers::email::magic_link::{UsedJtiStore, MemoryUsedJtiStore}` still
+// resolves. Moving it down is what lets cheers-turso and cheers-sqlx (which
+// depend on cheers-core but not on this crate) implement it directly.
 // ---------------------------------------------------------------------------
-
-/// Single-use tracking for magic-link tokens.
-///
-/// Implementors should hold each `jti` until at least `expires_at` so a
-/// token cannot be replayed before it would have expired anyway. After
-/// expiry the entry can be GC'd — the codec's own expiry check will reject
-/// any token whose record is missing.
-#[async_trait]
-pub trait UsedJtiStore: Send + Sync {
-    /// Atomically: if `jti` has not been seen, record it (with `expires_at`
-    /// for GC) and return `true`. If it has been seen, return `false`.
-    /// `Err(_)` is reserved for backend failures, not replay.
-    async fn try_mark_used(&self, jti: &str, expires_at: i64) -> Result<bool, String>;
-}
-
-/// In-process [`UsedJtiStore`] backed by a `Mutex<HashMap>`. For tests, dev,
-/// and single-replica deployments. Production multi-replica deployments
-/// want a shared backend (Redis, Postgres, …).
-#[derive(Default)]
-pub struct MemoryUsedJtiStore {
-    inner: Mutex<HashMap<String, i64>>,
-}
-
-impl MemoryUsedJtiStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Drop entries whose `expires_at <= now`. Callers wire this on a timer
-    /// if they care about the unbounded-growth case.
-    pub fn gc(&self, now: i64) {
-        self.inner.lock().unwrap().retain(|_, exp| *exp > now);
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.lock().unwrap().is_empty()
-    }
-}
-
-#[async_trait]
-impl UsedJtiStore for MemoryUsedJtiStore {
-    async fn try_mark_used(&self, jti: &str, expires_at: i64) -> Result<bool, String> {
-        let mut g = self.inner.lock().unwrap();
-        if g.contains_key(jti) {
-            return Ok(false);
-        }
-        g.insert(jti.to_owned(), expires_at);
-        Ok(true)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // MagicLinkProvider — codec + URL builder + replay store

@@ -265,16 +265,32 @@ impl Owns {
 
 /// How the principal's identity was last asserted — `bootstrap` for tokens
 /// minted off a camp's long-lived bootstrap credential, `user-fresh` for
-/// tokens minted within ~N minutes of a fresh passkey assertion.
+/// tokens minted within ~N minutes of a fresh passkey assertion,
+/// `api-token` for a long-lived user API token (PAT).
 ///
 /// Downstream services MAY require `user-fresh` for sensitive ops
-/// (mirrors W127's elevation pattern).
+/// (mirrors W127's elevation pattern). [`ApiToken`](Self::ApiToken) exists so
+/// that requirement is decidable: a PAT carries the user's *identity* and a
+/// subset of their scopes, but no live ceremony stands behind it, so a route
+/// guarding a destructive verb can demand `user-fresh` and refuse a PAT by
+/// reading one claim rather than inferring it from TTL or scope shape.
+///
+/// **Ordering is deliberately absent.** These are not ranked strengths — a
+/// consumer states the set it accepts (`matches!(s, UserFresh)`), because
+/// "at least X" has no meaning across a camp bootstrap credential and a
+/// user's PAT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthStrength {
     Bootstrap,
     UserFresh,
+    /// Minted by
+    /// [`McpAuthority::mint_api_token`](https://docs.rs/cheers-server) off an
+    /// already-authenticated user session. Long-lived (90 days by default,
+    /// 365 max), non-interactive, and never wider than the grants its holder
+    /// had at mint time.
+    ApiToken,
 }
 
 /// MCP-call token claims — verbatim with W159 §The wire.
@@ -530,8 +546,20 @@ mod tests {
     fn auth_strength_serializes_kebab_case() {
         assert_eq!(serde_json::to_string(&AuthStrength::Bootstrap).unwrap(), "\"bootstrap\"");
         assert_eq!(serde_json::to_string(&AuthStrength::UserFresh).unwrap(), "\"user-fresh\"");
+        assert_eq!(serde_json::to_string(&AuthStrength::ApiToken).unwrap(), "\"api-token\"");
         let back: AuthStrength = serde_json::from_str("\"user-fresh\"").unwrap();
         assert_eq!(back, AuthStrength::UserFresh);
+        let back: AuthStrength = serde_json::from_str("\"api-token\"").unwrap();
+        assert_eq!(back, AuthStrength::ApiToken);
+    }
+
+    /// A PAT is not a fresh ceremony, and nothing may quietly treat it as one.
+    /// The elevation check downstream services run is `== UserFresh`; this
+    /// pins that `ApiToken` is a distinct value rather than an alias.
+    #[test]
+    fn api_token_is_not_user_fresh() {
+        assert_ne!(AuthStrength::ApiToken, AuthStrength::UserFresh);
+        assert_ne!(AuthStrength::ApiToken, AuthStrength::Bootstrap);
     }
 
     #[test]

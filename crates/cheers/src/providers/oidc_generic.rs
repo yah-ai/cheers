@@ -13,6 +13,17 @@
 //! an [`OidcFlowStore`] keyed on the CSRF state, and atomically taken (one
 //! shot) by [`OidcProvider::finish`].
 //!
+//! # The native shape has no code leg
+//!
+//! Android's Credential Manager and Sign in with Apple on iOS hand the *app* a
+//! signed `id_token` outright — no browser, no redirect URI, no authorization
+//! code — so PKCE and the CSRF state have nothing to protect. What remains is
+//! the nonce, and it carries the whole replay defense on its own:
+//! [`OidcProvider::begin_id_token`] mints one into the same store,
+//! [`OidcProvider::finish_id_token`] takes it single-use and hands the token to
+//! [`OidcProvider::verify_id_token`]. The stashed state is
+//! [`OidcFlowState::nonce_only`] — same store, same TTL, no PKCE verifier.
+//!
 //! # Gotcha — bind the flow to the calling session
 //!
 //! cheers stores the flow by its CSRF token, but the caller is responsible
@@ -70,7 +81,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use openidconnect::core::{
-    CoreAuthenticationFlow, CoreClient, CoreIdTokenClaims, CoreProviderMetadata,
+    CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreIdTokenClaims, CoreProviderMetadata,
 };
 use openidconnect::reqwest;
 use openidconnect::{
@@ -138,6 +149,11 @@ pub enum OidcError {
     /// `id_token` failed verification (signature, nonce, audience, expiry).
     #[error("id token verification: {0}")]
     IdToken(String),
+    /// The stashed flow carried no PKCE verifier, so it can't redeem an
+    /// authorization code. Minted by [`OidcProvider::begin_id_token`] for a
+    /// native `id_token` exchange and then fed to [`OidcProvider::finish`].
+    #[error("oidc flow has no pkce verifier (native id_token flow, not a code flow)")]
+    NotACodeFlow,
     /// Underlying `OidcFlowStore` backend failed.
     #[error("oidc flow store: {0}")]
     Store(String),
@@ -183,10 +199,16 @@ pub struct VerifiedIdToken {
 /// - `nonce` is matched against the verified `id_token`'s `nonce` claim.
 /// - `pkce_verifier` is sent to the token endpoint to prove this user-agent
 ///   is the one that started the flow.
+///
+/// `pkce_verifier` is `None` for a flow with no authorization-code leg — a
+/// native `id_token` exchange ([`OidcProvider::begin_id_token`]), where the
+/// IdP hands the signed token straight to the app and there is no code to
+/// redeem. Such a state carries only the nonce; [`OidcProvider::finish`]
+/// refuses it with [`OidcError::NotACodeFlow`].
 pub struct OidcFlowState {
     csrf_token: CsrfToken,
     nonce: Nonce,
-    pkce_verifier: PkceCodeVerifier,
+    pkce_verifier: Option<PkceCodeVerifier>,
     expires_at: i64,
 }
 
@@ -203,13 +225,31 @@ impl OidcFlowState {
     pub fn from_parts(
         csrf_token: CsrfToken,
         nonce: Nonce,
-        pkce_verifier: PkceCodeVerifier,
+        pkce_verifier: Option<PkceCodeVerifier>,
         expires_at: i64,
     ) -> Self {
         Self {
             csrf_token,
             nonce,
             pkce_verifier,
+            expires_at,
+        }
+    }
+
+    /// A flow with no authorization-code leg: just a single-use nonce, keyed
+    /// (and CSRF-bound) by its own secret.
+    ///
+    /// This is what [`OidcProvider::begin_id_token`] stashes. A native sign-in
+    /// (Android Credential Manager, Sign in with Apple on iOS) hands the app a
+    /// signed `id_token` directly — there is no redirect, no `?state=`, and no
+    /// code to redeem with PKCE. The only server-side secret worth stashing is
+    /// the nonce the app must feed into the IdP request, so that the token
+    /// coming back is provably fresh and provably this server's.
+    pub fn nonce_only(nonce: Nonce, expires_at: i64) -> Self {
+        Self {
+            csrf_token: CsrfToken::new(nonce.secret().clone()),
+            nonce,
+            pkce_verifier: None,
             expires_at,
         }
     }
@@ -235,8 +275,9 @@ impl OidcFlowState {
     }
 
     /// Borrow the stashed PKCE verifier. Treated as a secret — never log.
-    pub fn pkce_verifier(&self) -> &PkceCodeVerifier {
-        &self.pkce_verifier
+    /// `None` for a [`nonce_only`](Self::nonce_only) flow.
+    pub fn pkce_verifier(&self) -> Option<&PkceCodeVerifier> {
+        self.pkce_verifier.as_ref()
     }
 
     /// Consume the state and return its parts.
@@ -246,7 +287,7 @@ impl OidcFlowState {
     /// `finish` (e.g. [`apple::redirect`](super::apple::redirect) so it can
     /// rebuild the `CoreClient` with a freshly-minted `client_secret` JWT)
     /// needs ownership of the verifier rather than a borrow.
-    pub fn into_parts(self) -> (CsrfToken, Nonce, PkceCodeVerifier, i64) {
+    pub fn into_parts(self) -> (CsrfToken, Nonce, Option<PkceCodeVerifier>, i64) {
         (
             self.csrf_token,
             self.nonce,
@@ -454,6 +495,50 @@ impl<S> OidcProvider<S> {
     pub fn flows(&self) -> &S {
         &self.flows
     }
+
+    /// Verify a bare `id_token` that reached this server out-of-band — the
+    /// native sign-in shape, where the IdP hands the app a signed JWT and
+    /// there is no redirect, no authorization code, and no token endpoint to
+    /// call. Android's Credential Manager (`GetGoogleIdOption`) and Sign in
+    /// with Apple on iOS both produce one.
+    ///
+    /// Runs the *same* verifier [`finish`](Self::finish) runs — signature
+    /// against the provider metadata's JWKS, `iss` against the configured
+    /// issuer, `aud` against the configured `client_id`, `exp` against the
+    /// system clock — plus a constant-time nonce match. No network I/O: the
+    /// signing keys came with the provider metadata at construction time.
+    ///
+    /// # The audience is the check that matters
+    ///
+    /// A Google ID token's `aud` is the **server** (web) OAuth client id, and
+    /// that is the one this provider must be constructed with — not the
+    /// Android client id, which appears in `azp` instead and is not checked.
+    /// Point this at the wrong client id and every exchange fails closed; omit
+    /// the audience check and any app on the device could mint a token this
+    /// server would accept.
+    ///
+    /// # The nonce is mandatory
+    ///
+    /// `expected_nonce` must be one *this server* minted and stashed — see
+    /// [`begin_id_token`](Self::begin_id_token) / [`finish_id_token`](Self::finish_id_token),
+    /// which do the minting, the single-use take, and the TTL check. A nonce
+    /// the client chose proves nothing: an attacker who captured a token can
+    /// replay it with its own nonce attached. A token with no `nonce` claim at
+    /// all is rejected.
+    pub fn verify_id_token(
+        &self,
+        raw_id_token: &str,
+        expected_nonce: &Nonce,
+    ) -> Result<VerifiedIdToken, OidcError> {
+        let id_token: CoreIdToken = raw_id_token
+            .parse()
+            .map_err(|e| OidcError::IdToken(format!("malformed id_token: {e}")))?;
+        let verifier = self.client.id_token_verifier();
+        let claims: &CoreIdTokenClaims = id_token
+            .claims(&verifier, expected_nonce)
+            .map_err(|e| OidcError::IdToken(format!("{e}")))?;
+        Ok(extract(claims))
+    }
 }
 
 impl<S: OidcFlowStore> OidcProvider<S> {
@@ -476,7 +561,7 @@ impl<S: OidcFlowStore> OidcProvider<S> {
         let flow_state = OidcFlowState {
             csrf_token: csrf_state.clone(),
             nonce,
-            pkce_verifier,
+            pkce_verifier: Some(pkce_verifier),
             expires_at: now.saturating_add(self.flow_ttl_seconds),
         };
         let id = csrf_state.secret().to_owned();
@@ -517,11 +602,13 @@ impl<S: OidcFlowStore> OidcProvider<S> {
             return Err(OidcError::FlowExpired);
         }
 
+        let pkce_verifier = flow_state.pkce_verifier.ok_or(OidcError::NotACodeFlow)?;
+
         let token_response = self
             .client
             .exchange_code(callback.code)
             .map_err(|e| OidcError::Config(format!("{e}")))?
-            .set_pkce_verifier(flow_state.pkce_verifier)
+            .set_pkce_verifier(pkce_verifier)
             .request_async(http)
             .await
             .map_err(|e| OidcError::Http(format!("{e}")))?;
@@ -532,6 +619,58 @@ impl<S: OidcFlowStore> OidcProvider<S> {
             .claims(&verifier, &flow_state.nonce)
             .map_err(|e| OidcError::IdToken(format!("{e}")))?;
         Ok(extract(claims))
+    }
+
+    /// Mint a single-use nonce for a native `id_token` exchange and stash it
+    /// in the flow store, keyed by its own secret and expiring in
+    /// `flow_ttl_seconds`.
+    ///
+    /// The app hands the returned secret to the platform sign-in API
+    /// (`GetGoogleIdOption.Builder().setNonce(..)` on Android,
+    /// `ASAuthorizationOpenIDRequest.nonce` on Apple), which echoes it into
+    /// the `nonce` claim of the token the IdP signs. Posting that token back
+    /// with the same secret lets [`finish_id_token`](Self::finish_id_token)
+    /// prove the token was minted *for this exchange* rather than captured
+    /// from an earlier one.
+    ///
+    /// This is the native analogue of [`begin`](Self::begin) — same store,
+    /// same TTL, same single-use semantics; it just has no authorization-code
+    /// leg, so the stashed [`OidcFlowState`] carries no PKCE verifier.
+    pub async fn begin_id_token(&self, now: i64) -> Result<Nonce, OidcError> {
+        let nonce = Nonce::new_random();
+        let id = nonce.secret().clone();
+        let state = OidcFlowState::nonce_only(nonce.clone(), now.saturating_add(self.flow_ttl_seconds));
+        self.flows
+            .put(&id, state)
+            .await
+            .map_err(OidcError::Store)?;
+        Ok(nonce)
+    }
+
+    /// Finish a native `id_token` exchange. Atomically takes the nonce stashed
+    /// by [`begin_id_token`](Self::begin_id_token), rejects it if expired, and
+    /// verifies `raw_id_token` against it with
+    /// [`verify_id_token`](Self::verify_id_token).
+    ///
+    /// The take is one-shot, so a second POST of the same token answers
+    /// [`OidcError::UnknownFlow`] even while the token itself is still inside
+    /// its own `exp` — that, not the JWT lifetime, is what bounds replay.
+    pub async fn finish_id_token(
+        &self,
+        raw_id_token: &str,
+        nonce_secret: &str,
+        now: i64,
+    ) -> Result<VerifiedIdToken, OidcError> {
+        let flow_state = self
+            .flows
+            .take(nonce_secret)
+            .await
+            .map_err(OidcError::Store)?
+            .ok_or(OidcError::UnknownFlow)?;
+        if flow_state.is_expired_at(now) {
+            return Err(OidcError::FlowExpired);
+        }
+        self.verify_id_token(raw_id_token, &flow_state.nonce)
     }
 }
 
@@ -604,7 +743,7 @@ mod tests {
         let st = OidcFlowState {
             csrf_token: CsrfToken::new("STATE".into()),
             nonce: Nonce::new("NONCE".into()),
-            pkce_verifier: PkceCodeVerifier::new("VERIFIER".repeat(8)),
+            pkce_verifier: Some(PkceCodeVerifier::new("VERIFIER".repeat(8))),
             expires_at: 1_000,
         };
         s.put("k", st).await.unwrap();
@@ -630,7 +769,7 @@ mod tests {
             OidcFlowState {
                 csrf_token: CsrfToken::new("a".into()),
                 nonce: Nonce::new("n".into()),
-                pkce_verifier: PkceCodeVerifier::new("v".repeat(64)),
+                pkce_verifier: Some(PkceCodeVerifier::new("v".repeat(64))),
                 expires_at: 100,
             },
         )
@@ -641,7 +780,7 @@ mod tests {
             OidcFlowState {
                 csrf_token: CsrfToken::new("b".into()),
                 nonce: Nonce::new("n".into()),
-                pkce_verifier: PkceCodeVerifier::new("v".repeat(64)),
+                pkce_verifier: Some(PkceCodeVerifier::new("v".repeat(64))),
                 expires_at: 500,
             },
         )
@@ -827,7 +966,7 @@ mod tests {
         let st = OidcFlowState {
             csrf_token: CsrfToken::new("SUPER-SECRET-STATE".into()),
             nonce: Nonce::new("SUPER-SECRET-NONCE".into()),
-            pkce_verifier: PkceCodeVerifier::new("v".repeat(64)),
+            pkce_verifier: Some(PkceCodeVerifier::new("v".repeat(64))),
             expires_at: 100,
         };
         let dbg = format!("{st:?}");

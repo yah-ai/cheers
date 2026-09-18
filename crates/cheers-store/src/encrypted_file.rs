@@ -54,6 +54,13 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use cheers_core::{Credential, CredentialStore, StoreError};
 
+// The crash-safe rewrite used by every mutation. These three lived here until
+// the `android` backend needed the identical guarantee (R726-F20); they moved to
+// `crate::atomic_file` rather than being copied, since `write_atomic`'s O_EXCL
+// open and unpredictable temp name are security-relevant. `io_backend` keeps its
+// old local name so the call sites below read unchanged.
+use crate::atomic_file::{create_parent, io_backend as backend, write_atomic};
+
 /// The Linux TPM character device the build plan keys TPM sealing off of.
 const TPM_DEVICE: &str = "/dev/tpm0";
 
@@ -255,65 +262,6 @@ fn write_key_file(path: &Path, identity: &age::x25519::Identity) -> std::io::Res
     file.write_all(secret.expose_secret().as_bytes())?;
     file.write_all(b"\n")?;
     file.sync_all()
-}
-
-/// Write `bytes` to a sibling temp file then rename it over `path`, so a reader
-/// never observes a partially written store and a crash leaves the old file
-/// intact.
-///
-/// The temp file has a unique, unpredictable name (pid + 128 random bits) and is
-/// opened `create_new` (O_EXCL): a pre-planted file or symlink at the path can't
-/// be followed or clobbered — the open fails instead of writing through it.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    create_parent(path).map_err(|e| backend("create data dir", &e))?;
-    let tmp = unique_temp_path(path);
-    {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut file = opts.open(&tmp).map_err(|e| backend("open temp file", &e))?;
-        file.write_all(bytes)
-            .map_err(|e| backend("write temp file", &e))?;
-        file.sync_all().map_err(|e| backend("sync temp file", &e))?;
-    }
-    std::fs::rename(&tmp, path).map_err(|e| backend("rename into place", &e))
-}
-
-/// A unique, unpredictable sibling path for the write-then-rename temp file:
-/// `<data-file>.<pid>.<random-hex>.tmp`. The 128-bit random suffix (from the OS
-/// CSPRNG) makes the name unguessable, so an attacker can't pre-create or
-/// symlink the target ahead of the `create_new` (O_EXCL) open in [`write_atomic`].
-fn unique_temp_path(path: &Path) -> PathBuf {
-    let mut rand = [0u8; 16];
-    getrandom::fill(&mut rand).expect("OS CSPRNG must be available");
-    let mut suffix = String::with_capacity(rand.len() * 2);
-    for b in rand {
-        use std::fmt::Write as _;
-        let _ = write!(suffix, "{b:02x}");
-    }
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.{suffix}.tmp", std::process::id()));
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
-        _ => PathBuf::from(name),
-    }
-}
-
-/// `create_dir_all` the parent of `path`, tolerating a bare filename (no parent).
-fn create_parent(path: &Path) -> std::io::Result<()> {
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => std::fs::create_dir_all(parent),
-        _ => Ok(()),
-    }
-}
-
-/// Build a [`StoreError::Backend`] from a context string and an I/O error.
-fn backend(context: &str, err: &std::io::Error) -> StoreError {
-    StoreError::Backend(format!("{context}: {err}"))
 }
 
 #[cfg(test)]

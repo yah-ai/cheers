@@ -558,7 +558,7 @@ impl<S: OidcFlowStore> AppleRedirectProvider<S> {
         let flow_state = OidcFlowState::from_parts(
             csrf_state.clone(),
             nonce,
-            pkce_verifier,
+            Some(pkce_verifier),
             now.saturating_add(self.flow_ttl_seconds),
         );
         self.flows
@@ -601,6 +601,9 @@ impl<S: OidcFlowStore> AppleRedirectProvider<S> {
         if expires_at <= now {
             return Err(OidcError::FlowExpired.into());
         }
+        // `None` means the stash came from a native id_token flow
+        // (`begin_id_token`), which has no code to redeem.
+        let pkce_verifier = pkce_verifier.ok_or(OidcError::NotACodeFlow)?;
 
         // Mint a fresh JWT and rebuild the client so /auth/token carries it.
         let jwt = self.secret_gen.current(now)?;
@@ -1081,7 +1084,8 @@ mod tests {
             st.nonce().clone(),
             // PkceCodeVerifier doesn't implement Clone, so reconstruct from
             // its secret bytes — same value, fresh wrapper.
-            openidconnect::PkceCodeVerifier::new(st.pkce_verifier().secret().clone()),
+            st.pkce_verifier()
+                .map(|v| openidconnect::PkceCodeVerifier::new(v.secret().clone())),
             st.expires_at(),
         );
         provider

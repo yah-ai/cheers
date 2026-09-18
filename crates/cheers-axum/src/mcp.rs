@@ -124,13 +124,52 @@ pub fn authenticate_mcp(
     state: &McpAuthState,
     now: i64,
 ) -> Result<McpClaims, RouteError> {
+    verify_mcp_bearer(
+        headers,
+        &state.verifier,
+        &state.expected_kid,
+        &state.expected_iss,
+        Some(state.expected_aud.as_str()),
+        now,
+    )
+}
+
+/// The body of [`authenticate_mcp`], with the audience policy lifted into a
+/// parameter — one verification path, two postures, so a second admitting
+/// surface cannot drift from this one.
+///
+/// `expected_aud: Some(a)` is the ordinary resource-server posture: a token
+/// minted for a different `aud` by the same issuer key is rejected before any
+/// handler consults scope.
+///
+/// `expected_aud: None` accepts a token minted for **any** audience, and is
+/// only correct where the route grants no authority *at* an audience —
+/// [`tokens`](crate::tokens)'s list / revoke / rotate, which read and remove
+/// the caller's own credentials and can widen nobody (R728-F2). Do not reach
+/// for it anywhere the handler acts on a resource.
+///
+/// Every failure — missing kid, wrong kid, bad signature, expired, wrong
+/// `iss`, wrong `aud` — collapses into [`RouteError::Unauthorized`], so a
+/// probe cannot distinguish them.
+pub fn verify_mcp_bearer(
+    headers: &HeaderMap,
+    verifier: &PasetoV4PublicVerifier,
+    expected_kid: &str,
+    expected_iss: &str,
+    expected_aud: Option<&str>,
+    now: i64,
+) -> Result<McpClaims, RouteError> {
     let token = bearer_from_headers(headers)?;
-    let claims = state
-        .verifier
-        .verify_mcp_at(token, now, &state.expected_kid)
+    let claims = verifier
+        .verify_mcp_at(token, now, expected_kid)
         .map_err(|_| RouteError::Unauthorized)?;
-    if claims.iss != state.expected_iss || claims.aud != state.expected_aud {
+    if claims.iss != expected_iss {
         return Err(RouteError::Unauthorized);
+    }
+    if let Some(aud) = expected_aud {
+        if claims.aud != aud {
+            return Err(RouteError::Unauthorized);
+        }
     }
     Ok(claims)
 }
