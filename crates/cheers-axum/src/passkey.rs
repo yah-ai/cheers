@@ -34,7 +34,9 @@
 //! # use std::sync::Arc;
 //! # use axum::Router;
 //! # use cheers::passkey::{PasskeyRelyingParty, Url};
-//! # use cheers_axum::passkey::{router, MemoryPasskeyFlowStore, PasskeyAuthState};
+//! # use cheers_axum::passkey::{
+//! #     router, MemoryPasskeyFlowStore, NoPasskeyRegistrationObserver, PasskeyAuthState,
+//! # };
 //! # use cheers_axum::me::NoSessionRecorder;
 //! # use cheers_server::{PasskeyCredentialStore, SessionAuthority};
 //! # async fn run<M, R, U, W, P>(
@@ -56,11 +58,24 @@
 //!     flows: Arc::new(MemoryPasskeyFlowStore::new()),
 //!     // Swap in your own `SessionRecorder` to power `GET /me/sessions`.
 //!     recorder: Arc::new(NoSessionRecorder),
+//!     // Swap in your own `PasskeyRegistrationObserver` for aggregate,
+//!     // non-identifying telemetry about newly persisted credentials.
+//!     registration_observer: Arc::new(NoPasskeyRegistrationObserver),
 //! };
 //!
 //! let app: Router = Router::new().nest("/auth", router(Arc::new(state)));
 //! # Ok(()) }
 //! ```
+//!
+//! @yah:relay(R729, "Publish cheers-axum with PasskeyRegistrationObserver (committed 8fb16523, unpublished) — noisetable R131-T37 compiles only under a devcrate burst until it ships")
+//! @yah:at(2026-10-01T21:44:01Z)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:next("OPERATOR: run `scripts/release-all.sh 0.8.42 --execute --allow-dirty-tree` (operator chose a full lockstep 0.8.42 on 2026-10-01; camp git-policy=defer, so agents cannot commit, tag, push, or publish). Preflight passed on 2026-10-01 (log /tmp/che-r729-pre1.log): all 12 oss workspaces are clean at 0.8.41; root crates are still blocked on workspace-hack (pre-existing, not this ticket).")
+//! @yah:next("After publish: confirm crates.io cheers-axum max_version is 0.8.42, then in noisetable bump the five cheers* pins to 0.8.42 and run `scripts/devcrate.sh off cheers` (R131-T37), and rerun noisetable QED web-services-published. Then send CHE-R729 to review.")
+//! @yah:blocked_on(operator)
+//! @yah:handoff("2026-10-01 (Ashguard): verified that PasskeyRegistrationObserver is in the tree. `cargo test -p cheers-axum` is green (60+68+10 passed). The operator chose a lockstep 0.8.42 via the release-all wizard rather than a cheers-only release (cheers depends on mshr at 0.8.41, so a single-repo bump would desync the train). The release-all.sh 0.8.42 preflight exited 0 and wrote nothing. Git and publish steps are the operator's to run under git-policy=defer.")
+//! @yah:handoff("Tree anchor at handoff: 84caba1edf35c5c47b6c9b66c74e703568d46612 — the shared tree as I left it. Diff against it (`git diff 84caba1edf35c5c47b6c9b66c74e703568d46612..HEAD`) to see what landed under you, and quote this SHA rather than 'HEAD' in any revert/restore instruction.")
+//! @yah:gotcha("0.8.42 is semver-compatible with ^0.8 in cargo, but the new required PasskeyAuthState.registration_observer field breaks any external constructor on `cargo update`. The operator accepted this on 2026-10-01 (pre-1.0, consumers are internal).")
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -188,6 +203,40 @@ impl PasskeyFlowStore for MemoryPasskeyFlowStore {
     }
 }
 
+/// Observes a passkey credential landing in [`PasskeyCredentialStore`] at
+/// registration finish — after persistence succeeds, before the session is
+/// established.
+///
+/// Exists for products that want aggregate, non-identifying telemetry about
+/// the credential population (e.g. calibrating a decoy width distribution
+/// against the real one) without cheers taking an opinion on where that
+/// telemetry lives — the same "guide by omission" reasoning
+/// [`SessionRecorder`] documents for session listing.
+///
+/// `cred_id_len` is the WebAuthn credential id's byte length; `credential_count`
+/// is `user_id`'s total registered-credential count immediately *after* this
+/// one persisted (so two registrations on one account report `1` then `2`,
+/// not `2` twice) — callers wanting a running histogram of credentials-per-
+/// account, rather than only a final tally, want exactly this shape.
+///
+/// Best-effort by design, unlike [`SessionRecorder::record_established`]: a
+/// dropped counter increment does not leave the caller with a credential they
+/// can neither see nor use, so a failure here is the implementation's own to
+/// log, not the ceremony's to fail on.
+#[async_trait]
+pub trait PasskeyRegistrationObserver: Send + Sync {
+    async fn record_registered(&self, user_id: &UserId, cred_id_len: usize, credential_count: usize);
+}
+
+/// No-op default — opt out on purpose, matching [`NoSessionRecorder`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoPasskeyRegistrationObserver;
+
+#[async_trait]
+impl PasskeyRegistrationObserver for NoPasskeyRegistrationObserver {
+    async fn record_registered(&self, _user_id: &UserId, _cred_id_len: usize, _credential_count: usize) {}
+}
+
 /// State bundle held by the passkey handlers.
 pub struct PasskeyAuthState<M, R, U, W, P, F> {
     pub relying_party: Arc<PasskeyRelyingParty>,
@@ -201,6 +250,10 @@ pub struct PasskeyAuthState<M, R, U, W, P, F> {
     /// [`NoSessionRecorder`](crate::me::NoSessionRecorder) to opt out on
     /// purpose.
     pub recorder: Arc<dyn SessionRecorder>,
+    /// Fired once per successful registration, after the credential is
+    /// persisted. Required rather than optional, matching `recorder` above —
+    /// wire [`NoPasskeyRegistrationObserver`] to opt out on purpose.
+    pub registration_observer: Arc<dyn PasskeyRegistrationObserver>,
 }
 
 impl<M, R, U, W, P, F> std::fmt::Debug for PasskeyAuthState<M, R, U, W, P, F> {
@@ -345,6 +398,12 @@ where
     let credential =
         passkey_to_credential(stashed.user_id.clone(), stashed.device_id.clone(), &passkey)?;
     state.credentials.put(&credential).await?;
+
+    let credential_count = state.credentials.list_for_user(&stashed.user_id).await?.len();
+    state
+        .registration_observer
+        .record_registered(&stashed.user_id, passkey.cred_id().len(), credential_count)
+        .await;
 
     let now = now_unix();
     let session = state

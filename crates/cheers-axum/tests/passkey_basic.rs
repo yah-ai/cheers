@@ -19,7 +19,9 @@ use webauthn_authenticator_rs::softpasskey::SoftPasskey;
 use cheers::passkey::{
     PasskeyRelyingParty, PublicKeyCredential, RegisterPublicKeyCredential, Url,
 };
-use cheers_axum::passkey::{MemoryPasskeyFlowStore, PasskeyAuthState, router};
+use cheers_axum::passkey::{
+    MemoryPasskeyFlowStore, NoPasskeyRegistrationObserver, PasskeyAuthState, router,
+};
 use cheers_server::PasskeyCredentialStore;
 
 use cheers_axum::me::SessionDirectory;
@@ -65,6 +67,7 @@ fn build_app() -> (
         credentials: Arc::new(MemPasskeyStore::default()),
         flows: Arc::new(MemoryPasskeyFlowStore::new()),
         recorder: sessions.clone(),
+        registration_observer: Arc::new(NoPasskeyRegistrationObserver),
     });
     let app = Router::new().nest("/auth", router(state.clone()));
     (app, state, authority, sessions)
@@ -257,4 +260,97 @@ async fn authenticate_start_rejects_user_with_no_passkeys() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], "unknown_credential");
+}
+
+/// Captures every `record_registered` call, in order.
+#[derive(Default)]
+struct CapturingObserver(std::sync::Mutex<Vec<(String, usize, usize)>>);
+
+#[async_trait::async_trait]
+impl cheers_axum::passkey::PasskeyRegistrationObserver for CapturingObserver {
+    async fn record_registered(&self, user_id: &UserId, cred_id_len: usize, credential_count: usize) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((user_id.as_str().to_owned(), cred_id_len, credential_count));
+    }
+}
+
+#[tokio::test]
+async fn registering_two_credentials_reports_widths_and_a_running_account_count() {
+    let rp = PasskeyRelyingParty::new(RP_ID, Url::parse(ORIGIN).unwrap())
+        .expect("valid relying-party config");
+    let authority = Arc::new(test_authority());
+    let sessions = Arc::new(MemSessionDirectory::default());
+    let observer = Arc::new(CapturingObserver::default());
+    let state = Arc::new(RouterState {
+        relying_party: Arc::new(rp),
+        authority: authority.clone(),
+        credentials: Arc::new(MemPasskeyStore::default()),
+        flows: Arc::new(MemoryPasskeyFlowStore::new()),
+        recorder: sessions.clone(),
+        registration_observer: observer.clone(),
+    });
+    let app = Router::new().nest("/auth", router(state.clone()));
+
+    for device_id in ["phone", "laptop"] {
+        let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+        let (_status, start_body) = json_post(
+            &app,
+            "/auth/passkey/register/start",
+            json!({
+                "user_id": "u-1",
+                "device_id": device_id,
+                "user_name": "alice@example.com",
+                "user_display_name": "Alice",
+            }),
+        )
+        .await;
+        let flow_id = start_body["flow_id"].as_str().unwrap().to_owned();
+        let ccr: cheers::passkey::CreationChallengeResponse =
+            serde_json::from_value(start_body["challenge"].clone()).unwrap();
+        let credential: RegisterPublicKeyCredential = authenticator
+            .do_registration(Url::parse(ORIGIN).unwrap(), ccr)
+            .expect("software authenticator registers");
+        let (status, finish_body) = json_post(
+            &app,
+            "/auth/passkey/register/finish",
+            json!({ "flow_id": flow_id, "credential": credential }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "got {finish_body}");
+    }
+
+    let observed = observer.0.lock().unwrap().clone();
+    assert_eq!(observed.len(), 2, "one call per registration: {observed:?}");
+    assert_eq!(observed[0].0, "u-1");
+    assert_eq!(observed[1].0, "u-1");
+    // A RUNNING count, not a final tally: 1 after the first credential, 2
+    // after the second — the shape a per-account histogram needs (see
+    // `PasskeyRegistrationObserver`'s doc comment on why).
+    assert_eq!(observed[0].2, 1);
+    assert_eq!(observed[1].2, 2);
+
+    // The observed width is the actual persisted credential's, not a
+    // stand-in: decode both stored credentials back to their webauthn Passkey
+    // and compare cred_id() byte lengths directly.
+    let stored = state
+        .credentials
+        .list_for_user(&UserId::new("u-1"))
+        .await
+        .expect("stored credentials");
+    assert_eq!(stored.len(), 2);
+    let mut stored_widths: Vec<usize> = stored
+        .iter()
+        .map(|c| {
+            cheers::passkey::passkey_from_credential(c)
+                .unwrap()
+                .cred_id()
+                .len()
+        })
+        .collect();
+    let mut observed_widths: Vec<usize> = observed.iter().map(|(_, w, _)| *w).collect();
+    stored_widths.sort_unstable();
+    observed_widths.sort_unstable();
+    assert_eq!(observed_widths, stored_widths);
 }
