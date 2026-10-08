@@ -1,29 +1,51 @@
-//! Integration tests for the `POST /ownership` + `DELETE /ownership/{id}`
-//! routes — round-trip via `tower::Service::call` (no TCP listener).
+//! Integration tests for the `/ownership` grant door (R731-F8, D4) — round
+//! trips via `tower::Service::call` (no TCP listener).
 //!
-//! Covers the three verify clauses on R020-T17:
-//!
-//! 1. Round-trip: mint a `v4.public` token bearing `ownership:write`, POST a
-//!    row, observe `OwnershipStore::get` shows it, DELETE, observe
-//!    `revoked_at` is now set.
-//! 2. Negative scope: a token without `ownership:write` is rejected with 403
-//!    BEFORE any store side-effect (asserted by `insert_call_count == 0`).
-//! 3. Negative invariant: a body whose `on_behalf_of` names a non-user
-//!    principal surfaces as a 4xx via `NewOwnership::new()`, not a 500.
+//! Authority is a relationship: the caller's live rows, resolved through the
+//! test schema below, decide what it may grant, revoke and list. Either a
+//! session bearer or an MCP bearer authenticates.
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use cheers_core::{AuthStrength, McpClaims, PrincipalId, Scope};
-use cheers_server::{OwnershipStore, PasetoV4SecretMinter};
+use cheers_core::{
+    Actor, AuthStrength, Claims, DeviceBinding, DeviceId, McpClaims, PrincipalId, RelationDef,
+    ResourceSchema, SchemaRegistry, Subject, TokenMinter, UserId, yah_scopes,
+};
+use cheers_core::Revoked;
+use cheers_server::{
+    NewOwnership, OwnershipStore, PasetoV4SecretMinter, RevocationWriter, SeedTuple, seed_ownership,
+};
 use tower::ServiceExt;
 
 use cheers_axum::mcp::McpAuthState;
 use cheers_axum::ownership::{OwnershipState, router as ownership_router};
 
-use crate::common::{MemOwnershipStore, body_to_string};
+use crate::common::{MemOwnershipStore, MemRevocations, body_to_string, test_edge, test_minter};
+
+const TEST_KID: &str = "ownership-basic-test-kid";
+const ISS: &str = "https://cheers.example";
+
+/// `doc`: `admin` may grant `triager` and `reader`; `triager` and `reader`
+/// grant nothing. A kind-level `admin` may grant `admin` on any doc.
+const DOC: ResourceSchema = ResourceSchema {
+    kind: "doc",
+    relations: &[
+        RelationDef { name: "reader", membership: true, implies: &[], scopes: &[], grants: &[] },
+        RelationDef { name: "triager", membership: true, implies: &["reader"], scopes: &[], grants: &[] },
+        RelationDef { name: "admin", membership: true, implies: &["triager"], scopes: &[], grants: &["triager", "reader"] },
+    ],
+    kind_relations: &[RelationDef { name: "admin", membership: true, implies: &[], scopes: &[], grants: &["admin"] }],
+};
+
+struct Rig {
+    app: Router,
+    minter: PasetoV4SecretMinter,
+    store: Arc<MemOwnershipStore>,
+    revocations: MemRevocations,
+}
 
 fn now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,585 +55,553 @@ fn now() -> i64 {
         .expect("clock past epoch")
 }
 
-/// Build the full /ownership router. Returns the router, the minter (so
-/// tests can forge bearer tokens), and the underlying store (so tests can
-/// observe row state directly).
-/// `kid` [`rig`]'s [`McpAuthState`] expects — every token minted for these
-/// tests must carry it in the PASETO footer (R592-B7).
-const TEST_KID: &str = "ownership-basic-test-kid";
+fn svc() -> PrincipalId {
+    PrincipalId::service("cheers-test")
+}
 
-fn rig() -> (Router, PasetoV4SecretMinter, Arc<MemOwnershipStore>) {
+fn seed(principal: PrincipalId, id: &str, relationship: &str) -> SeedTuple {
+    SeedTuple {
+        principal_id: principal,
+        resource_kind: "doc".into(),
+        resource_id: id.into(),
+        relationship: relationship.into(),
+    }
+}
+
+/// alice holds `admin` on doc/d1; bob holds `reader` on doc/d1.
+async fn rig() -> Rig {
     let (minter, verifier) = PasetoV4SecretMinter::generate().expect("paseto v4 keypair");
     let store = Arc::new(MemOwnershipStore::default());
-    let mcp = Arc::new(McpAuthState::new(
-        verifier,
-        TEST_KID,
-        "https://cheers.example",
-        "https://cheers.example",
-    ));
+    let revocations = MemRevocations::default();
+    let scopes = yah_scopes::registry_at([ISS]).unwrap();
+    let schema = Arc::new(SchemaRegistry::build(&[DOC], &scopes).expect("schema"));
     let state = Arc::new(OwnershipState {
-        mcp,
+        edge: Arc::new(test_edge(revocations.clone())),
+        mcp: Arc::new(McpAuthState::new(verifier, TEST_KID, ISS, ISS)),
+        schema,
         store: store.clone(),
+        revocations: Arc::new(revocations.clone()),
     });
+    seed_ownership(
+        store.as_ref(),
+        &[seed(PrincipalId::user("alice"), "d1", "admin"), seed(PrincipalId::user("bob"), "d1", "reader")],
+        &svc(),
+        now(),
+    )
+    .await
+    .expect("seed");
     let app = Router::new().nest("/api", ownership_router(state));
-    (app, minter, store)
+    Rig { app, minter, store, revocations }
 }
 
-/// Mint a token with the given scope list, `sub = svc:yubaba`.
-fn mint_token(
-    minter: &PasetoV4SecretMinter,
-    now: i64,
-    scopes: Vec<Scope>,
-    jti: &str,
-) -> String {
-    let claims = McpClaims::new(
-        "https://cheers.example",
-        "https://cheers.example",
-        PrincipalId::service("yubaba"),
-        now,
-        now + 60,
-        jti,
-        scopes,
+fn session(user: &str) -> String {
+    let claims = Claims::new(
+        UserId::new(user),
+        DeviceId::new("laptop"),
+        DeviceBinding::EmailMagicLink,
+        now(),
+        now() + 60,
     )
-    .with_auth_strength(AuthStrength::Bootstrap);
-    minter.mint_mcp(&claims, TEST_KID).expect("mint")
+    .with_jti(format!("sess-{user}"));
+    test_minter().mint(&claims).expect("mint session")
 }
 
-/// Mint a token whose `sub` is the user-shape — used in the defense-in-depth
-/// test: even if a `User` principal somehow held `ownership:write`,
-/// `NewOwnership::new()` rejects `granted_by` not being a service.
-fn mint_user_token(
-    minter: &PasetoV4SecretMinter,
-    now: i64,
-    scopes: Vec<Scope>,
-    jti: &str,
-) -> String {
-    let claims = McpClaims::new(
-        "https://cheers.example",
-        "https://cheers.example",
-        PrincipalId::user("alice"),
-        now,
-        now + 60,
-        jti,
-        scopes,
-    )
-    .with_auth_strength(AuthStrength::UserFresh);
-    minter.mint_mcp(&claims, TEST_KID).expect("mint")
+fn mcp(rig: &Rig, sub: PrincipalId, act: Option<PrincipalId>, jti: &str) -> String {
+    let mut claims = McpClaims::new(ISS, ISS, sub, now(), now() + 60, jti, vec![])
+        .with_auth_strength(AuthStrength::UserFresh);
+    if let Some(a) = act {
+        claims = claims.with_act(Actor::new(a));
+    }
+    rig.minter.mint_mcp(&claims, TEST_KID).expect("mint mcp")
 }
 
-fn auth(token: &str) -> String {
-    format!("Bearer {token}")
-}
-
-#[tokio::test]
-async fn round_trip_post_then_delete_marks_row_revoked() {
-    let (app, minter, store) = rig();
-    let now = now();
-    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-rt");
-
-    let body = serde_json::json!({
-        "principal_id": "camp:camp-xyz",
-        "resource_kind": "service",
-        "resource_id": "svc-abc",
-        "relationship": "owns",
-        "on_behalf_of": "user:alice",
-    });
-
-    // POST /api/ownership.
-    let req = Request::builder()
+fn post(bearer: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
         .method("POST")
         .uri("/api/ownership")
-        .header(header::AUTHORIZATION, auth(&token))
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let body_text = body_to_string(resp.into_body()).await;
-    let returned: serde_json::Value = serde_json::from_str(&body_text).expect("json body");
+        .unwrap()
+}
 
-    let id = returned
-        .get("id")
-        .and_then(|v| v.as_str())
-        .expect("id field")
-        .to_owned();
-    // The handler must overwrite granted_by with the bearer's sub regardless
-    // of body content — and bake in the auth'd principal.
-    assert_eq!(
-        returned.get("granted_by").and_then(|v| v.as_str()),
-        Some("svc:yubaba"),
-    );
-    assert_eq!(
-        returned.get("on_behalf_of").and_then(|v| v.as_str()),
-        Some("user:alice"),
-    );
-    assert_eq!(
-        returned.get("principal_id").and_then(|v| v.as_str()),
-        Some("camp:camp-xyz"),
-    );
-    assert!(returned.get("revoked_at").map(|v| v.is_null()).unwrap_or(true));
+fn grant_body(principal: &str, id: &str, relationship: &str) -> serde_json::Value {
+    serde_json::json!({
+        "principal_id": principal,
+        "resource_kind": "doc",
+        "resource_id": id,
+        "relationship": relationship,
+    })
+}
 
-    // The store really has the row.
-    let row = store.get(&id).await.unwrap().expect("row present");
-    assert_eq!(row.id, id);
-    assert!(row.revoked_at.is_none(), "freshly inserted row is live");
-
-    // DELETE /api/ownership/{id}.
-    let req = Request::builder()
+fn del(bearer: &str, id: &str) -> Request<Body> {
+    Request::builder()
         .method("DELETE")
         .uri(format!("/api/ownership/{id}"))
-        .header(header::AUTHORIZATION, auth(&token))
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
         .body(Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-
-    // The store row is soft-revoked.
-    let row = store.get(&id).await.unwrap().expect("row still present");
-    assert!(row.revoked_at.is_some(), "DELETE sets revoked_at");
+        .unwrap()
 }
 
-#[tokio::test]
-async fn delete_unknown_id_returns_404() {
-    let (app, minter, _store) = rig();
-    let now = now();
-    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-404");
-
-    let req = Request::builder()
-        .method("DELETE")
-        .uri("/api/ownership/no-such-row")
-        .header(header::AUTHORIZATION, auth(&token))
+fn get(bearer: &str, id: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("/api/ownership?resource_kind=doc&resource_id={id}"))
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
         .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = body_to_string(resp.into_body()).await;
-    assert!(
-        body.contains("unknown_ownership"),
-        "expected unknown_ownership: {body}"
-    );
+        .unwrap()
+}
+
+async fn json_of(resp: axum::response::Response) -> serde_json::Value {
+    serde_json::from_str(&body_to_string(resp.into_body()).await).expect("json body")
 }
 
 #[tokio::test]
-async fn post_without_ownership_write_returns_403_before_any_store_call() {
-    let (app, minter, store) = rig();
-    let now = now();
-    // CloudRead is held; OwnershipWrite is not.
-    let token = mint_token(&minter, now, vec![Scope::CloudRead], "jti-noscope");
-
-    let body = serde_json::json!({
-        "principal_id": "camp:camp-xyz",
-        "resource_kind": "service",
-        "resource_id": "svc-abc",
-        "relationship": "owns",
-        "on_behalf_of": "user:alice",
-    });
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/ownership")
-        .header(header::AUTHORIZATION, auth(&token))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    let body = body_to_string(resp.into_body()).await;
-    assert!(
-        body.contains("insufficient_scope"),
-        "expected insufficient_scope: {body}"
-    );
-    // The scope guard runs before any store call — defense-in-depth check
-    // that the store was never touched.
-    assert_eq!(
-        store.insert_call_count(),
-        0,
-        "OwnershipStore::insert must not be called on auth failure"
-    );
-}
-
-#[tokio::test]
-async fn post_missing_bearer_returns_401_before_any_store_call() {
-    let (app, _minter, store) = rig();
-    let body = serde_json::json!({
-        "principal_id": "camp:camp-xyz",
-        "resource_kind": "service",
-        "resource_id": "svc-abc",
-        "relationship": "owns",
-        "on_behalf_of": "user:alice",
-    });
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/ownership")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let body = body_to_string(resp.into_body()).await;
-    assert!(body.contains("missing_bearer"), "expected missing_bearer: {body}");
-    assert_eq!(store.insert_call_count(), 0);
-}
-
-#[tokio::test]
-async fn post_with_service_on_behalf_of_is_400_ownership_invalid() {
-    let (app, minter, store) = rig();
-    let now = now();
-    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-bad-obo");
-
-    // `on_behalf_of` MUST be a `user:` principal when set. A `svc:` here is
-    // well-formed JSON and a valid PrincipalId, but NewOwnership::new()
-    // rejects it — surfaces as 400 ownership_invalid, NOT a 500 Store error.
-    let body = serde_json::json!({
-        "principal_id": "camp:camp-xyz",
-        "resource_kind": "service",
-        "resource_id": "svc-abc",
-        "relationship": "owns",
-        "on_behalf_of": "svc:other-yubaba",
-    });
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/ownership")
-        .header(header::AUTHORIZATION, auth(&token))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_to_string(resp.into_body()).await;
-    assert!(
-        body.contains("ownership_invalid"),
-        "expected ownership_invalid: {body}"
-    );
-    // The store is reached only after NewOwnership::new validates — the
-    // invariant guard short-circuits at the handler, no insert is attempted.
-    assert_eq!(store.insert_call_count(), 0);
-}
-
-#[tokio::test]
-async fn post_with_user_sub_is_rejected_by_defense_in_depth() {
-    // The grant API rejects (kind=User, scope=ownership:write) at write time
-    // (R020-F3 validate_grant). But if a User-sub token somehow carried that
-    // scope (defense-in-depth scenario), the mint-side guard is
-    // NewOwnership::new() refusing `granted_by` that isn't a Service. Result
-    // is the same 400 ownership_invalid path.
-    let (app, minter, store) = rig();
-    let now = now();
-    let token = mint_user_token(&minter, now, vec![Scope::OwnershipWrite], "jti-user");
-
-    let body = serde_json::json!({
-        "principal_id": "camp:camp-xyz",
-        "resource_kind": "service",
-        "resource_id": "svc-abc",
-        "relationship": "owns",
-        "on_behalf_of": "user:alice",
-    });
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/ownership")
-        .header(header::AUTHORIZATION, auth(&token))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_to_string(resp.into_body()).await;
-    assert!(
-        body.contains("ownership_invalid"),
-        "expected ownership_invalid: {body}"
-    );
-    assert_eq!(store.insert_call_count(), 0);
-}
-
-#[tokio::test]
-async fn delete_without_ownership_write_returns_403_before_any_store_call() {
-    let (app, minter, store) = rig();
-    let now = now();
-    // Seed a row directly through the store so the DELETE has something to
-    // target, then attempt removal with a token lacking the scope.
-    let new = cheers_server::NewOwnership::new(
-        PrincipalId::camp("camp-xyz"),
-        "service",
-        "svc-abc",
-        "owns",
-        PrincipalId::service("yubaba"),
-        Some(PrincipalId::user("alice")),
-    )
-    .unwrap();
-    let row = store.insert(&new, now).await.unwrap();
-    // Reset the insert counter — the direct seed shouldn't count against the
-    // "no store side-effect on auth failure" assertion below.
-    store
-        .insert_calls
-        .store(0, std::sync::atomic::Ordering::SeqCst);
-
-    let token = mint_token(&minter, now, vec![Scope::CloudRead], "jti-del-noscope");
-    let req = Request::builder()
-        .method("DELETE")
-        .uri(format!("/api/ownership/{}", row.id))
-        .header(header::AUTHORIZATION, auth(&token))
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    // Row must still be live — scope guard ran before revoke_by_id.
-    let row = store.get(&row.id).await.unwrap().unwrap();
-    assert!(
-        row.revoked_at.is_none(),
-        "DELETE on auth failure must not mark the row revoked"
-    );
-}
-
-#[tokio::test]
-async fn duplicate_post_returns_existing_live_row_not_a_second_insert() {
-    // Idempotent create: ownership rows are set-membership. A second POST
-    // with the same (principal, kind, id, relationship) — cloud-init re-runs
-    // and daemon restarts re-POST by design — must return the EXISTING live
-    // row (200), not stack a duplicate (201). Otherwise revoking "the" row
-    // leaves older live duplicates keeping the grant alive.
-    let (app, minter, store) = rig();
-    let now = now();
-    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-dup");
-
-    let body = serde_json::json!({
-        "principal_id": "svc:yubaba",
-        "resource_kind": "node",
-        "resource_id": "aa11bb22",
-        "relationship": "owns",
-    });
-    let post = |b: String, tok: String| {
-        Request::builder()
-            .method("POST")
-            .uri("/api/ownership")
-            .header(header::AUTHORIZATION, auth(&tok))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(b))
-            .unwrap()
-    };
-
-    // First POST inserts — 201.
-    let resp = app
+async fn an_admin_with_a_session_bearer_grants_triager() {
+    let rig = rig().await;
+    let resp = rig
+        .app
         .clone()
-        .oneshot(post(body.to_string(), token.clone()))
+        .oneshot(post(&session("alice"), grant_body("user:carol", "d1", "triager")))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let first: serde_json::Value =
-        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
-    let first_id = first["id"].as_str().unwrap().to_owned();
+    let row = json_of(resp).await;
+    assert_eq!(row["granted_by"], "user:alice");
+    assert!(row["on_behalf_of"].is_null());
 
-    // Identical second POST — 200 with the SAME row, no second insert.
-    let resp = app
+    // Idempotent: the same grant again returns the live row.
+    let again = rig
+        .app
         .clone()
-        .oneshot(post(body.to_string(), token.clone()))
+        .oneshot(post(&session("alice"), grant_body("user:carol", "d1", "triager")))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "identical live row → 200, not 201");
-    let second: serde_json::Value =
-        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
-    assert_eq!(second["id"].as_str().unwrap(), first_id);
-    assert_eq!(store.insert_call_count(), 1, "no duplicate insert reached the store");
-
-    // Exactly one live row for the principal.
-    let live = store
-        .list_for_principal(&PrincipalId::service("yubaba"))
-        .await
-        .unwrap();
-    assert_eq!(live.len(), 1, "duplicate POST must not stack rows: {live:?}");
-
-    // After revoking that row, an identical POST inserts a FRESH row (201):
-    // revoked rows do not satisfy the idempotency match — re-enrollment
-    // after eviction is a new membership, not a resurrection.
-    let req = Request::builder()
-        .method("DELETE")
-        .uri(format!("/api/ownership/{first_id}"))
-        .header(header::AUTHORIZATION, auth(&token))
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-
-    let resp = app
-        .clone()
-        .oneshot(post(body.to_string(), token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED, "post-revoke re-POST is a fresh insert");
-    let third: serde_json::Value =
-        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
-    assert_ne!(third["id"].as_str().unwrap(), first_id);
+    assert_eq!(again.status(), StatusCode::OK);
+    assert_eq!(json_of(again).await["id"], row["id"]);
 }
 
 #[tokio::test]
-async fn list_returns_live_rows_for_principal_and_requires_write_scope() {
-    // GET /ownership?principal_id= — the writer's management read
-    // (R593-F4): lets yubaba rediscover its enrollment row(s) after a
-    // restart lost the in-memory row id, so eviction can still revoke.
-    let (app, minter, store) = rig();
-    let now = now();
-    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-list");
-
-    // Seed three rows directly through the store, then revoke one — the
-    // revoked row must not appear in the listing.
-    let svc = PrincipalId::service("yubaba");
-    for (kind, rid) in [("node", "aa11"), ("service", "svc-x"), ("node", "bb22")] {
-        let new = cheers_server::NewOwnership::new(
-            svc.clone(),
-            kind,
-            rid,
-            "owns",
-            PrincipalId::service("yubaba"),
-            None,
-        )
-        .unwrap();
-        store.insert(&new, now).await.unwrap();
-    }
-    let bb22_id = store
-        .list_for_principal(&svc)
+async fn an_admin_with_an_mcp_bearer_grants_triager() {
+    let rig = rig().await;
+    let token = mcp(&rig, PrincipalId::user("alice"), None, "jti-mcp");
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&token, grant_body("user:carol", "d1", "triager")))
         .await
-        .unwrap()
-        .iter()
-        .find(|r| r.resource_id == "bb22")
-        .map(|r| r.id.clone())
         .unwrap();
-    store.revoke_by_id(&bb22_id, now).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(json_of(resp).await["granted_by"], "user:alice");
+}
 
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/ownership?principal_id=svc:yubaba")
-        .header(header::AUTHORIZATION, auth(&token))
-        .body(Body::empty())
+#[tokio::test]
+async fn an_admin_cannot_grant_a_relation_outside_its_grants() {
+    let rig = rig().await;
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("alice"), grant_body("user:carol", "d1", "admin")))
+        .await
         .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let rows: serde_json::Value =
-        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
-    let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 2, "live rows only: {rows:?}");
-    let ids: Vec<&str> = rows.iter().map(|r| r["resource_id"].as_str().unwrap()).collect();
-    assert!(ids.contains(&"aa11") && ids.contains(&"svc-x"), "got {ids:?}");
-
-    // A different principal's filter sees none of svc:yubaba's rows.
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/ownership?principal_id=svc:other")
-        .header(header::AUTHORIZATION, auth(&token))
-        .body(Body::empty())
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    // Nor on a resource it holds nothing on.
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("alice"), grant_body("user:carol", "d2", "reader")))
+        .await
         .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let rows: serde_json::Value =
-        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 0);
-
-    // The read is gated on ownership:write like the writes — a token
-    // without the scope is 403.
-    let noscope = mint_token(&minter, now, vec![Scope::CloudRead], "jti-list-noscope");
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/ownership?principal_id=svc:yubaba")
-        .header(header::AUTHORIZATION, auth(&noscope))
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
-async fn list_only_returns_rows_granted_by_the_caller_r593_f9_tightening() {
-    // Two different services (svc:yubaba, svc:other-writer) each grant a row
-    // to the SAME principal (camp:shared). A caller authenticated as
-    // svc:yubaba must see only its own row through GET /ownership, even
-    // though both rows match the requested principal_id — closes the
-    // cross-writer enumeration gap the R593-F8 adversarial review flagged.
-    let (app, minter, store) = rig();
-    let now = now();
-
-    let shared = PrincipalId::camp("shared");
-    let mine = cheers_server::NewOwnership::new(
-        shared.clone(),
-        "service",
-        "svc-mine",
-        "owns",
-        PrincipalId::service("yubaba"),
-        None,
-    )
-    .unwrap();
-    store.insert(&mine, now).await.unwrap();
-    let theirs = cheers_server::NewOwnership::new(
-        shared.clone(),
-        "service",
-        "svc-theirs",
-        "owns",
-        PrincipalId::service("other-writer"),
-        None,
-    )
-    .unwrap();
-    store.insert(&theirs, now).await.unwrap();
-
-    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-scoped-list");
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/ownership?principal_id=camp:shared")
-        .header(header::AUTHORIZATION, auth(&token))
-        .body(Body::empty())
+async fn a_reader_is_refused_with_403_and_nothing_is_written() {
+    let rig = rig().await;
+    let before = rig.store.list_for_resource("doc", "d1").await.unwrap().len();
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("bob"), grant_body("user:carol", "d1", "reader")))
+        .await
         .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(json_of(resp).await["error"], "grant_forbidden");
+    assert_eq!(rig.store.list_for_resource("doc", "d1").await.unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn on_behalf_of_in_the_body_is_rejected() {
+    let rig = rig().await;
+    let mut body = grant_body("user:carol", "d1", "triager");
+    body["on_behalf_of"] = "user:mallory".into();
+    let resp = rig.app.clone().oneshot(post(&session("alice"), body)).await.unwrap();
+    assert!(resp.status().is_client_error(), "got {}", resp.status());
+    assert!(rig.store.list_for_principal(&PrincipalId::user("carol")).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn on_behalf_of_comes_from_a_verified_act_claim() {
+    let rig = rig().await;
+    let agent = PrincipalId::service("agent-claude");
+    let token = mcp(&rig, PrincipalId::user("alice"), Some(agent), "jti-act");
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&token, grant_body("user:carol", "d1", "reader")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let row = json_of(resp).await;
+    assert_eq!(row["granted_by"], "svc:agent-claude");
+    assert_eq!(row["on_behalf_of"], "user:alice");
+}
+
+#[tokio::test]
+async fn a_revoked_mcp_bearer_is_401() {
+    let rig = rig().await;
+    let token = mcp(&rig, PrincipalId::user("alice"), None, "jti-dead");
+    cheers_server::RevocationWriter::revoke(&rig.revocations, &cheers_core::Revoked::jti("jti-dead", None))
+        .await
+        .unwrap();
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&token, grant_body("user:carol", "d1", "reader")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn revoke_needs_grant_rights_on_the_target_row() {
+    let rig = rig().await;
+    let created = rig
+        .app
+        .clone()
+        .oneshot(post(&session("alice"), grant_body("user:carol", "d1", "triager")))
+        .await
+        .unwrap();
+    let id = json_of(created).await["id"].as_str().unwrap().to_owned();
+
+    // bob (reader) has no grant rights: refused, row stays live.
+    let resp = rig.app.clone().oneshot(del(&session("bob"), &id)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(rig.store.get(&id).await.unwrap().unwrap().revoked_at.is_none());
+
+    // Unknown id is a 404.
+    let resp = rig.app.clone().oneshot(del(&session("alice"), "nope")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // alice (admin, grants triager) may revoke it — though she didn't need
+    // to be its writer.
+    let resp = rig.app.clone().oneshot(del(&session("alice"), &id)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(rig.store.get(&id).await.unwrap().unwrap().revoked_at.is_some());
+}
+
+#[tokio::test]
+async fn a_holder_may_revoke_its_own_tuple_but_not_anothers() {
+    let rig = rig().await;
+    // bob holds reader (no grant rights); alice grants carol reader.
+    let bobs = rig.store.list_for_principal(&PrincipalId::user("bob")).await.unwrap();
+    let bobs_id = bobs[0].id.clone();
+    let created = rig
+        .app
+        .clone()
+        .oneshot(post(&session("alice"), grant_body("user:carol", "d1", "reader")))
+        .await
+        .unwrap();
+    let carols_id = json_of(created).await["id"].as_str().unwrap().to_owned();
+
+    // bob may not revoke carol's tuple.
+    let resp = rig.app.clone().oneshot(del(&session("bob"), &carols_id)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(rig.store.get(&carols_id).await.unwrap().unwrap().revoked_at.is_none());
+
+    // bob may revoke his own.
+    let resp = rig.app.clone().oneshot(del(&session("bob"), &bobs_id)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(rig.store.get(&bobs_id).await.unwrap().unwrap().revoked_at.is_some());
+}
+
+#[tokio::test]
+async fn list_needs_some_grant_right_on_the_resource() {
+    let rig = rig().await;
+    let resp = rig.app.clone().oneshot(get(&session("alice"), "d1")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let rows: serde_json::Value =
-        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    assert_eq!(json_of(resp).await.as_array().unwrap().len(), 2);
+
+    let resp = rig.app.clone().oneshot(get(&session("bob"), "d1")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_kind_level_admin_may_grant_admin_on_any_doc() {
+    let rig = rig().await;
+    seed_ownership(
+        rig.store.as_ref(),
+        &[SeedTuple {
+            principal_id: PrincipalId::user("root"),
+            resource_kind: cheers_core::KIND_RESOURCE.into(),
+            resource_id: "doc".into(),
+            relationship: "admin".into(),
+        }],
+        &svc(),
+        now(),
+    )
+    .await
+    .unwrap();
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("root"), grant_body("user:dana", "d9", "admin")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn seed_is_idempotent() {
+    let rig = rig().await;
+    let seeds = [seed(PrincipalId::user("alice"), "d1", "admin"), seed(PrincipalId::user("eve"), "d3", "admin")];
+    let first = seed_ownership(rig.store.as_ref(), &seeds, &svc(), now()).await.unwrap();
+    assert_eq!(first, 1, "alice's row was already seeded by the rig");
+    let second = seed_ownership(rig.store.as_ref(), &seeds, &svc(), now()).await.unwrap();
+    assert_eq!(second, 0);
+    let rows = rig.store.list_for_principal(&PrincipalId::user("eve")).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].granted_by, svc());
+}
+
+fn get_query(bearer: &str, query: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("/api/ownership?{query}"))
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// `doc/d1#reader ← doc/d1#triager`: every triager of d1 reads d1.
+fn set_grant_body() -> serde_json::Value {
+    serde_json::json!({
+        "subject_kind": "doc",
+        "subject_id": "d1",
+        "subject_relation": "triager",
+        "resource_kind": "doc",
+        "resource_id": "d1",
+        "relationship": "reader",
+    })
+}
+
+#[tokio::test]
+async fn a_caller_lists_rows_held_by_its_own_subject() {
+    let rig = rig().await;
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(get_query(&session("alice"), "principal_id=user:alice"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows = json_of(resp).await;
     let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 1, "must see only its own row: {rows:?}");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["principal_id"], "user:alice");
+    assert_eq!(rows[0]["relationship"], "admin");
+}
+
+#[tokio::test]
+async fn another_principals_subject_is_refused_even_to_a_resource_admin() {
+    let rig = rig().await;
+    // alice administers doc/d1, where bob reads — still not bob's row list.
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(get_query(&session("alice"), "principal_id=user:bob"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(json_of(resp).await["error"], "grant_forbidden");
+}
+
+#[tokio::test]
+async fn a_set_subject_is_granted_and_listed_by_a_caller_with_rights_on_its_resource() {
+    let rig = rig().await;
+    let resp = rig.app.clone().oneshot(post(&session("alice"), set_grant_body())).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = json_of(resp).await;
+    assert_eq!(created["subject_kind"], "doc");
+    assert_eq!(created["subject_relation"], "triager");
+    assert!(created.get("principal_id").is_none());
+    // Idempotent like a principal grant.
+    let resp = rig.app.clone().oneshot(post(&session("alice"), set_grant_body())).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_of(resp).await["id"], created["id"]);
+
+    let q = "subject_kind=doc&subject_id=d1&subject_relation=triager";
+    let resp = rig.app.clone().oneshot(get_query(&session("alice"), q)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows = json_of(resp).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["id"], created["id"]);
+    // Another relation's set on the same resource is a different subject.
+    let other = "subject_kind=doc&subject_id=d1&subject_relation=admin";
+    let resp = rig.app.clone().oneshot(get_query(&session("alice"), other)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(json_of(resp).await.as_array().unwrap().is_empty());
+
+    // bob reads d1 but may grant nothing on it.
+    let resp = rig.app.clone().oneshot(get_query(&session("bob"), q)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_body_naming_both_subject_forms_is_400() {
+    let rig = rig().await;
+    let mut body = set_grant_body();
+    body["principal_id"] = "user:carol".into();
+    let resp = rig.app.clone().oneshot(post(&session("alice"), body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(resp).await["error"], "ownership_invalid");
+    assert_eq!(rig.store.insert_call_count(), 2, "only the rig's two seeds were written");
+}
+
+#[tokio::test]
+async fn mixed_or_partial_list_forms_are_400() {
+    let rig = rig().await;
+    for q in [
+        "resource_kind=doc&resource_id=d1&principal_id=user:alice",
+        "resource_kind=doc&resource_id=d1&subject_kind=doc&subject_id=d1&subject_relation=triager",
+        "resource_kind=doc",
+        "subject_kind=doc&subject_id=d1",
+        "",
+    ] {
+        let resp = rig.app.clone().oneshot(get_query(&session("alice"), q)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "query {q:?}");
+        assert_eq!(json_of(resp).await["error"], "invalid_ownership_query", "query {q:?}");
+    }
+}
+
+/// `doc/d2#admin ← team/t#member`, and dave is a member of team/t: the door
+/// honours the set-derived admin right (R732-F2) for grant, list and revoke,
+/// and withdraws it with the membership.
+#[tokio::test]
+async fn a_set_derived_right_is_honoured_at_the_door() {
+    let rig = rig().await;
+    let write = |subject: Subject, kind: &str, id: &str, rel: &str| {
+        NewOwnership::new(subject, kind, id, rel, svc(), None).expect("valid tuple")
+    };
+    rig.store
+        .insert(&write(Subject::set("team", "t", "member"), "doc", "d2", "admin"), now())
+        .await
+        .unwrap();
+    let membership = rig
+        .store
+        .insert(&write(PrincipalId::user("dave").into(), "team", "t", "member"), now())
+        .await
+        .unwrap();
+
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("dave"), grant_body("user:carol", "d2", "triager")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let granted = json_of(resp).await["id"].as_str().unwrap().to_owned();
+    let resp = rig.app.clone().oneshot(get(&session("dave"), "d2")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_of(resp).await.as_array().unwrap().len(), 2, "the set row and carol's");
+    let resp = rig.app.clone().oneshot(del(&session("dave"), &granted)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("dave"), grant_body("user:frank", "d2", "reader")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let granted = json_of(resp).await["id"].as_str().unwrap().to_owned();
+    // Outside the set, nothing.
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("erin"), grant_body("user:carol", "d2", "reader")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    // The set confers on d2 only.
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("dave"), grant_body("user:carol", "d1", "reader")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Leaving the team ends the right at the door.
+    rig.store.revoke_by_id(&membership.row.id, now()).await.unwrap();
+    let resp = rig.app.clone().oneshot(del(&session("dave"), &granted)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("dave"), grant_body("user:carol", "d2", "reader")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// R732-F4: the door records `Revoked::Membership` only when a user's last
+/// live direct tuple on the resource goes, at the ownership version that
+/// removal produced — so offline edges drop the user from older snapshots.
+#[tokio::test]
+async fn delete_records_a_membership_entry_only_for_the_last_direct_tuple() {
+    let rig = rig().await;
+    // bob already reads d1; alice also makes him triager.
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(post(&session("alice"), grant_body("user:bob", "d1", "triager")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let triager = json_of(resp).await["id"].as_str().unwrap().to_owned();
+    let reader = rig
+        .store
+        .list_for_resource("doc", "d1")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.relationship == "reader")
+        .unwrap()
+        .id;
+
+    // A demotion: bob still holds reader, so nothing is recorded.
+    let resp = rig.app.clone().oneshot(del(&session("alice"), &triager)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(rig.revocations.snapshot().await.unwrap().revoked.is_empty());
+
+    // His last direct tuple on d1 (left by himself, C3): recorded.
+    let resp = rig.app.clone().oneshot(del(&session("bob"), &reader)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let version = rig.store.current_version().await.unwrap();
     assert_eq!(
-        rows[0].get("resource_id").and_then(|v| v.as_str()),
-        Some("svc-mine")
+        rig.revocations.snapshot().await.unwrap().revoked,
+        vec![Revoked::membership("doc", "d1", cheers_core::PrincipalId::user("bob"), version)]
     );
 }
 
 #[tokio::test]
-async fn delete_returns_404_for_a_row_granted_by_a_different_writer_r593_f9_tightening() {
-    // A row written by svc:other-writer must not be revocable by a caller
-    // authenticated as svc:yubaba even though both hold ownership:write —
-    // closes the cross-writer revoke gap. 404 (not 403) so the response
-    // can't be used as an existence oracle distinguishing "not yours" from
-    // "doesn't exist".
-    let (app, minter, store) = rig();
-    let now = now();
-
-    let new = cheers_server::NewOwnership::new(
-        PrincipalId::camp("camp-xyz"),
-        "service",
-        "svc-abc",
-        "owns",
-        PrincipalId::service("other-writer"),
-        None,
-    )
-    .unwrap();
-    let row = store.insert(&new, now).await.unwrap();
-
-    let token = mint_token(&minter, now, vec![Scope::OwnershipWrite], "jti-del-notmine");
+async fn missing_bearer_is_401() {
+    let rig = rig().await;
     let req = Request::builder()
-        .method("DELETE")
-        .uri(format!("/api/ownership/{}", row.id))
-        .header(header::AUTHORIZATION, auth(&token))
+        .method("GET")
+        .uri("/api/ownership?resource_kind=doc&resource_id=d1")
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = body_to_string(resp.into_body()).await;
-    assert!(
-        body.contains("unknown_ownership"),
-        "expected unknown_ownership: {body}"
-    );
-
-    // The row is untouched — still live.
-    let row = store.get(&row.id).await.unwrap().unwrap();
-    assert!(
-        row.revoked_at.is_none(),
-        "a different writer's row must not be revoked"
-    );
+    let resp = rig.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

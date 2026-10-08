@@ -1,0 +1,39 @@
+[package]
+name = "cheers-vend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embeddable Hrana-over-HTTP listener that vends a service's own Turso database to callers holding a cheers camp-token (W358 vend source). Read-only."
+keywords = ["hrana", "turso", "sqlite", "paseto", "auth"]
+categories = ["database", "authentication"]
+
+[lib]
+name = "cheers_vend"
+path = "src/lib.rs"
+
+[dependencies]
+cheers-core = { path = "../cheers-core", version = "0.8.43" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.43" }
+# Same pin as cheers-turso: the listener runs over the SERVICE'S OWN
+# `turso::Database` (W195 one-writer rule) — it never opens the file itself.
+turso = { workspace = true }
+axum = { version = "0.8", default-features = false, features = ["json", "http1", "tokio"] }
+tokio = { version = "1", features = ["sync", "net", "time", "rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net", "time"] }
+tempfile = "3"
+cheers-server = { path = "../cheers-server", version = "0.8.43" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# The client the workbench actually runs (yah data-source's libsql adapter, same
+# features). tests/libsql_client.rs drives the listener with it, because the
+# reqwest tests cannot see what libsql sends: no Content-Type, `describe`, and
+# `/v3/cursor` all shipped unserved behind them (noisetable R804-F2).
+libsql = { version = "0.9", default-features = false, features = ["remote", "tls"] }

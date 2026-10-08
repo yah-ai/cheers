@@ -48,10 +48,12 @@ use crate::error::map_turso_error;
 ///
 /// The transaction primitive is deliberately a *fixed list* rather than a
 /// borrowed handle: every atomic sequence cheers needs (a migration's DDL plus
-/// its bookkeeping row; an audit batch) is known in full before the
-/// transaction opens, and none of them branches on an intermediate result.
-/// Taking the list by value keeps the primitive dyn-safe and lifetime-free,
-/// and keeps the connection mutex held for a bounded, obvious span.
+/// its bookkeeping row; an audit batch; an ownership write plus the version it
+/// advances) is known in full before the transaction opens, and none of them
+/// branches on an intermediate result. Taking the list by value keeps the
+/// primitive dyn-safe and lifetime-free, and keeps the connection mutex held
+/// for a bounded, obvious span. A [`Unit::Query`] reports what the
+/// transaction saw without branching on it.
 #[derive(Debug, Clone)]
 pub enum Unit {
     /// One parameterized statement.
@@ -61,12 +63,27 @@ pub enum Unit {
     },
     /// A multi-statement script with no parameters — migration DDL.
     Script(String),
+    /// One parameterized read, stepped to completion; its rows are returned by
+    /// [`TursoConn::transaction_rows`]. Reads inside the transaction, so it
+    /// sees exactly the state the surrounding statements wrote.
+    Query {
+        sql: String,
+        params: Vec<Value>,
+    },
 }
 
 impl Unit {
     /// Convenience constructor for a parameterized statement.
     pub fn stmt(sql: impl Into<String>, params: Vec<Value>) -> Self {
         Self::Stmt {
+            sql: sql.into(),
+            params,
+        }
+    }
+
+    /// Convenience constructor for a read whose rows the transaction returns.
+    pub fn query(sql: impl Into<String>, params: Vec<Value>) -> Self {
+        Self::Query {
             sql: sql.into(),
             params,
         }
@@ -82,8 +99,8 @@ impl Unit {
 pub struct TursoConn {
     /// Load-bearing: the exclusive lock on `.db` + `.db-wal` is held for as
     /// long as this value lives. Never replace this with `_: ()` "because it
-    /// is unused" — it is the lock.
-    _db: Database,
+    /// is unused" — it is the lock. (Also handed out by [`TursoConn::database`].)
+    db: Database,
     conn: Mutex<Connection>,
     path: String,
 }
@@ -131,10 +148,18 @@ impl TursoConn {
             .await
             .map_err(map_turso_error)?;
         Ok(Self {
-            _db: db,
+            db,
             conn: Mutex::new(conn),
             path: path.to_owned(),
         })
+    }
+
+    /// The engine handle this connection was opened from, for in-process
+    /// consumers that need their OWN connection to the same engine
+    /// (cheers-vend's `VendService::new(&turso::Database, ..)`), never a
+    /// re-open of the file (W195 one-writer).
+    pub fn database(&self) -> &Database {
+        &self.db
     }
 
     /// The path this handle was opened with (`:memory:` for in-memory).
@@ -192,28 +217,41 @@ impl TursoConn {
     /// returned. If the rollback *itself* fails the original error still wins —
     /// it is the one that describes what the caller did.
     pub async fn transaction(&self, units: Vec<Unit>) -> Result<(), StoreError> {
+        self.transaction_rows(units).await.map(|_| ())
+    }
+
+    /// [`transaction`](Self::transaction), returning the rows of each
+    /// [`Unit::Query`] in order — one `Vec<Row>` per query unit. A write that
+    /// must report a value it produced (a counter it advanced) reads it here,
+    /// before any other statement can interleave.
+    pub async fn transaction_rows(&self, units: Vec<Unit>) -> Result<Vec<Vec<Row>>, StoreError> {
         if units.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let conn = self.conn.lock().await;
         conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(map_turso_error)?;
 
-        let mut result = Ok(());
+        let mut result = Ok(Vec::new());
         for unit in units {
             let step = match unit {
-                Unit::Stmt { sql, params } => conn.execute(&sql, params).await.map(|_| ()),
-                Unit::Script(sql) => conn.execute_batch(&sql).await,
+                Unit::Stmt { sql, params } => conn.execute(&sql, params).await.map(|_| None),
+                Unit::Script(sql) => conn.execute_batch(&sql).await.map(|_| None),
+                Unit::Query { sql, params } => collect(&conn, &sql, params).await.map(Some),
             };
-            if let Err(e) = step {
-                result = Err(map_turso_error(e));
-                break;
+            match (step, &mut result) {
+                (Ok(Some(rows)), Ok(read)) => read.push(rows),
+                (Ok(_), _) => {}
+                (Err(e), _) => {
+                    result = Err(map_turso_error(e));
+                    break;
+                }
             }
         }
 
         match result {
-            Ok(()) => conn.execute("COMMIT", ()).await.map_err(map_turso_error).map(|_| ()),
+            Ok(read) => conn.execute("COMMIT", ()).await.map_err(map_turso_error).map(|_| read),
             Err(e) => {
                 if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
                     // The caller gets the error that explains their request;
@@ -224,6 +262,16 @@ impl TursoConn {
             }
         }
     }
+}
+
+/// Step `sql` to completion on `conn` and collect its rows.
+async fn collect(conn: &Connection, sql: &str, params: Vec<Value>) -> Result<Vec<Row>, turso::Error> {
+    let mut rows = conn.query(sql, params).await?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        out.push(row);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +342,27 @@ fn require_readonly(sql: &str) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn database_handle_connects_to_the_same_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.turso");
+        let conn = TursoConn::open(&path).await.unwrap();
+        conn.execute_batch("CREATE TABLE t (a INTEGER); INSERT INTO t (a) VALUES (42);")
+            .await
+            .unwrap();
+        conn.execute("INSERT INTO t (a) VALUES (?)", vec![Value::Integer(7)])
+            .await
+            .unwrap();
+
+        let own = conn.database().connect().unwrap();
+        let mut rows = own.query("SELECT a FROM t ORDER BY a", ()).await.unwrap();
+        let mut got = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            got.push(row.get_value(0).unwrap());
+        }
+        assert_eq!(got, vec![Value::Integer(7), Value::Integer(42)]);
+    }
 
     #[test]
     fn readonly_gate_admits_reads() {

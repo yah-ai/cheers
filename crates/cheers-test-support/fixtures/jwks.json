@@ -5,6 +5,8 @@
       "crv": "Ed25519",
       "kid": "cheers-test-1",
       "kty": "OKP",
+      "principal": "https://cheers.fixture.test",
+      "role": "issuer",
       "use": "sig",
       "x": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
     }

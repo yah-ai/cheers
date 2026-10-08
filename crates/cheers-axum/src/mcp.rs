@@ -9,18 +9,17 @@
 //!
 //! ## State
 //!
-//! [`McpAuthState`] holds the concrete [`PasetoV4PublicVerifier`] for now.
-//! The session-side [`MeAuthState`](crate::me::MeAuthState) is generic over a
-//! [`TokenVerifier`](cheers_core::TokenVerifier) trait; the MCP path doesn't
-//! have a peer trait yet (`verify_mcp_at` is an inherent method on the
-//! verifier). When a `McpTokenVerifier` trait lands, this state shrinks to a
-//! one-line generic-ification.
+//! [`McpAuthState`] holds a [`KeySetVerifier`] (R731-F6, §D5): the footer
+//! `kid` selects a key from a key set and the key's role decides what it may
+//! sign (issuer: anything; assertion: never here; self-signer: its own `sub`
+//! within a cheers-issued ceiling). [`McpAuthState::new`] builds the static
+//! one-issuer-key set an in-process cheers surface uses;
+//! [`McpAuthState::from_key_set`] takes any verifier, e.g. one backed by a
+//! live [`JwksCache`](cheers_verify::JwksCache).
 //!
-//! Alongside the verifier, [`McpAuthState`] also carries the trust context
-//! `verify_mcp_at` / [`authenticate_mcp`] check a bearer against:
-//! `expected_kid` (which published key this surface trusts — R592-B7's
-//! kid-in-footer requirement) and `expected_iss` / `expected_aud` (which
-//! cheers issuer + which resource identity a token must be minted for).
+//! Alongside the verifier, [`McpAuthState`] carries `expected_iss` /
+//! `expected_aud` (which cheers issuer + which resource identity a token must
+//! be minted for).
 //! Mirrors `cloud-admin`'s `CheersAuth`
 //! (`crates/yah/cloud-admin/src/auth.rs`) — a cryptographically valid MCP
 //! token minted for a DIFFERENT resource by the SAME issuer key must still
@@ -57,6 +56,7 @@ use axum::http::HeaderMap;
 
 use cheers_core::{McpClaims, Scope};
 use cheers_server::PasetoV4PublicVerifier;
+use cheers_verify::KeySetVerifier;
 
 use crate::error::RouteError;
 use crate::me::bearer_from_headers;
@@ -68,31 +68,47 @@ use crate::me::bearer_from_headers;
 /// [`EdgeVerifier`](cheers_server::EdgeVerifier) holds), so mounting this
 /// router cannot mint MCP tokens.
 ///
-/// `expected_kid` / `expected_iss` / `expected_aud` are the trust context
+/// `expected_iss` / `expected_aud` are the trust context
 /// [`authenticate_mcp`] validates every verified token against — same shape
 /// as `cloud-admin`'s `CheersAuth` (`crates/yah/cloud-admin/src/auth.rs`):
-/// `expected_kid` selects which published key this surface trusts (R592-B7),
+/// key selection is the key set's (R592-B7 footer kid), and
 /// `expected_iss`/`expected_aud` reject a cryptographically valid token
 /// minted for a different issuer or a different resource by the same issuer
 /// key.
 #[derive(Clone)]
 pub struct McpAuthState {
-    pub verifier: Arc<PasetoV4PublicVerifier>,
-    pub expected_kid: String,
+    pub verifier: Arc<KeySetVerifier>,
     pub expected_iss: String,
     pub expected_aud: String,
 }
 
 impl McpAuthState {
+    /// Static key set: `verifier`'s key as the single issuer-role key under
+    /// `kid`, owned by `expected_iss`.
     pub fn new(
         verifier: PasetoV4PublicVerifier,
-        expected_kid: impl Into<String>,
+        kid: impl Into<String>,
+        expected_iss: impl Into<String>,
+        expected_aud: impl Into<String>,
+    ) -> Self {
+        let expected_iss = expected_iss.into();
+        let key: [u8; 32] = verifier
+            .public_key()
+            .as_bytes()
+            .try_into()
+            .expect("Ed25519 public key is 32 bytes");
+        let keys = KeySetVerifier::from_issuer_key(kid, &key, expected_iss.clone());
+        Self::from_key_set(keys, expected_iss, expected_aud)
+    }
+
+    /// Any key set — e.g. [`KeySetVerifier::from_cache`] over a remote JWKS.
+    pub fn from_key_set(
+        verifier: KeySetVerifier,
         expected_iss: impl Into<String>,
         expected_aud: impl Into<String>,
     ) -> Self {
         Self {
             verifier: Arc::new(verifier),
-            expected_kid: expected_kid.into(),
             expected_iss: expected_iss.into(),
             expected_aud: expected_aud.into(),
         }
@@ -102,15 +118,14 @@ impl McpAuthState {
 impl std::fmt::Debug for McpAuthState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpAuthState")
-            .field("expected_kid", &self.expected_kid)
             .field("expected_iss", &self.expected_iss)
             .field("expected_aud", &self.expected_aud)
             .finish_non_exhaustive()
     }
 }
 
-/// Pull the bearer header, run [`PasetoV4PublicVerifier::verify_mcp_at`] over
-/// the token at `now` against `state.expected_kid`, then check the verified
+/// Pull the bearer header, verify the token at `now` against the state's key
+/// set (kid lookup + role rules), then check the verified
 /// claims' `iss`/`aud` against `state.expected_iss`/`state.expected_aud`
 /// BEFORE returning — a token minted by a different issuer, or minted for a
 /// different audience by the SAME issuer key, is rejected here, before any
@@ -119,7 +134,7 @@ impl std::fmt::Debug for McpAuthState {
 /// [`RouteError::Unauthorized`] (401) — bad signature / expired / malformed /
 /// wrong-kid / wrong-iss / wrong-aud all collapse, by design, so a probe
 /// can't distinguish them.
-pub fn authenticate_mcp(
+pub async fn authenticate_mcp(
     headers: &HeaderMap,
     state: &McpAuthState,
     now: i64,
@@ -127,11 +142,11 @@ pub fn authenticate_mcp(
     verify_mcp_bearer(
         headers,
         &state.verifier,
-        &state.expected_kid,
         &state.expected_iss,
         Some(state.expected_aud.as_str()),
         now,
     )
+    .await
 }
 
 /// The body of [`authenticate_mcp`], with the audience policy lifted into a
@@ -148,30 +163,21 @@ pub fn authenticate_mcp(
 /// the caller's own credentials and can widen nobody (R728-F2). Do not reach
 /// for it anywhere the handler acts on a resource.
 ///
-/// Every failure — missing kid, wrong kid, bad signature, expired, wrong
-/// `iss`, wrong `aud` — collapses into [`RouteError::Unauthorized`], so a
+/// Every failure — missing kid, unknown kid, key role refused, bad signature,
+/// expired, wrong `iss`, wrong `aud` — collapses into [`RouteError::Unauthorized`], so a
 /// probe cannot distinguish them.
-pub fn verify_mcp_bearer(
+pub async fn verify_mcp_bearer(
     headers: &HeaderMap,
-    verifier: &PasetoV4PublicVerifier,
-    expected_kid: &str,
+    verifier: &KeySetVerifier,
     expected_iss: &str,
     expected_aud: Option<&str>,
     now: i64,
 ) -> Result<McpClaims, RouteError> {
     let token = bearer_from_headers(headers)?;
-    let claims = verifier
-        .verify_mcp_at(token, now, expected_kid)
-        .map_err(|_| RouteError::Unauthorized)?;
-    if claims.iss != expected_iss {
-        return Err(RouteError::Unauthorized);
-    }
-    if let Some(aud) = expected_aud {
-        if claims.aud != aud {
-            return Err(RouteError::Unauthorized);
-        }
-    }
-    Ok(claims)
+    verifier
+        .verify_mcp(token, now, expected_iss, expected_aud)
+        .await
+        .map_err(|_| RouteError::Unauthorized)
 }
 
 /// Scope-guard helper on [`McpClaims`].
@@ -200,10 +206,19 @@ impl McpClaimsExt for McpClaims {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheers_core::yah_scopes;
     use axum::http::{header, HeaderMap, StatusCode};
     use axum::response::IntoResponse;
     use cheers_core::{AuthStrength, McpClaims, PrincipalId};
     use cheers_server::PasetoV4SecretMinter;
+
+    /// Sync shim over the async [`super::authenticate_mcp`] for these tests.
+    fn authenticate_mcp(h: &HeaderMap, s: &McpAuthState, now: i64) -> Result<McpClaims, RouteError> {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(super::authenticate_mcp(h, s, now))
+    }
 
     /// `kid` / `iss` / `aud` [`rig`] wires into its [`McpAuthState`] — tests
     /// that mint a token expecting acceptance must match these; tests
@@ -236,7 +251,7 @@ mod tests {
             1_000,
             1_600,
             jti,
-            vec![Scope::CloudDeploy, Scope::CloudRead],
+            vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ],
         )
         .with_auth_strength(AuthStrength::UserFresh)
     }
@@ -340,7 +355,7 @@ mod tests {
             1_000,
             1_600,
             "jti-wrong-iss",
-            vec![Scope::CloudDeploy],
+            vec![yah_scopes::CLOUD_DEPLOY],
         )
         .with_auth_strength(AuthStrength::UserFresh);
         let token = minter.mint_mcp(&claims, TEST_KID).unwrap();
@@ -362,7 +377,7 @@ mod tests {
             1_000,
             1_600,
             "jti-wrong-aud",
-            vec![Scope::CloudDeploy],
+            vec![yah_scopes::CLOUD_DEPLOY],
         )
         .with_auth_strength(AuthStrength::UserFresh);
         let token = minter.mint_mcp(&claims, TEST_KID).unwrap();
@@ -376,17 +391,17 @@ mod tests {
     fn require_scope_accepts_held_scope() {
         let claims = sample_claims("jti");
         // CloudDeploy is in the sample claims.
-        claims.require_scope(Scope::CloudDeploy).unwrap();
-        claims.require_scope(Scope::CloudRead).unwrap();
+        claims.require_scope(yah_scopes::CLOUD_DEPLOY).unwrap();
+        claims.require_scope(yah_scopes::CLOUD_READ).unwrap();
     }
 
     #[test]
     fn require_scope_rejects_missing_scope() {
         let claims = sample_claims("jti");
-        let err = claims.require_scope(Scope::OwnershipWrite).unwrap_err();
+        let err = claims.require_scope(yah_scopes::AUDIT_WRITE).unwrap_err();
         match err {
             RouteError::InsufficientScope { required } => {
-                assert_eq!(required, Scope::OwnershipWrite);
+                assert_eq!(required, yah_scopes::AUDIT_WRITE);
             }
             other => panic!("expected InsufficientScope, got {other:?}"),
         }
@@ -395,7 +410,7 @@ mod tests {
     #[test]
     fn insufficient_scope_responds_403_with_stable_code() {
         let err = RouteError::InsufficientScope {
-            required: Scope::OwnershipWrite,
+            required: yah_scopes::AUDIT_WRITE,
         };
         let (status, code) = err.status_and_code();
         assert_eq!(status, StatusCode::FORBIDDEN);

@@ -22,11 +22,13 @@
 
 mod common;
 
-use cheers_core::{DeviceId, UserId};
+use cheers_core::{DeviceId, PrincipalId, UserId};
+use cheers_server::ownership::OwnershipStore;
 use cheers_server::store::{NewUser, UserStore};
 use cheers_sqlx::{
     SqliteAuditStore, SqliteOwnershipStore, SqliteRefreshStore, SqliteRevocationStore,
     SqliteServicePrincipalStore, SqliteUserStore, SqliteUserTokenStore, SQLITE_MIGRATIONS,
+    SqliteBindingSequenceStore,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -158,6 +160,12 @@ async fn revocation_writer_and_reader() {
 }
 
 #[tokio::test]
+async fn binding_sequence_store() {
+    let pool = fresh_pool().await;
+    common::binding_sequence_store(&SqliteBindingSequenceStore::new(pool)).await;
+}
+
+#[tokio::test]
 async fn ownership_store_lifecycle() {
     let pool = fresh_pool().await;
     let store = SqliteOwnershipStore::new(pool);
@@ -169,6 +177,117 @@ async fn ownership_store_check_constraints_reject_bad_rows() {
     let pool = fresh_pool().await;
     let store = SqliteOwnershipStore::new(pool);
     common::ownership_store_check_constraints_reject_bad_rows(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_revoke_follows_holder() {
+    let pool = fresh_pool().await;
+    let store = SqliteOwnershipStore::new(pool);
+    common::ownership_store_revoke_follows_holder(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_subject_sets() {
+    let pool = fresh_pool().await;
+    let store = SqliteOwnershipStore::new(pool);
+    common::ownership_store_subject_sets(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_list_for_kind() {
+    let pool = fresh_pool().await;
+    let store = SqliteOwnershipStore::new(pool);
+    common::ownership_store_list_for_kind(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_version() {
+    let pool = fresh_pool().await;
+    let store = SqliteOwnershipStore::new(pool);
+    common::ownership_store_version(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_revocation_key() {
+    let pool = fresh_pool().await;
+    let store = SqliteOwnershipStore::new(pool);
+    common::ownership_store_revocation_key(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_admission_policy() {
+    let store = SqliteOwnershipStore::new(fresh_pool().await);
+    common::ownership_store_admission_policy(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_lease() {
+    common::ownership_store_lease(&SqliteOwnershipStore::new(fresh_pool().await)).await;
+}
+
+#[tokio::test]
+async fn knock_store_lifecycle() {
+    common::knock_store_lifecycle(&cheers_sqlx::SqliteKnockStore::new(fresh_pool().await)).await;
+}
+
+#[tokio::test]
+async fn ownership_subject_check_rejects_bad_forms() {
+    let pool = fresh_pool().await;
+    common::ownership_subject_check_rejects_bad_forms(|sql| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(&sql)
+                .execute(&pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| cheers_core::StoreError::Backend(e.to_string()))
+        }
+    })
+    .await;
+}
+
+/// 0009 rebuilds the ownership table; a row written under 0008's schema must
+/// come through it intact, as a principal-subject row.
+#[tokio::test]
+async fn ownership_0009_rebuild_preserves_existing_rows() {
+    // One connection: each :memory: connection is its own database.
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("open :memory:");
+    let dir =std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/sqlite");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .expect("read migrations dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "sql"))
+        .collect();
+    files.sort();
+    let (before, after): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| {
+        p.file_name().unwrap().to_string_lossy().as_ref() < "0009"
+    });
+    let run = |path: &std::path::Path| std::fs::read_to_string(path).expect("read migration");
+    for p in &before {
+        sqlx::raw_sql(&run(p)).execute(&pool).await.expect("pre-0009 migration");
+    }
+    sqlx::query(
+        "INSERT INTO ownership (id, principal_id, resource_kind, resource_id, relationship, \
+         granted_by, on_behalf_of, granted_at, revoked_at) \
+         VALUES ('old-1', 'user:alice', 'doc', 'd1', 'owner', 'svc:cheers', 'user:bob', 10, NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("row under 0008");
+    for p in &after {
+        sqlx::raw_sql(&run(p)).execute(&pool).await.expect("0009+ migration");
+    }
+
+    let store = SqliteOwnershipStore::new(pool);
+    let row = store.get("old-1").await.unwrap().expect("row survives the rebuild");
+    assert_eq!(row.subject, cheers_core::Subject::Principal(PrincipalId::user("alice")));
+    assert_eq!(row.on_behalf_of, Some(PrincipalId::user("bob")));
+    assert_eq!(row.granted_at, 10);
+    assert_eq!(store.list_for_principal(&PrincipalId::user("alice")).await.unwrap(), vec![row]);
 }
 
 #[tokio::test]
@@ -285,4 +404,118 @@ async fn user_token_store_revoke_is_idempotent_and_touch_stamps() {
     let user = seeded_user(&SqliteUserStore::new(pool.clone())).await;
     let tokens = SqliteUserTokenStore::new(pool);
     common::user_token_store_revoke_is_idempotent_and_touch_stamps(&tokens, &user).await;
+}
+
+/// An empty in-memory pool, schema not yet applied.
+async fn bare_pool() -> SqlitePool {
+    let opts = SqliteConnectOptions::from_str("sqlite::memory:").unwrap().create_if_missing(true);
+    SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap()
+}
+
+/// Apply the migrations with `lo <= version < hi`, raw (outside sqlx's ledger).
+async fn apply_raw(pool: &SqlitePool, lo: i64, hi: i64) {
+    for m in cheers_sqlx::SQLITE_MIGRATIONS.iter().filter(|m| (lo..hi).contains(&m.version)) {
+        sqlx::raw_sql(&m.sql).execute(pool).await.unwrap();
+    }
+}
+
+/// R734-F1: 0015 rewrites a legacy membership subject (a bare user id) into
+/// the principal wire form and leaves device subjects alone.
+#[tokio::test]
+async fn migration_0015_prefixes_legacy_membership_subjects() {
+    use cheers_core::{PrincipalId, Revoked};
+    use cheers_server::RevocationWriter;
+    use cheers_verify::RevocationReader;
+
+    let pool = bare_pool().await;
+    apply_raw(&pool, 0, 15).await;
+    sqlx::raw_sql(
+        "INSERT INTO revocations (kind, subject, revoked_at, bound) VALUES ('device', 'phone', 1, 3);
+         INSERT INTO revocations (kind, subject, resource_kind, resource_id, revoked_at, bound)
+             VALUES ('membership', 'alice', 'namespace', 'ns-1', 1, 7);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    apply_raw(&pool, 15, i64::MAX).await;
+
+    let store = SqliteRevocationStore::new(pool);
+    let mut got = store.snapshot().await.unwrap().revoked;
+    got.sort_by(|a, b| a.identity().cmp(&b.identity()));
+    assert_eq!(
+        got,
+        vec![Revoked::device("phone", 3), Revoked::membership("namespace", "ns-1", PrincipalId::user("alice"), 7)]
+    );
+    let k = cheers_verify::test_revocation_key("namespace", "ns-1");
+    assert!(store.is_membership_revoked(&k, "namespace", "ns-1", &PrincipalId::user("alice"), 6).await.unwrap());
+}
+
+/// R732-T7: 0012 gives legacy device / membership rows (which meant "masks
+/// everything") bound = i64::MAX — fail-closed — and leaves legacy jtis with
+/// expires_at NULL, so they never lapse.
+#[tokio::test]
+async fn migration_0012_makes_legacy_revocations_fail_closed() {
+    use cheers_core::Revoked;
+    use cheers_server::RevocationWriter;
+    use cheers_verify::RevocationReader;
+
+    let pool = bare_pool().await;
+    apply_raw(&pool, 0, 12).await;
+    sqlx::raw_sql(
+        "INSERT INTO revocations (kind, subject, revoked_at) VALUES ('jti', 'old-jti', 1);
+         INSERT INTO revocations (kind, subject, revoked_at) VALUES ('device', 'phone', 1);
+         INSERT INTO revocations (kind, subject, resource_kind, resource_id, revoked_at)
+             VALUES ('membership', 'alice', 'namespace', 'ns-1', 1);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    apply_raw(&pool, 12, i64::MAX).await;
+
+    let store = SqliteRevocationStore::new(pool);
+    assert!(store.is_revoked("old-jti").await.unwrap());
+    assert!(store.is_device_revoked(&DeviceId::new("phone"), i64::MAX as u64 - 1).await.unwrap());
+    assert!(store
+        .is_membership_revoked(&cheers_verify::test_revocation_key("namespace", "ns-1"), "namespace", "ns-1", &cheers_core::PrincipalId::user("alice"), 1 << 62)
+        .await
+        .unwrap());
+    assert_eq!(store.gc(i64::MAX).await.unwrap(), 0, "a legacy jti never lapses");
+    let max = i64::MAX as u64;
+    let mut got = store.snapshot().await.unwrap().revoked;
+    got.sort_by(|a, b| a.identity().cmp(&b.identity()));
+    assert_eq!(
+        got,
+        vec![
+            Revoked::jti("old-jti", None),
+            Revoked::device("phone", max),
+            Revoked::membership("namespace", "ns-1", cheers_core::PrincipalId::user("alice"), max),
+        ]
+    );
+    // A re-revoke below the legacy bound is a no-op.
+    let epoch = store.snapshot().await.unwrap().epoch;
+    store.revoke(&Revoked::device("phone", 5)).await.unwrap();
+    assert_eq!(store.snapshot().await.unwrap().epoch, epoch);
+}
+
+/// R732-T7: gc drops jtis whose exp passed, keeps exp-None jtis and devices,
+/// and advances the epoch iff it deleted anything.
+#[tokio::test]
+async fn revocation_gc_lapses_jtis_by_exp() {
+    use cheers_core::Revoked;
+    use cheers_server::RevocationWriter;
+    use cheers_verify::RevocationReader;
+
+    let store = SqliteRevocationStore::new(fresh_pool().await);
+    store.revoke(&Revoked::jti("short", Some(50))).await.unwrap();
+    store.revoke(&Revoked::jti("forever", None)).await.unwrap();
+    store.revoke(&Revoked::device("phone", 1)).await.unwrap();
+    let before = store.snapshot().await.unwrap().epoch;
+    assert_eq!(store.gc(49).await.unwrap(), 0);
+    assert_eq!(store.snapshot().await.unwrap().epoch, before);
+    assert_eq!(store.gc(50).await.unwrap(), 1);
+    let after = store.snapshot().await.unwrap();
+    assert!(after.epoch > before);
+    assert_eq!(after.revoked.len(), 2);
+    assert!(!store.is_revoked("short").await.unwrap());
+    assert!(store.is_revoked("forever").await.unwrap());
 }

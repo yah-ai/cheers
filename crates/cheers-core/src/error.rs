@@ -25,6 +25,7 @@
 //! ```
 
 use crate::codec::CodecError;
+use crate::lease::LeaseError;
 use crate::store::StoreError;
 
 /// Errors raised by refresh-token rotation (`cheers-server`'s `RefreshRotator`).
@@ -48,6 +49,12 @@ pub enum RefreshError {
     /// The chain was previously revoked (logout, device revoke, prior replay).
     #[error("chain revoked")]
     ChainRevoked,
+    /// The token is live, but the caller's binding resolver knows no
+    /// `DeviceBinding` for its `(user, device)` — so there is no honest
+    /// binding to mint the successor access token with. Raised *before* the
+    /// token is consumed: the chain is left exactly as it was (R730).
+    #[error("no device binding recorded for this session")]
+    Unbound,
     /// Underlying `RefreshStore` failure.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -60,6 +67,10 @@ pub enum Error {
     /// Failure inside the [`Codec`](crate::codec::Codec) layer.
     #[error(transparent)]
     Codec(#[from] CodecError),
+
+    /// An artifact was minted with a lease that breaks its invariant.
+    #[error(transparent)]
+    Lease(#[from] LeaseError),
 
     /// Failure inside a [`UserStore`]/[`CredentialStore`](crate::store::CredentialStore)/`RefreshStore`
     /// impl.
@@ -85,6 +96,19 @@ pub enum Error {
     /// (R515): the token holder is not the connecting peer.
     #[error("token is not bound to the presented peer key")]
     PeerKeyMismatch,
+
+    /// A peer-key-bound `DeviceBinding::LanPair` session was requested from a
+    /// `SessionAuthority` that holds no standing binder (R732-F5). A LAN node
+    /// with only a 15-minute access token is the failure the standing binding
+    /// exists to remove, so the mint refuses rather than degrade to it.
+    #[error("a LanPair session needs a standing binder (SessionAuthority::with_standing_binder)")]
+    NoStandingBinder,
+
+    /// A membership snapshot mint (R732-F4) saw the ownership version move
+    /// under its closure walk on every attempt: writes to the store are
+    /// arriving faster than one walk. Retry later.
+    #[error("ownership kept changing while minting a snapshot of {kind}/{id} ({attempts} attempts)")]
+    SnapshotContended { kind: String, id: String, attempts: usize },
 
     /// Caller passed invalid input that no specific subsystem owns
     /// (e.g. an empty subject string, a timestamp outside i64 range).

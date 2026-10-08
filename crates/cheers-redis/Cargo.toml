@@ -18,9 +18,9 @@ path = "src/lib.rs"
 # and the revocation kill list, where redis's KV + TTL semantics fit the access
 # pattern. NEVER the primary for cross-cutting queries (use SQL for those).
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.42" }
-cheers-server = { path = "../cheers-server", version = "0.8.42" }
-cheers-verify = { path = "../cheers-verify", version = "0.8.42" }
+cheers-core = { path = "../cheers-core", version = "0.8.43" }
+cheers-server = { path = "../cheers-server", version = "0.8.43" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.43" }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +43,7 @@ features = [
 ]
 
 [dev-dependencies]
+cheers-test-support = { path = "../cheers-test-support" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["redis"] }

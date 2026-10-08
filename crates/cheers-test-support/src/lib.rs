@@ -189,20 +189,48 @@ mod tests {
     use cheers_core::{DeviceBinding, DeviceId, Error, UserId};
     use cheers_server::{
         store::RefreshTokenRecord, EdgeVerifier, PasetoV4PublicVerifier, PasetoV4SecretMinter,
-        SessionAuthority, SessionPolicy,
+        SessionAuthority,
     };
 
-    use crate::mem::{MemRevocations, MemUserStore};
+    use crate::mem::MemUserStore;
+    use cheers_server::MemoryRevocationStore;
+
+    /// R732-F4: the in-process ownership store keeps the same version
+    /// contract as the SQL engines.
+    #[tokio::test]
+    async fn memory_ownership_store_version() {
+        crate::store_scenarios::ownership_store_version(&cheers_server::MemoryOwnershipStore::new()).await;
+    }
+
+    #[tokio::test]
+    async fn memory_ownership_store_revocation_key() {
+        crate::store_scenarios::ownership_store_revocation_key(&cheers_server::MemoryOwnershipStore::new()).await;
+    }
+
+    #[tokio::test]
+    async fn memory_ownership_store_admission_policy() {
+        crate::store_scenarios::ownership_store_admission_policy(&cheers_server::MemoryOwnershipStore::new()).await;
+    }
+
+    #[tokio::test]
+    async fn memory_ownership_store_lease() {
+        crate::store_scenarios::ownership_store_lease(&cheers_server::MemoryOwnershipStore::new()).await;
+    }
+
+    #[tokio::test]
+    async fn memory_knock_store_lifecycle() {
+        crate::store_scenarios::knock_store_lifecycle(&cheers_server::MemoryKnockStore::new()).await;
+    }
 
     // Assemble a `SessionAuthority` backed by a real turso `:memory:`
     // `RefreshStore` + a `PasetoV4SecretMinter` (asymmetric, edge-verifiable)
     // and an `EdgeVerifier` sharing the same revocation set.
     async fn rig() -> (
-        SessionAuthority<PasetoV4SecretMinter, TursoRefreshStore, MemUserStore, MemRevocations>,
-        EdgeVerifier<PasetoV4PublicVerifier, MemRevocations>,
+        SessionAuthority<PasetoV4SecretMinter, TursoRefreshStore, MemUserStore, MemoryRevocationStore>,
+        EdgeVerifier<PasetoV4PublicVerifier, MemoryRevocationStore>,
     ) {
         let (minter, verifier) = PasetoV4SecretMinter::generate().unwrap();
-        let revocations = MemRevocations::default();
+        let revocations = MemoryRevocationStore::default();
         let refresh = turso_refresh_store().await;
         let authority = SessionAuthority::new(
             minter,
@@ -219,8 +247,6 @@ mod tests {
     #[tokio::test]
     async fn turso_refresh_store_edge_verifiable_lifecycle() {
         let (authority, edge) = rig().await;
-        let policy = SessionPolicy::default().with_access_ttl(300);
-
         // Establish a session.
         let session = authority
             .establish(
@@ -243,7 +269,7 @@ mod tests {
         // Rotate the refresh token. The new session should have a fresh access
         // token and the old refresh token should be marked consumed in the DB.
         let rotated = authority
-            .rotate(session.refresh.token.as_str(), DeviceBinding::Passkey, 2_000)
+            .rotate(session.refresh.token.as_str(), &DeviceBinding::Passkey, 2_000)
             .await
             .unwrap();
 
@@ -257,7 +283,7 @@ mod tests {
 
         // Revoke the session by jti; edge now rejects the token even though the
         // signature is still valid and the token hasn't expired.
-        authority.revoke_session(&rotated.claims.jti).await.unwrap();
+        authority.revoke_session(&rotated.claims.jti, rotated.claims.expires_at).await.unwrap();
         let err = edge.verify_at(&rotated.access_token, 2_100).await.unwrap_err();
         assert!(matches!(err, Error::Revoked), "expected Revoked, got {err:?}");
     }

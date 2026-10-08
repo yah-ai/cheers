@@ -106,6 +106,66 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/sqlite/0007_user_tokens.sql"),
         filename: "0007_user_tokens.sql",
     },
+    Migration {
+        version: 8,
+        description: "ownership any granter",
+        sql: include_str!("../migrations/sqlite/0008_ownership_any_granter.sql"),
+        filename: "0008_ownership_any_granter.sql",
+    },
+    Migration {
+        version: 9,
+        description: "ownership subject sets",
+        sql: include_str!("../migrations/sqlite/0009_ownership_subject_sets.sql"),
+        filename: "0009_ownership_subject_sets.sql",
+    },
+    Migration {
+        version: 10,
+        description: "revocation set",
+        sql: include_str!("../migrations/sqlite/0010_revocation_set.sql"),
+        filename: "0010_revocation_set.sql",
+    },
+    Migration {
+        version: 11,
+        description: "binding sequences",
+        sql: include_str!("../migrations/sqlite/0011_binding_sequences.sql"),
+        filename: "0011_binding_sequences.sql",
+    },
+    Migration {
+        version: 12,
+        description: "revocation bounds",
+        sql: include_str!("../migrations/sqlite/0012_revocation_bounds.sql"),
+        filename: "0012_revocation_bounds.sql",
+    },
+    Migration {
+        version: 13,
+        description: "ownership version",
+        sql: include_str!("../migrations/sqlite/0013_ownership_version.sql"),
+        filename: "0013_ownership_version.sql",
+    },
+    Migration {
+        version: 14,
+        description: "revocation keys",
+        sql: include_str!("../migrations/sqlite/0014_revocation_keys.sql"),
+        filename: "0014_revocation_keys.sql",
+    },
+    Migration {
+        version: 15,
+        description: "membership principals",
+        sql: include_str!("../migrations/sqlite/0015_membership_principals.sql"),
+        filename: "0015_membership_principals.sql",
+    },
+    Migration {
+        version: 16,
+        description: "admission policies",
+        sql: include_str!("../migrations/sqlite/0016_admission_policies.sql"),
+        filename: "0016_admission_policies.sql",
+    },
+    Migration {
+        version: 17,
+        description: "knock",
+        sql: include_str!("../migrations/sqlite/0017_knock.sql"),
+        filename: "0017_knock.sql",
+    },
 ];
 
 /// The bookkeeping table, verbatim from `sqlx-sqlite`'s

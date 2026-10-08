@@ -24,17 +24,17 @@
 //!    reasons to refuse, one byte-identical body.
 
 use std::sync::Arc;
+use cheers_core::yah_scopes;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use cheers_core::{AuthStrength, DeviceBinding, DeviceId, Scope, UserId};
 use cheers_server::{
-    McpAuthority, MemoryAuditStore, MemoryBundleStore, MemoryGrantStore, MemoryUserTokenStore,
+    McpAuthority, MemoryAuditStore, MemoryBundleStore, SchemaGrantStore, MemoryUserTokenStore,
     PasetoV4PublicVerifier, PasetoV4SecretMinter, RevocationReader, SessionAuthority,
     SessionPolicy, UserTokenStore,
 };
-use cheers_server::bundles::ScopeOrBundle;
 use tower::ServiceExt;
 
 use cheers_axum::me::SessionRecorder;
@@ -50,10 +50,68 @@ use crate::common::{
 const RIG_KID: &str = "tokens-basic-test-kid";
 const RIG_ISS: &str = "https://cheers.test";
 const AUD: &str = "https://kamaji.test";
+/// The audiences yah's namespaces are bound to in this rig. Anything else
+/// (`https://not-granted.test`) is an audience no derived grant reaches.
+const BOUND_AUDS: [&str; 2] = [AUD, "https://somewhere-else.test"];
 
 type TestAuthority =
     SessionAuthority<cheers_server::HmacBlobCodec, MemRefreshStore, MemUserStore, MemRevocations>;
-type TestMcpAuthority = McpAuthority<MemoryBundleStore, MemoryGrantStore, MemOwnershipStore>;
+type TestMcpAuthority = McpAuthority<
+    MemoryBundleStore,
+    SchemaGrantStore<Arc<MemOwnershipStore>>,
+    Arc<MemOwnershipStore>,
+>;
+
+/// Grants are ownership tuples: `kind/grant#<scope>` unlocks that scope.
+const GRANT_KIND: &str = "grant";
+const GRANT_SCHEMA: cheers_core::ResourceSchema = cheers_core::ResourceSchema {
+    kind: GRANT_KIND,
+    relations: &[],
+    kind_relations: &[
+        cheers_core::RelationDef {
+            name: "cloud:read",
+            membership: true,
+            implies: &[],
+            scopes: &[yah_scopes::CLOUD_READ],
+            grants: &[],
+        },
+        cheers_core::RelationDef {
+            name: "cloud:deploy",
+            membership: true,
+            implies: &[],
+            scopes: &[yah_scopes::CLOUD_DEPLOY],
+            grants: &[],
+        },
+        cheers_core::RelationDef {
+            name: "cloud:destroy",
+            membership: true,
+            implies: &[],
+            scopes: &[yah_scopes::CLOUD_DESTROY],
+            grants: &[],
+        },
+    ],
+};
+
+fn schema_grants(ownership: &Arc<MemOwnershipStore>) -> SchemaGrantStore<Arc<MemOwnershipStore>> {
+    let scopes = Arc::new(yah_scopes::registry_at(BOUND_AUDS).unwrap());
+    let schema = cheers_core::SchemaRegistry::build(&[GRANT_SCHEMA], &scopes).expect("schema");
+    SchemaGrantStore::new(ownership.clone(), Arc::new(schema), scopes)
+}
+
+fn seed_scopes(ownership: &MemOwnershipStore, principal: cheers_core::PrincipalId, scopes: &[Scope]) {
+    for scope in scopes {
+        let n = cheers_server::NewOwnership::new(
+            principal.clone(),
+            cheers_core::KIND_RESOURCE,
+            GRANT_KIND,
+            scope.as_wire(),
+            cheers_core::PrincipalId::service("seed"),
+            None,
+        )
+        .unwrap();
+        pollster::block_on(cheers_server::OwnershipStore::insert(ownership, &n, 1)).unwrap();
+    }
+}
 
 struct Rig {
     app: Router,
@@ -65,7 +123,7 @@ struct Rig {
     session_authority: Arc<TestAuthority>,
     directory: Arc<MemSessionDirectory>,
     mcp: Arc<TestMcpAuthority>,
-    grants: MemoryGrantStore,
+    ownership: Arc<MemOwnershipStore>,
     tokens: MemoryUserTokenStore,
     revocations: MemRevocations,
     audit: Arc<MemoryAuditStore>,
@@ -93,12 +151,13 @@ fn rig() -> Rig {
         .secret_key_bytes()
         .try_into()
         .expect("v4 secret key is 64 bytes");
-    let grants = MemoryGrantStore::new();
+    let ownership = Arc::new(MemOwnershipStore::default());
     let mcp = Arc::new(McpAuthority::new(
         minter,
         MemoryBundleStore::with_defaults(),
-        grants.clone(),
-        MemOwnershipStore::default(),
+        schema_grants(&ownership),
+        ownership.clone(),
+        Arc::new(yah_scopes::registry_at(BOUND_AUDS).unwrap()),
         RIG_ISS,
         RIG_KID,
     ));
@@ -122,7 +181,7 @@ fn rig() -> Rig {
         session_authority,
         directory,
         mcp,
-        grants,
+        ownership,
         tokens,
         revocations,
         audit,
@@ -161,12 +220,10 @@ fn grant(rig: &Rig, user: &UserId, scopes: &[Scope]) {
     grant_for(rig, user, AUD, scopes);
 }
 
-fn grant_for(rig: &Rig, user: &UserId, aud: &str, scopes: &[Scope]) {
-    rig.grants.put(
-        cheers_core::PrincipalId::user(user.as_str()),
-        aud,
-        scopes.iter().copied().map(ScopeOrBundle::Scope).collect(),
-    );
+/// `aud` is documentation only: yah scopes are valid at every audience, so a
+/// derived grant is held wherever the registry allows it.
+fn grant_for(rig: &Rig, user: &UserId, _aud: &str, scopes: &[Scope]) {
+    seed_scopes(&rig.ownership, cheers_core::PrincipalId::user(user.as_str()), scopes);
 }
 
 fn post(bearer: &str, body: serde_json::Value) -> Request<Body> {
@@ -231,7 +288,7 @@ async fn json_of(resp: axum::response::Response) -> serde_json::Value {
 async fn mint_returns_a_real_mcp_token_carrying_api_token_strength() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead, Scope::CloudDeploy]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let resp = rig
@@ -281,7 +338,7 @@ async fn mint_returns_a_real_mcp_token_carrying_api_token_strength() {
 async fn the_secret_is_returned_exactly_once_and_never_appears_in_the_list() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -317,7 +374,7 @@ async fn requested_scopes_are_intersected_and_omitting_them_takes_everything_hel
     grant(
         &rig,
         &user,
-        &[Scope::CloudRead, Scope::CloudDeploy, Scope::CloudDestroy],
+        &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_DESTROY],
     );
     let (bearer, _) = sign_in(&rig, &user).await;
 
@@ -363,7 +420,7 @@ async fn requested_scopes_are_intersected_and_omitting_them_takes_everything_hel
 async fn an_unheld_scope_is_a_400_naming_it_not_a_silently_narrower_token() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let resp = rig
@@ -395,9 +452,11 @@ async fn an_unheld_scope_is_a_400_naming_it_not_a_silently_narrower_token() {
 async fn an_aud_with_no_grant_at_all_is_403_and_a_bad_ttl_or_name_is_400() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
+    // The tuple derives cloud:read, but `cloud` is bound only to BOUND_AUDS:
+    // the audience lock is the registry binding.
     let resp = rig
         .app
         .clone()
@@ -459,7 +518,7 @@ async fn an_aud_with_no_grant_at_all_is_403_and_a_bad_ttl_or_name_is_400() {
 async fn an_honoured_expires_in_secs_lands_on_the_signed_claim() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let body = json_of(
@@ -490,8 +549,8 @@ async fn list_shows_only_the_callers_own_live_tokens() {
     let rig = rig();
     let alice = UserId::new("alice");
     let bob = UserId::new("bob");
-    grant(&rig, &alice, &[Scope::CloudRead]);
-    grant(&rig, &bob, &[Scope::CloudRead]);
+    grant(&rig, &alice, &[yah_scopes::CLOUD_READ]);
+    grant(&rig, &bob, &[yah_scopes::CLOUD_READ]);
     let (a_bearer, _) = sign_in(&rig, &alice).await;
     let (b_bearer, _) = sign_in(&rig, &bob).await;
 
@@ -524,7 +583,7 @@ async fn list_shows_only_the_callers_own_live_tokens() {
 async fn revoke_kills_both_halves_and_the_token_drops_out_of_the_list() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -565,7 +624,7 @@ async fn revoking_a_foreign_or_unknown_token_is_an_identical_404() {
     let rig = rig();
     let alice = UserId::new("alice");
     let bob = UserId::new("bob");
-    grant(&rig, &bob, &[Scope::CloudRead]);
+    grant(&rig, &bob, &[yah_scopes::CLOUD_READ]);
     let (a_bearer, _) = sign_in(&rig, &alice).await;
     let (b_bearer, _) = sign_in(&rig, &bob).await;
 
@@ -616,7 +675,7 @@ async fn revoking_a_foreign_or_unknown_token_is_an_identical_404() {
 async fn every_authentication_failure_is_byte_identical() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, claims) = sign_in(&rig, &user).await;
 
     // A real PAT of this user, which we then kill — the "revoked PAT" arm.
@@ -629,9 +688,12 @@ async fn every_authentication_failure_is_byte_identical() {
     )
     .await;
     let revoked_pat = created["token"].as_str().unwrap().to_owned();
-    cheers_server::RevocationWriter::revoke(&rig.revocations, created["id"].as_str().unwrap())
-        .await
-        .unwrap();
+    cheers_server::RevocationWriter::revoke(
+        &rig.revocations,
+        &cheers_core::Revoked::jti(created["id"].as_str().unwrap(), None),
+    )
+    .await
+    .unwrap();
 
     // Already past its `exp` when minted — same key, same kid, same issuer.
     let expired_pat = rig
@@ -676,7 +738,7 @@ async fn every_authentication_failure_is_byte_identical() {
         .token;
 
     // A perfectly valid MCP token whose subject is not a user at all.
-    grant_camp(&rig, "c1", &[Scope::CloudRead]);
+    grant_camp(&rig, "c1", &[yah_scopes::CLOUD_READ]);
     let camp_token = rig
         .mcp
         .mint_bootstrap(cheers_core::PrincipalId::camp("c1"), AUD, now())
@@ -687,7 +749,7 @@ async fn every_authentication_failure_is_byte_identical() {
     // Revoke the caller's session so the same bytes that worked a moment ago
     // now fail — the "revoked session" arm.
     rig.session_authority
-        .revoke_session(&claims.jti)
+        .revoke_session(&claims.jti, claims.expires_at)
         .await
         .unwrap();
 
@@ -726,28 +788,21 @@ fn foreign_authority(secret: Option<&[u8; 64]>, iss: Option<&str>) -> TestMcpAut
         Some(bytes) => PasetoV4SecretMinter::from_secret_key(bytes).expect("rebuild minter"),
         None => PasetoV4SecretMinter::generate().expect("generate").0,
     };
-    let grants = MemoryGrantStore::new();
-    grants.put(
-        cheers_core::PrincipalId::user("alice"),
-        AUD,
-        vec![ScopeOrBundle::Scope(Scope::CloudRead)],
-    );
+    let ownership = Arc::new(MemOwnershipStore::default());
+    seed_scopes(&ownership, cheers_core::PrincipalId::user("alice"), &[yah_scopes::CLOUD_READ]);
     McpAuthority::new(
         minter,
         MemoryBundleStore::with_defaults(),
-        grants,
-        MemOwnershipStore::default(),
+        schema_grants(&ownership),
+        ownership,
+        Arc::new(yah_scopes::registry_at(BOUND_AUDS).unwrap()),
         iss.unwrap_or(RIG_ISS),
         RIG_KID,
     )
 }
 
 fn grant_camp(rig: &Rig, camp: &str, scopes: &[Scope]) {
-    rig.grants.put(
-        cheers_core::PrincipalId::camp(camp),
-        AUD,
-        scopes.iter().copied().map(ScopeOrBundle::Scope).collect(),
-    );
+    seed_scopes(&rig.ownership, cheers_core::PrincipalId::camp(camp), scopes);
 }
 
 /// A PAT cannot mint a PAT, and it is structural rather than a check: the two
@@ -757,7 +812,7 @@ fn grant_camp(rig: &Rig, camp: &str, scopes: &[Scope]) {
 async fn a_pat_cannot_mint_a_pat() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let pat = json_of(
@@ -794,7 +849,7 @@ async fn a_pat_cannot_mint_a_pat() {
 async fn a_minted_pat_is_frozen_and_does_not_track_later_grant_edits() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead, Scope::CloudDeploy]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -808,8 +863,12 @@ async fn a_minted_pat_is_frozen_and_does_not_track_later_grant_edits() {
     let secret = created["token"].as_str().unwrap().to_owned();
 
     // Grant shrinks to nothing.
-    rig.grants
-        .put(cheers_core::PrincipalId::user("alice"), AUD, vec![]);
+    pollster::block_on(cheers_server::OwnershipStore::revoke_by_principal(
+        &*rig.ownership,
+        &cheers_core::PrincipalId::user("alice"),
+        2,
+    ))
+    .unwrap();
 
     // A fresh mint now fails...
     let resp = rig
@@ -846,7 +905,7 @@ async fn a_minted_pat_is_frozen_and_does_not_track_later_grant_edits() {
 async fn a_pat_can_list_and_revoke_with_no_session_at_all() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -889,7 +948,7 @@ async fn a_pat_minted_for_another_audience_still_manages_credentials() {
     let rig = rig();
     let user = UserId::new("alice");
     const OTHER_AUD: &str = "https://somewhere-else.test";
-    grant_for(&rig, &user, OTHER_AUD, &[Scope::CloudRead]);
+    grant_for(&rig, &user, OTHER_AUD, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -923,7 +982,7 @@ async fn a_pat_minted_for_another_audience_still_manages_credentials() {
 async fn rotate_replaces_the_token_and_kills_the_one_it_replaces() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead, Scope::CloudDeploy]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -952,7 +1011,8 @@ async fn rotate_replaces_the_token_and_kills_the_one_it_replaces() {
     assert_ne!(new_pat, old_pat);
     assert_eq!(rolled["name"], "ci", "the name carries over");
     assert_eq!(rolled["aud"], AUD);
-    assert_eq!(rolled["scopes"], serde_json::json!(["cloud:read", "cloud:deploy"]));
+    // Derived grants come back in scope order.
+    assert_eq!(rolled["scopes"], serde_json::json!(["cloud:deploy", "cloud:read"]));
 
     // The replacement is a real token on the same stack.
     let claims = rig
@@ -994,7 +1054,7 @@ async fn rotate_replaces_the_token_and_kills_the_one_it_replaces() {
 async fn rotate_scopes_come_from_the_presented_token_not_from_current_grants() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -1015,7 +1075,7 @@ async fn rotate_scopes_come_from_the_presented_token_not_from_current_grants() {
     grant(
         &rig,
         &user,
-        &[Scope::CloudRead, Scope::CloudDeploy, Scope::CloudDestroy],
+        &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_DESTROY],
     );
 
     // Asking for the newly-granted scope is refused BY NAME — the ceiling is
@@ -1052,7 +1112,7 @@ async fn rotate_scopes_come_from_the_presented_token_not_from_current_grants() {
         .verifier
         .verify_mcp_at(rolled["token"].as_str().unwrap(), now() + 10, RIG_KID)
         .unwrap();
-    assert_eq!(claims.scope, vec![Scope::CloudRead]);
+    assert_eq!(claims.scope, vec![yah_scopes::CLOUD_READ]);
 }
 
 /// Narrowing on the way through is allowed — that is how a credential sheds
@@ -1061,7 +1121,7 @@ async fn rotate_scopes_come_from_the_presented_token_not_from_current_grants() {
 async fn rotate_can_narrow_and_rename() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead, Scope::CloudDeploy]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -1114,7 +1174,7 @@ async fn rotate_can_narrow_and_rename() {
 async fn a_pat_cannot_rotate_a_token_that_is_not_its_own() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead, Scope::CloudDeploy]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let first = json_of(
@@ -1176,7 +1236,7 @@ async fn a_pat_cannot_rotate_a_token_that_is_not_its_own() {
 async fn a_session_may_rotate_any_of_the_users_tokens_bounded_by_that_token() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead, Scope::CloudDeploy]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -1222,7 +1282,7 @@ async fn a_session_may_rotate_any_of_the_users_tokens_bounded_by_that_token() {
 async fn rotate_gets_a_fresh_ttl_and_is_still_bounded_by_the_policy_ceiling() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -1275,7 +1335,7 @@ async fn rotate_gets_a_fresh_ttl_and_is_still_bounded_by_the_policy_ceiling() {
 async fn rotating_a_revoked_token_is_refused_rather_than_resurrected() {
     let rig = rig();
     let user = UserId::new("alice");
-    grant(&rig, &user, &[Scope::CloudRead]);
+    grant(&rig, &user, &[yah_scopes::CLOUD_READ]);
     let (bearer, _) = sign_in(&rig, &user).await;
 
     let created = json_of(
@@ -1320,8 +1380,8 @@ async fn rotating_a_foreign_users_token_is_an_identical_404() {
     let rig = rig();
     let alice = UserId::new("alice");
     let bob = UserId::new("bob");
-    grant(&rig, &alice, &[Scope::CloudRead]);
-    grant(&rig, &bob, &[Scope::CloudRead]);
+    grant(&rig, &alice, &[yah_scopes::CLOUD_READ]);
+    grant(&rig, &bob, &[yah_scopes::CLOUD_READ]);
     let (alice_bearer, _) = sign_in(&rig, &alice).await;
     let (bob_bearer, _) = sign_in(&rig, &bob).await;
 

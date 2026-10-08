@@ -10,6 +10,7 @@ members = [
     "crates/cheers-store",
     "crates/cheers-sqlx",
     "crates/cheers-turso",
+    "crates/cheers-vend",
     "crates/cheers-redis",
     "crates/cheers-axum",
     "crates/cheers-test-support",
@@ -18,7 +19,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.8.42"
+version = "0.8.43"
 edition = "2021"
 authors = ["yah Dev <human@yah.dev>"]
 license = "MIT OR Apache-2.0"

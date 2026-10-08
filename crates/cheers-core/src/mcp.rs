@@ -8,203 +8,100 @@
 //!
 //! Three pieces:
 //!
-//! - [`Scope`] — the closed enum of MCP scopes. `Display`/`FromStr`/serde
-//!   roundtrip through the literal wire string (`"cloud:deploy"`). The parser
-//!   rejects wildcards (`"cloud:*"`) at parse time — composition rule (1).
-//! - [`validate_grant`] — the grant-time check that rejects writing
-//!   `ownership:write` or `audit:write` to a `User` or `Camp` principal
-//!   (composition rule (4)). The rule lives at the **grant API**, not the
-//!   mint path, so a misconfigured grant can never become a mintable token.
+//! - [`Scope`] — the validated `<namespace>:<verb>` wire type, declared per
+//!   product with [`scopes!`](crate::scopes) and checked against a
+//!   [`ScopeRegistry`] (see [`crate::scope`]; yah's set is
+//!   [`crate::yah_scopes`]).
+//! - [`validate_grant`] — the grant/mint-time check against the registry:
+//!   refuses unknown scopes, scopes not valid at `aud`, and service-only
+//!   scopes for `User` / `Camp` principals (composition rule (4)).
 //! - [`McpClaims`] + [`Actor`] / [`Owns`] / [`AuthStrength`] — the per-call
 //!   JWT-style claim bundle. `sub` is a [`PrincipalId`] (prefixed); `scope` is
 //!   a `Vec<Scope>` (no wildcards on the wire); `act` carries the agent
 //!   variant on a user's behalf (RFC 8693); `owns` is the embedded-ownership
 //!   claim cheers reads off the ownership table at mint time.
+//!
+//! @yah:ticket(R731-F2, "Scope registry — replace the closed Scope enum with namespaced, registry-validated scopes (D1)")
+//! @yah:status(review)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:at(2026-10-06T23:08:28Z)
+//! @yah:phase(P1)
+//! @yah:parent(R731)
+//! @yah:next("Doc D1. The wire type becomes a validated namespace:verb string checked against a registry built at startup; entries carry service_only, a description and valid audiences. The 17 yah scopes become one built-in namespace set.")
+//! @yah:next("Discovery scopes_supported reads the registry (cheers-axum/src/discovery.rs:125 reads Scope::ALL today).")
+//! @yah:next("Decide inside this ticket: a scopes! macro or a ProductScopes trait. It must work for verify-only crates that never link cheers-server (cheers-verify, noisetable issues and inference).")
+//! @yah:next("Blast radius: McpClaims.scope is Vec<Scope>; at least 14 yah-tree files name Scope beside cheers (kamaji, cloud-admin, yubaba). Change the type and fix the call sites; no dual parse. Coordinate with yah R426.")
+//! @yah:next("Composition rules carry over: no wildcards, :admin distinct from :read/:write, service-only refused at grant, aud mandatory.")
+//! @yah:verify("cargo test -p cheers-core; the discovery test pins scopes_supported to the registry.")
+//! @yah:tier(Wizard)
+//! @yah:gotcha("Scheduling edge (leader, 2026-10-06): F2 changes McpClaims.scope's type and leaves every cheers crate + kamaji uncompilable until all call sites are fixed, which would stall B1's and F7's test runs on the shared tree. F2 waits for both.")
+//! @yah:depends_on(R731-B1)
+//! @yah:depends_on(R731-F7)
+//! @yah:next("D1 TYPING DECIDED (leader, 2026-10-06): use a declarative `cheers_core::scopes!` macro_rules, not a trait. A product declares a set in one place, and the macro emits (a) a typed `pub const` per scope, so a typo is a compile error, and (b) `pub const DEFS: &[ScopeDef]` carrying {scope, service_only, description, audiences}. It needs only cheers-core, so verify-only crates (cheers-verify, noisetable issues/inference) declare or import constants without ever linking cheers-server. Scope is a validated newtype (owned Arc<str> or Cow), grammar `<ns>:<verb>` with each side matching [a-z][a-z0-9-]*, exactly one colon, '*' refused. Validation runs at parse/deserialize, and the macro's constructor is a const fn that panics at compile time on bad input.")
+//! @yah:gotcha("D1 REGISTRY DECIDED (leader): `ScopeRegistry` is built at startup from DEFS slices and fails on a duplicate scope. It answers service_only, description and is_valid_at(aud). Audience metadata is `Audiences::Any | Audiences::Only(&[..])`. yah's 17 built-ins become `cheers_core::yah_scopes` (declared with the same macro) with Audiences::Any, which preserves today's behavior; pinning them to yah audiences is yah-side R426 work. Product scopes declare Only. Consumers: validate_grant and the mint paths take the registry (Scope::is_service_only is deleted; an unknown scope is refused at grant and at mint), and discovery's scopes_supported reads the registry from app state. Verifiers do NOT consult the registry: they compare claims against typed constants. Storage (audit stores, user_tokens) keeps wire strings, and decode accepts any syntactically valid scope. Keep ownership:write for now; R731-F8 deletes it. Call sites outside cheers to fix: yah crates/yah/cloud-admin/src/{auth.rs,lib.rs}, app/yah/cli/src/cloud_cheers.rs, oss/passway tests, plus any hub-cheers-rpc use. kamaji imports no cheers Scope.")
+//! @yah:handoff("LANDED. New crates/cheers-core/src/scope.rs: Scope is a newtype over Cow<'static, str> (Cow, not Arc, because a const fn can build Cow::Borrowed). It is Clone, not Copy. The grammar is [a-z][a-z0-9-]*:[a-z][a-z0-9-]*: exactly one colon, and '*' is refused as Wildcard. FromStr and Deserialize accept any well-formed scope. ScopeParseError::Unknown was replaced by Malformed. Scope::from_static is a const fn whose assert panics at compile time. The file also has #[macro_export] scopes! (entries look like `NAME = \"ns:verb\" { description: \"..\" [, service_only: true] [, audiences: [..]] };` and emit a pub const per scope plus pub const DEFS: &[ScopeDef]), Audiences {Any, Only(&'static [&'static str])}, ScopeDef {scope, service_only, description, audiences}, and ScopeRegistry with ScopeRegistryBuilder::with(defs).build() -> Result<_, DuplicateScope>. The registry offers get, contains, service_only, description, is_valid_at, iter (in declaration order), len and is_empty.")
+//! @yah:handoff("New crates/cheers-core/src/yah_scopes.rs declares the 17 scopes with scopes!, all Audiences::Any, with ownership:write and audit:write service_only. It adds yah_scopes::registry_at([AUD]).unwrap(). Scope::ALL, Scope::is_service_only and as_wire(self)->&'static str are deleted; as_wire is now (&self)->&str.")
+//! @yah:handoff("validate_grant(registry, kind, &scope, aud) in mcp.rs refuses UnknownScope, then NotValidAtAud, then ServiceOnlyScope (all GrantError variants). McpAuthority::new takes a new Arc<ScopeRegistry> argument after `ownership`, and McpAuthority::scopes() exposes it. All 6 mint call sites pass (&self.scopes, kind, s, &aud). DiscoveryState::new(issuer, Arc<ScopeRegistry>), and scopes_supported is read from the registry.")
+//! @yah:handoff("Extra work: cheers-axum tokens.rs parse_scopes now takes the registry and returns 400 InvalidTokenRequest for an undeclared scope. Before this, parse_scopes rejected unknown scopes at parse time. Storage decode (user_tokens::decode_scopes) now accepts any well-formed scope (decision 6), and its test was renamed decode_scopes_accepts_undeclared_and_refuses_malformed. The discovery test is now scopes_supported_equals_the_registry, which uses a 17+1 registry, and the cheers-axum lib.rs @yah:verify line was updated to the new name. New mint test: mint_user_fresh_rejects_scope_missing_from_registry.")
+//! @yah:handoff("GRANT-TIME NOTE: the GrantStore trait has no write method (MemoryGrantStore::put is test-only), so the registry is threaded through McpAuthority. There, validate_grant runs on every expanded scope before signing. That check covers both 'at grant' and 'at mint' until a persistent grant write API exists. F3's SchemaGrantStore should call validate_grant/is_valid_at when it lands.")
+//! @yah:handoff("yah tree, type migration only: crates/yah/cloud-admin/src/auth.rs and lib.rs (tests), app/yah/cli/src/cloud_cheers.rs (validate_grant now takes yah_scopes::registry_at([AUD]).unwrap() and the --aud value), and oss/passway/crates/passway/tests/{auth_gate,path_confusion}.rs. hub-cheers-rpc and kamaji name no cheers Scope. R426 has a coordination gotcha appended.")
+//! @yah:verify("cargo test --workspace in oss/cheers: 652 passed / 0 failed / 3 ignored (baseline 640/0/3; +12 new tests). Golden fixtures (cheers-server/tests/golden_fixtures.rs and the cheers-test-support fixtures) pass without regeneration. The only modified fixture is cheers-test-support/fixtures/jwks.json, whose mtime predates this ticket's edits; it belongs to B1.")
+//! @yah:verify("cargo test -p yah-cloud-admin: 60 passed / 0 failed. cargo check -p yah --all-targets: exit 0.")
+//! @yah:verify("oss/passway cargo test FAILS BEFORE COMPILING. The failure is in a file I did not touch: oss/passway/crates/passway/Cargo.toml pins cheers-core/cheers-verify version 0.8.42, and cheers is at 0.8.43-pre.1, so cargo can't select a version. That is a peer's or a release bump's skew. The 2 passway test files are migrated but unverified until that manifest is bumped.")
+//! @yah:verify("Remaining warning: unused variable `policy` in cheers-test-support/src/lib.rs:222. It is pre-existing and not in a file I touched.")
+//! @yah:gotcha("PRE-EXISTING, NOT R731: oss/passway can't resolve against in-tree cheers. crates/passway/Cargo.toml:69-70 pins cheers-core/cheers-verify at version \"0.8.42\", while cheers has been 0.8.43-pre.1 since commit ea6a4b29 (2026-10-04 sync), and a caret req never matches a prerelease. So F2's two passway test edits (tests/{auth_gate,path_confusion}.rs: Scope::CloudRead -> yah_scopes::CLOUD_READ) are checked by inspection only. Bumping the pin is a release-lockstep call (passway itself is 0.8.42 and would then require a prerelease cheers), so it is left to the release owner.")
+//! @yah:verify("Leader re-verify 2026-10-06: cargo test --workspace (oss/cheers) 652 pass / 0 fail / 3 ignored, no build skew; 0 non-comment references to Scope::ALL / is_service_only remain in cheers crates.")
 
 use serde::{Deserialize, Serialize};
 
 use crate::principal::{PrincipalId, PrincipalKind};
 
-/// The closed set of MCP scopes — verbatim with W159 §Scope vocabulary.
-///
-/// Each variant maps to one literal wire string via [`Scope::as_wire`].
-/// `<category>:admin` is **distinct** from `<category>:read`/`<category>:write`:
-/// granting `camp:admin` does NOT imply `camp:read` (composition rule (3)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Scope {
-    ArchRead,
-    ArchWrite,
-    BoardRead,
-    BoardWrite,
-    CampRead,
-    CampAdmin,
-    CloudRead,
-    CloudDeploy,
-    CloudDestroy,
-    /// Fleet-operator admin — sees every machine/workload in the cloud
-    /// snapshot (the yah-cloud-admin dashboard's gate; R568-F5). Distinct
-    /// from `CloudRead` (which is the tenant-facing read scope, filtered by
-    /// principal ownership).
-    CloudAdmin,
-    PartyRead,
-    PartyWrite,
-    SubagentSpawn,
-    SubagentControl,
-    /// Service-principals only — see [`validate_grant`].
-    OwnershipWrite,
-    AuditRead,
-    /// Service-principals only — see [`validate_grant`].
-    AuditWrite,
-}
-
-impl Scope {
-    /// The literal wire string (e.g. `"cloud:deploy"`).
-    pub const fn as_wire(self) -> &'static str {
-        match self {
-            Self::ArchRead => "arch:read",
-            Self::ArchWrite => "arch:write",
-            Self::BoardRead => "board:read",
-            Self::BoardWrite => "board:write",
-            Self::CampRead => "camp:read",
-            Self::CampAdmin => "camp:admin",
-            Self::CloudRead => "cloud:read",
-            Self::CloudDeploy => "cloud:deploy",
-            Self::CloudDestroy => "cloud:destroy",
-            Self::CloudAdmin => "cloud:admin",
-            Self::PartyRead => "party:read",
-            Self::PartyWrite => "party:write",
-            Self::SubagentSpawn => "subagent:spawn",
-            Self::SubagentControl => "subagent:control",
-            Self::OwnershipWrite => "ownership:write",
-            Self::AuditRead => "audit:read",
-            Self::AuditWrite => "audit:write",
-        }
-    }
-
-    /// `true` iff this scope is grantable only to a [`PrincipalKind::Service`]
-    /// principal — composition rule (4).
-    pub const fn is_service_only(self) -> bool {
-        matches!(self, Self::OwnershipWrite | Self::AuditWrite)
-    }
-
-    /// Every variant in the closed scope vocabulary.
-    ///
-    /// `cheers-axum`'s OIDC discovery endpoint reads `scopes_supported`
-    /// straight from this constant so the discovery doc cannot drift from
-    /// what the mint path accepts. The companion `scope_all_is_exhaustive`
-    /// test below uses an exhaustive intra-crate match against
-    /// [`Scope`] (which is `#[non_exhaustive]` for *external* users but
-    /// fully matchable here) — adding a variant without listing it in
-    /// `ALL` either fails to compile (missing match arm) or fails the
-    /// per-arm assertion.
-    pub const ALL: &'static [Scope] = &[
-        Self::ArchRead,
-        Self::ArchWrite,
-        Self::BoardRead,
-        Self::BoardWrite,
-        Self::CampRead,
-        Self::CampAdmin,
-        Self::CloudRead,
-        Self::CloudDeploy,
-        Self::CloudDestroy,
-        Self::CloudAdmin,
-        Self::PartyRead,
-        Self::PartyWrite,
-        Self::SubagentSpawn,
-        Self::SubagentControl,
-        Self::OwnershipWrite,
-        Self::AuditRead,
-        Self::AuditWrite,
-    ];
-}
-
-impl std::fmt::Display for Scope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_wire())
-    }
-}
-
-/// Why a scope string failed to parse.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ScopeParseError {
-    /// `cloud:*` and friends are rejected — composition rule (1), no wildcards
-    /// on the wire.
-    #[error("wildcard scope '{0}' is not allowed on the wire")]
-    Wildcard(String),
-    /// Not one of the closed-vocabulary literals.
-    #[error("unknown scope '{0}'")]
-    Unknown(String),
-}
-
-impl std::str::FromStr for Scope {
-    type Err = ScopeParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.contains('*') {
-            return Err(ScopeParseError::Wildcard(s.to_owned()));
-        }
-        Ok(match s {
-            "arch:read" => Self::ArchRead,
-            "arch:write" => Self::ArchWrite,
-            "board:read" => Self::BoardRead,
-            "board:write" => Self::BoardWrite,
-            "camp:read" => Self::CampRead,
-            "camp:admin" => Self::CampAdmin,
-            "cloud:read" => Self::CloudRead,
-            "cloud:deploy" => Self::CloudDeploy,
-            "cloud:destroy" => Self::CloudDestroy,
-            "cloud:admin" => Self::CloudAdmin,
-            "party:read" => Self::PartyRead,
-            "party:write" => Self::PartyWrite,
-            "subagent:spawn" => Self::SubagentSpawn,
-            "subagent:control" => Self::SubagentControl,
-            "ownership:write" => Self::OwnershipWrite,
-            "audit:read" => Self::AuditRead,
-            "audit:write" => Self::AuditWrite,
-            other => return Err(ScopeParseError::Unknown(other.to_owned())),
-        })
-    }
-}
-
-impl Serialize for Scope {
-    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        ser.serialize_str(self.as_wire())
-    }
-}
-
-impl<'de> Deserialize<'de> for Scope {
-    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(de)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
+use crate::scope::{Scope, ScopeRegistry};
 
 /// A failed grant — the rule that fired and the offending pair.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GrantError {
-    /// Composition rule (4): `ownership:write` and `audit:write` are
+    /// The deployment's [`ScopeRegistry`] does not declare this scope.
+    #[error("scope {scope} is not declared in this deployment's scope registry")]
+    UnknownScope { scope: Scope },
+    /// The scope is declared, but not valid at this `aud`.
+    #[error("scope {scope} is not valid at aud '{aud}'")]
+    NotValidAtAud { scope: Scope, aud: String },
+    /// Composition rule (4): service-only scopes (`audit:write`, or any
+    /// registry entry marked `service_only`) are
     /// grantable to `Service` principals only.
     #[error("scope {scope} is service-only; cannot grant to {kind} principal")]
     ServiceOnlyScope { scope: Scope, kind: PrincipalKind },
 }
 
-/// Grant-time validation. Call this on the write path of the grant API —
-/// `POST /grants` etc. — before persisting; the mint path is a defense in
-/// depth, not the primary check.
+/// Grant-time validation against the deployment's [`ScopeRegistry`]. The
+/// mint paths run it per expanded scope before signing.
 ///
-/// Currently enforces composition rule (4) (service-only scopes). Other rules:
+/// Refuses, in order: a scope the registry does not declare, a scope not
+/// valid at `aud`, and a service-only scope for a non-`Service` principal
+/// (composition rule (4)). The other rules:
 ///
-/// - (1) No wildcards: enforced by [`Scope::from_str`] — a wildcard never
-///   reaches this function because it can't parse into a `Scope`.
-/// - (3) `<category>:admin` is distinct: enforced by the enum shape —
-///   `CampAdmin`, `CampRead`, `CampWrite` are independent variants, so a
-///   grant of one is literally not a grant of the other.
-/// - (5) `aud`-scoping is mandatory: a mint-path concern (the principal's
-///   `aud` membership), not a per-scope predicate.
-pub fn validate_grant(kind: PrincipalKind, scope: Scope) -> Result<(), GrantError> {
-    if scope.is_service_only() && kind != PrincipalKind::Service {
-        return Err(GrantError::ServiceOnlyScope { scope, kind });
+/// - (1) No wildcards: enforced by `Scope::from_str` — a wildcard never
+///   parses into a `Scope`.
+/// - (3) `<category>:admin` is distinct: scopes are opaque strings with no
+///   implication between them, so a grant of `camp:admin` is literally not a
+///   grant of `camp:read`.
+/// - (5) `aud` is mandatory: it is a required argument here, and the mint
+///   paths refuse a principal with no grant for `aud`.
+pub fn validate_grant(
+    registry: &ScopeRegistry,
+    kind: PrincipalKind,
+    scope: &Scope,
+    aud: &str,
+) -> Result<(), GrantError> {
+    let Some(def) = registry.get(scope) else {
+        return Err(GrantError::UnknownScope { scope: scope.clone() });
+    };
+    if !registry.is_valid_at(scope, aud) {
+        return Err(GrantError::NotValidAtAud { scope: scope.clone(), aud: aud.to_owned() });
+    }
+    if def.service_only && kind != PrincipalKind::Service {
+        return Err(GrantError::ServiceOnlyScope { scope: scope.clone(), kind });
     }
     Ok(())
 }
@@ -318,6 +215,11 @@ pub struct McpClaims {
     pub owns: Owns,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_strength: Option<AuthStrength>,
+    /// A self-signed token's [`ServiceCeiling`](crate::ServiceCeiling), as the
+    /// PASETO v4.public cheers signed it (§D5). `None` on issuer-signed
+    /// tokens; required by verifiers when the signing key is a self-signer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<String>,
 }
 
 impl McpClaims {
@@ -343,6 +245,7 @@ impl McpClaims {
             camp_id: None,
             owns: Owns::default(),
             auth_strength: None,
+            ceiling: None,
         }
     }
 
@@ -361,6 +264,11 @@ impl McpClaims {
         self
     }
 
+    pub fn with_ceiling(mut self, ceiling: impl Into<String>) -> Self {
+        self.ceiling = Some(ceiling.into());
+        self
+    }
+
     pub fn with_auth_strength(mut self, strength: AuthStrength) -> Self {
         self.auth_strength = Some(strength);
         self
@@ -376,90 +284,27 @@ impl McpClaims {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::yah_scopes;
     use std::str::FromStr;
 
     #[test]
-    fn scope_wire_string_roundtrips_for_every_variant() {
-        // Every named scope from the doc.
-        let all = [
-            Scope::ArchRead,
-            Scope::ArchWrite,
-            Scope::BoardRead,
-            Scope::BoardWrite,
-            Scope::CampRead,
-            Scope::CampAdmin,
-            Scope::CloudRead,
-            Scope::CloudDeploy,
-            Scope::CloudDestroy,
-            Scope::CloudAdmin,
-            Scope::PartyRead,
-            Scope::PartyWrite,
-            Scope::SubagentSpawn,
-            Scope::SubagentControl,
-            Scope::OwnershipWrite,
-            Scope::AuditRead,
-            Scope::AuditWrite,
-        ];
-        for s in all {
-            let wire = s.as_wire();
-            assert_eq!(Scope::from_str(wire).unwrap(), s, "roundtrip failed for {wire}");
-            assert!(wire.contains(':'), "wire form must contain ':' — {wire}");
+    fn scope_wire_string_roundtrips_for_every_yah_scope() {
+        for d in yah_scopes::DEFS {
+            let wire = d.scope.as_wire();
+            assert_eq!(Scope::from_str(wire).unwrap(), d.scope, "roundtrip failed for {wire}");
         }
     }
 
     #[test]
-    fn scope_all_is_exhaustive() {
-        // Exhaustive intra-crate match — adding a `Scope` variant without
-        // updating this test is a compile error. Each arm asserts the
-        // variant is also present in `Scope::ALL`; forgetting to update
-        // `ALL` fails the assertion at test time.
-        fn assert_in_all(s: Scope) {
-            let in_all = match s {
-                Scope::ArchRead => Scope::ALL.contains(&Scope::ArchRead),
-                Scope::ArchWrite => Scope::ALL.contains(&Scope::ArchWrite),
-                Scope::BoardRead => Scope::ALL.contains(&Scope::BoardRead),
-                Scope::BoardWrite => Scope::ALL.contains(&Scope::BoardWrite),
-                Scope::CampRead => Scope::ALL.contains(&Scope::CampRead),
-                Scope::CampAdmin => Scope::ALL.contains(&Scope::CampAdmin),
-                Scope::CloudRead => Scope::ALL.contains(&Scope::CloudRead),
-                Scope::CloudDeploy => Scope::ALL.contains(&Scope::CloudDeploy),
-                Scope::CloudDestroy => Scope::ALL.contains(&Scope::CloudDestroy),
-                Scope::CloudAdmin => Scope::ALL.contains(&Scope::CloudAdmin),
-                Scope::PartyRead => Scope::ALL.contains(&Scope::PartyRead),
-                Scope::PartyWrite => Scope::ALL.contains(&Scope::PartyWrite),
-                Scope::SubagentSpawn => Scope::ALL.contains(&Scope::SubagentSpawn),
-                Scope::SubagentControl => Scope::ALL.contains(&Scope::SubagentControl),
-                Scope::OwnershipWrite => Scope::ALL.contains(&Scope::OwnershipWrite),
-                Scope::AuditRead => Scope::ALL.contains(&Scope::AuditRead),
-                Scope::AuditWrite => Scope::ALL.contains(&Scope::AuditWrite),
-            };
-            assert!(in_all, "{s} reachable in match but missing from Scope::ALL");
-        }
-        for s in Scope::ALL {
-            assert_in_all(*s);
-        }
-    }
-
-    #[test]
-    fn scope_parser_rejects_wildcards() {
-        for w in ["cloud:*", "*", "*:read", "ownership:*"] {
-            let err = Scope::from_str(w).unwrap_err();
-            assert!(
-                matches!(err, ScopeParseError::Wildcard(ref s) if s == w),
-                "{w}: expected Wildcard, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn scope_parser_rejects_unknown_literals() {
-        let err = Scope::from_str("cloud:nuke").unwrap_err();
-        assert!(matches!(err, ScopeParseError::Unknown(ref s) if s == "cloud:nuke"));
+    fn scope_parser_accepts_undeclared_but_well_formed() {
+        // Syntax is not registry membership: storage and verifiers decode any
+        // well-formed scope.
+        assert_eq!(Scope::from_str("cloud:nuke").unwrap().as_wire(), "cloud:nuke");
     }
 
     #[test]
     fn scope_serialize_is_plain_string() {
-        let v = vec![Scope::CloudDeploy, Scope::CloudRead];
+        let v = vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ];
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(json, r#"["cloud:deploy","cloud:read"]"#);
         let back: Vec<Scope> = serde_json::from_str(&json).unwrap();
@@ -476,70 +321,86 @@ mod tests {
     }
 
     #[test]
-    fn validate_grant_rejects_service_only_for_user() {
-        let err = validate_grant(PrincipalKind::User, Scope::OwnershipWrite).unwrap_err();
-        assert_eq!(
-            err,
-            GrantError::ServiceOnlyScope {
-                scope: Scope::OwnershipWrite,
-                kind: PrincipalKind::User,
-            }
-        );
+    fn scope_deserialize_rejects_malformed() {
+        let err = serde_json::from_str::<Vec<Scope>>(r#"["cloud"]"#).unwrap_err();
+        assert!(err.to_string().contains("malformed"), "got: {err}");
+    }
 
-        let err = validate_grant(PrincipalKind::User, Scope::AuditWrite).unwrap_err();
-        assert_eq!(
-            err,
-            GrantError::ServiceOnlyScope {
-                scope: Scope::AuditWrite,
-                kind: PrincipalKind::User,
-            }
-        );
+    const AUD: &str = "https://aud.example";
+
+    #[test]
+    fn validate_grant_rejects_service_only_for_user() {
+        let reg = yah_scopes::registry_at([AUD]).unwrap();
+        for s in [yah_scopes::AUDIT_WRITE] {
+            let err = validate_grant(&reg, PrincipalKind::User, &s, AUD).unwrap_err();
+            assert_eq!(err, GrantError::ServiceOnlyScope { scope: s, kind: PrincipalKind::User });
+        }
     }
 
     #[test]
     fn validate_grant_rejects_service_only_for_camp() {
-        let err = validate_grant(PrincipalKind::Camp, Scope::OwnershipWrite).unwrap_err();
-        assert!(matches!(
-            err,
-            GrantError::ServiceOnlyScope {
-                scope: Scope::OwnershipWrite,
-                kind: PrincipalKind::Camp,
-            }
-        ));
+        let reg = yah_scopes::registry_at([AUD]).unwrap();
+        let err =
+            validate_grant(&reg, PrincipalKind::Camp, &yah_scopes::AUDIT_WRITE, AUD).unwrap_err();
+        assert!(matches!(err, GrantError::ServiceOnlyScope { kind: PrincipalKind::Camp, .. }));
     }
 
     #[test]
     fn validate_grant_allows_service_principal_for_service_only_scopes() {
-        validate_grant(PrincipalKind::Service, Scope::OwnershipWrite).unwrap();
-        validate_grant(PrincipalKind::Service, Scope::AuditWrite).unwrap();
+        let reg = yah_scopes::registry_at([AUD]).unwrap();
+        validate_grant(&reg, PrincipalKind::Service, &yah_scopes::AUDIT_WRITE, AUD).unwrap();
     }
 
     #[test]
     fn validate_grant_allows_normal_scopes_for_any_principal() {
-        for k in [
-            PrincipalKind::User,
-            PrincipalKind::Service,
-            PrincipalKind::Camp,
-        ] {
+        let reg = yah_scopes::registry_at([AUD]).unwrap();
+        for k in [PrincipalKind::User, PrincipalKind::Service, PrincipalKind::Camp] {
             for s in [
-                Scope::ArchRead,
-                Scope::CloudDeploy,
-                Scope::CampAdmin,
-                Scope::AuditRead,
+                yah_scopes::ARCH_READ,
+                yah_scopes::CLOUD_DEPLOY,
+                yah_scopes::CAMP_ADMIN,
+                yah_scopes::AUDIT_READ,
             ] {
-                validate_grant(k, s).unwrap();
+                validate_grant(&reg, k, &s, AUD).unwrap();
             }
         }
     }
 
     #[test]
+    fn validate_grant_rejects_unknown_scope() {
+        let reg = yah_scopes::registry_at([AUD]).unwrap();
+        let s = Scope::from_str("cloud:nuke").unwrap();
+        let err = validate_grant(&reg, PrincipalKind::Service, &s, AUD).unwrap_err();
+        assert_eq!(err, GrantError::UnknownScope { scope: s });
+    }
+
+    #[test]
+    fn validate_grant_rejects_scope_not_valid_at_aud() {
+        mod pinned {
+            crate::scopes! {
+                TRIAGE = "issues:triage" {
+                    description: "triage",
+                    audiences: ["https://issues.example"],
+                };
+            }
+        }
+        let reg = ScopeRegistry::builder().with(pinned::DEFS).build().unwrap();
+        validate_grant(&reg, PrincipalKind::User, &pinned::TRIAGE, "https://issues.example")
+            .unwrap();
+        let err = validate_grant(&reg, PrincipalKind::User, &pinned::TRIAGE, AUD).unwrap_err();
+        assert_eq!(
+            err,
+            GrantError::NotValidAtAud { scope: pinned::TRIAGE, aud: AUD.to_owned() }
+        );
+    }
+
+    #[test]
     fn camp_admin_is_distinct_from_camp_read_and_camp_write() {
-        // The enum shape *is* the enforcement: each is its own variant.
-        // A holder of CampAdmin does not equal a holder of CampRead.
-        assert_ne!(Scope::CampAdmin, Scope::CampRead);
-        // CampWrite isn't even in the vocabulary; the doc lists only
-        // camp:read + camp:admin. This test pins that fact.
-        assert!(Scope::from_str("camp:write").is_err());
+        // No implication between scopes: distinct strings are distinct grants.
+        assert_ne!(yah_scopes::CAMP_ADMIN, yah_scopes::CAMP_READ);
+        // camp:write is well-formed but not in yah's vocabulary.
+        let reg = yah_scopes::registry_at([AUD]).unwrap();
+        assert!(!reg.contains(&Scope::from_str("camp:write").unwrap()));
     }
 
     #[test]
@@ -600,7 +461,7 @@ mod tests {
             1000,
             1300,
             "jti-1",
-            vec![Scope::CloudDeploy, Scope::CloudRead],
+            vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ],
         )
         .with_act(Actor::new(PrincipalId::service("agent-claude")))
         .with_camp_id("camp-xyz")
@@ -636,7 +497,7 @@ mod tests {
             1000,
             1300,
             "jti-2",
-            vec![Scope::OwnershipWrite],
+            vec![yah_scopes::AUDIT_WRITE],
         );
         let json = serde_json::to_string(&c).unwrap();
         for absent in ["\"act\"", "\"camp_id\"", "\"owns\"", "\"auth_strength\""] {

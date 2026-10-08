@@ -47,7 +47,6 @@
 //!
 //! @yah:relay(R515, "Bind a session claim to a long-lived public key, so an edge can prove token holder == connecting peer")
 //! @yah:at(2026-09-03T06:37:07Z)
-//! @yah:status(open)
 //! @yah:assignee(agent:bundle-anthropic-ashguard)
 //! @arch:see(.yah/docs/working/edge-verifiable-auth.md)
 

@@ -71,6 +71,7 @@
 //! ```
 
 use std::sync::Arc;
+use cheers_core::yah_scopes;
 
 use axum::Json;
 use axum::Router;
@@ -79,7 +80,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use serde::{Deserialize, Serialize};
 
-use cheers_core::{Principal, PrincipalId, Scope, UserDelegation};
+use cheers_core::{Principal, PrincipalId, UserDelegation};
 use cheers_server::{
     CampAuthority, CampBootstrapCredential, CampPrincipalStore, NewCampPrincipal,
     UserSigningKeyStore,
@@ -166,8 +167,8 @@ where
     K: UserSigningKeyStore,
 {
     let now = now_unix();
-    let claims = authenticate_mcp(&headers, &state.mcp, now)?;
-    claims.require_scope(Scope::CampAdmin)?;
+    let claims = authenticate_mcp(&headers, &state.mcp, now).await?;
+    claims.require_scope(yah_scopes::CAMP_ADMIN)?;
     let provisioned = state
         .authority
         .provision(
@@ -296,7 +297,7 @@ mod tests {
     /// Mint an MCP bearer for yubaba's service principal.
     fn mint_warden_mcp(
         minter: &PasetoV4SecretMinter,
-        scopes: Vec<Scope>,
+        scopes: Vec<cheers_core::Scope>,
         now_s: i64,
     ) -> String {
         let claims = McpClaims::new(
@@ -357,7 +358,7 @@ mod tests {
             now_s,
             now_s + 600,
         );
-        let token = mint_warden_mcp(&minter, vec![Scope::CampAdmin], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CAMP_ADMIN], now_s);
 
         let body = CreateCampBootstrapBody {
             bound_to: user.clone(),
@@ -405,65 +406,9 @@ mod tests {
         // credential -> MCP token is a separate ticket — here we hit the
         // authority APIs directly to prove the wiring is intact.
         use cheers_server::{
-            McpAuthority, MemoryBundleStore, MemoryGrantStore, ScopeOrBundle,
+            McpAuthority, MemoryBundleStore, SchemaGrantStore,
         };
-        use std::sync::Mutex;
-
-        // Minimal in-line ownership store — the same shape mcp_authority's
-        // tests use. (Tests can't import the test-only MemOwnershipStore.)
-        use async_trait::async_trait;
-        use cheers_core::StoreError;
-        use cheers_server::{NewOwnership, OwnershipRow, OwnershipStore};
-        #[derive(Default)]
-        struct InlineOwn(Mutex<Vec<OwnershipRow>>);
-        #[async_trait]
-        impl OwnershipStore for InlineOwn {
-            async fn insert(
-                &self,
-                o: &NewOwnership,
-                now: i64,
-            ) -> Result<OwnershipRow, StoreError> {
-                let row = OwnershipRow::new(
-                    "r".into(),
-                    o.principal_id.clone(),
-                    o.resource_kind.clone(),
-                    o.resource_id.clone(),
-                    o.relationship.clone(),
-                    o.granted_by.clone(),
-                    o.on_behalf_of.clone(),
-                    now,
-                    None,
-                );
-                self.0.lock().unwrap().push(row.clone());
-                Ok(row)
-            }
-            async fn get(&self, _id: &str) -> Result<Option<OwnershipRow>, StoreError> {
-                Ok(None)
-            }
-            async fn revoke_by_id(&self, _id: &str, _now: i64) -> Result<(), StoreError> {
-                Ok(())
-            }
-            async fn revoke_by_on_behalf_of(
-                &self,
-                _u: &PrincipalId,
-                _n: i64,
-            ) -> Result<u64, StoreError> {
-                Ok(0)
-            }
-            async fn list_for_principal(
-                &self,
-                _p: &PrincipalId,
-            ) -> Result<Vec<OwnershipRow>, StoreError> {
-                Ok(vec![])
-            }
-            async fn list_for_resource(
-                &self,
-                _kind: &str,
-                _id: &str,
-            ) -> Result<Vec<OwnershipRow>, StoreError> {
-                Ok(vec![])
-            }
-        }
+        use cheers_server::{MemoryOwnershipStore, NewOwnership, OwnershipStore};
 
         let (app, _verifier_minter, camp_authority, keys, _store) = rig();
         let user = PrincipalId::user("alice");
@@ -489,20 +434,46 @@ mod tests {
         // a scope for `aud`.
         const MINT_AUTHORITY_KID: &str = "camp-y-mint-authority-kid";
         let (mcp_minter, mcp_verifier) = PasetoV4SecretMinter::generate().unwrap();
-        let grants = MemoryGrantStore::new();
-        let ownership = InlineOwn::default();
+        // The grant is a kind-level tuple `kind/grant#cloud:read` read
+        // through a one-relation schema.
+        const GRANT: cheers_core::ResourceSchema = cheers_core::ResourceSchema {
+            kind: "grant",
+            relations: &[],
+            kind_relations: &[cheers_core::RelationDef {
+                name: "cloud:read",
+                membership: true,
+                implies: &[],
+                scopes: &[yah_scopes::CLOUD_READ],
+                grants: &[],
+            }],
+        };
+        let ownership = Arc::new(MemoryOwnershipStore::new());
         let bundles = MemoryBundleStore::with_defaults();
         let aud = "https://kamaji.camp.example";
-        grants.put(
-            prov.principal.id.clone(),
-            aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudRead)],
-        );
+        let scopes = Arc::new(yah_scopes::registry_at([aud]).unwrap());
+        let schema = cheers_core::SchemaRegistry::build(&[GRANT], &scopes).unwrap();
+        ownership
+            .insert(
+                &NewOwnership::new(
+                    prov.principal.id.clone(),
+                    cheers_core::KIND_RESOURCE,
+                    "grant",
+                    "cloud:read",
+                    PrincipalId::service("seed"),
+                    None,
+                )
+                .unwrap(),
+                now_s,
+            )
+            .await
+            .unwrap();
+        let grants = SchemaGrantStore::new(ownership.clone(), Arc::new(schema), scopes.clone());
         let authority = McpAuthority::new(
             mcp_minter,
             bundles,
             grants,
             ownership,
+            scopes,
             "https://cheers.example",
             MINT_AUTHORITY_KID,
         );
@@ -607,7 +578,7 @@ mod tests {
         let now_s = now();
         let d = signed_delegation(&kp, user.clone(), "c", now_s, now_s + 600);
         // MCP bearer with WRONG scope (CloudRead, not CampAdmin).
-        let token = mint_warden_mcp(&minter, vec![Scope::CloudRead], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CLOUD_READ], now_s);
         let body = CreateCampBootstrapBody {
             bound_to: user,
             desired_id: "c".into(),
@@ -643,7 +614,7 @@ mod tests {
         let now_s = now();
         // Delegation already expired (expires_at <= now).
         let d = signed_delegation(&kp, user.clone(), "c", now_s - 200, now_s - 100);
-        let token = mint_warden_mcp(&minter, vec![Scope::CampAdmin], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CAMP_ADMIN], now_s);
         let body = CreateCampBootstrapBody {
             bound_to: user,
             desired_id: "c".into(),
@@ -669,7 +640,7 @@ mod tests {
         // Deliberately NOT registered.
         let now_s = now();
         let d = signed_delegation(&kp, user.clone(), "c", now_s, now_s + 600);
-        let token = mint_warden_mcp(&minter, vec![Scope::CampAdmin], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CAMP_ADMIN], now_s);
         let body = CreateCampBootstrapBody {
             bound_to: user,
             desired_id: "c".into(),
@@ -697,7 +668,7 @@ mod tests {
         let mut d = signed_delegation(&kp, user.clone(), "c", now_s, now_s + 600);
         // Mutate the signature so the trusted-key check passes but verify fails.
         d.signature[0] ^= 0x01;
-        let token = mint_warden_mcp(&minter, vec![Scope::CampAdmin], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CAMP_ADMIN], now_s);
         let body = CreateCampBootstrapBody {
             bound_to: user,
             desired_id: "c".into(),
@@ -729,7 +700,7 @@ mod tests {
         // Delegation says bob authorised camp `c`.
         let d = signed_delegation(&kp_b, user_b.clone(), "c", now_s, now_s + 600);
         // Request asks for alice instead.
-        let token = mint_warden_mcp(&minter, vec![Scope::CampAdmin], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CAMP_ADMIN], now_s);
         let body = CreateCampBootstrapBody {
             bound_to: user_a,
             desired_id: "c".into(),
@@ -761,7 +732,7 @@ mod tests {
         let d1 = signed_delegation(&kp, user.clone(), "dup", now_s, now_s + 600);
         let d2 = signed_delegation(&kp, user.clone(), "dup", now_s + 10, now_s + 700);
 
-        let token = mint_warden_mcp(&minter, vec![Scope::CampAdmin], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CAMP_ADMIN], now_s);
         let make_req = |d: UserDelegation, t: &str| {
             let body = CreateCampBootstrapBody {
                 bound_to: user.clone(),
@@ -791,7 +762,7 @@ mod tests {
         // surfaces that as 400 with a JSON-decode error.
         let (app, minter, _, _, _) = rig();
         let now_s = now();
-        let token = mint_warden_mcp(&minter, vec![Scope::CampAdmin], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CAMP_ADMIN], now_s);
         let raw_body = format!(
             r#"{{
                 "bound_to":"alice",
@@ -840,7 +811,7 @@ mod tests {
         trust_key(&keys, &user, *kp.pk);
         let now_s = now();
         let d = signed_delegation(&kp, user.clone(), "c-encoded", now_s, now_s + 600);
-        let token = mint_warden_mcp(&minter, vec![Scope::CampAdmin], now_s);
+        let token = mint_warden_mcp(&minter, vec![yah_scopes::CAMP_ADMIN], now_s);
         let body = CreateCampBootstrapBody {
             bound_to: user.clone(),
             desired_id: "c-encoded".into(),

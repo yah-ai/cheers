@@ -23,6 +23,7 @@
 //!    (`user_a_querying_user_b_audit_is_403`).
 
 use std::sync::Arc;
+use cheers_core::yah_scopes;
 
 use axum::Router;
 use axum::body::Body;
@@ -115,7 +116,7 @@ fn record_json(method: &str, request_id: &str, aud: &str) -> serde_json::Value {
 async fn batch_post_100_records_all_landed() {
     let (app, minter, store) = rig();
     let now = now();
-    let token = mint_service_token(&minter, now, vec![Scope::AuditWrite], "jti-100");
+    let token = mint_service_token(&minter, now, vec![yah_scopes::AUDIT_WRITE], "jti-100");
 
     let batch: Vec<serde_json::Value> = (0..100)
         .map(|i| record_json("POST /cloud/deploy", &format!("rid-{i}"), "https://kamaji.example"))
@@ -155,7 +156,7 @@ async fn batch_post_100_records_all_landed() {
 async fn forbidden_shape_returns_400_and_backed_off_retry_succeeds() {
     let (app, minter, store) = rig();
     let now = now();
-    let token = mint_service_token(&minter, now, vec![Scope::AuditWrite], "jti-bad");
+    let token = mint_service_token(&minter, now, vec![yah_scopes::AUDIT_WRITE], "jti-bad");
 
     // First call: one record has an empty `aud` — atomic batch rejection.
     let mut bad_batch: Vec<serde_json::Value> = (0..3)
@@ -200,7 +201,7 @@ async fn missing_audit_write_returns_403_before_any_store_call() {
     let (app, minter, store) = rig();
     let now = now();
     // CloudDeploy is held; AuditWrite is not.
-    let token = mint_service_token(&minter, now, vec![Scope::CloudDeploy], "jti-noscope");
+    let token = mint_service_token(&minter, now, vec![yah_scopes::CLOUD_DEPLOY], "jti-noscope");
 
     let batch = serde_json::Value::Array(vec![record_json(
         "POST /x",
@@ -245,7 +246,7 @@ async fn seed_for(store: &MemoryAuditStore, sub: &PrincipalId, count: i64, tag: 
                 Some("camp-a".into()),
                 "https://kamaji.example",
                 "cloud.deploy",
-                vec![Scope::CloudDeploy],
+                vec![yah_scopes::CLOUD_DEPLOY],
                 "allow",
                 format!("{tag}-deploy-{i}"),
             )
@@ -318,7 +319,7 @@ async fn dashboard_service_reads_another_users_audit() {
         &minter,
         now,
         PrincipalId::service("w127-dashboard"),
-        vec![Scope::AuditRead],
+        vec![yah_scopes::AUDIT_READ],
         "jti-dash",
     );
     let (status, body) =
@@ -348,7 +349,7 @@ async fn user_a_querying_user_b_audit_is_403() {
         &minter,
         now,
         PrincipalId::user("alice"),
-        vec![Scope::AuditRead],
+        vec![yah_scopes::AUDIT_READ],
         "jti-a-reads-b",
     );
     let (status, body) = get_audit(&app, &token, "/audit/by-on-behalf-of/user:bob").await;
@@ -370,7 +371,7 @@ async fn user_reads_their_own_audit() {
     let alice = PrincipalId::user("alice");
     seed_for(&store, &alice, 2, "alice").await;
 
-    let token = mint_token_for(&minter, now, alice, vec![Scope::AuditRead], "jti-self");
+    let token = mint_token_for(&minter, now, alice, vec![yah_scopes::AUDIT_READ], "jti-self");
     let (status, body) =
         get_audit(&app, &token, "/audit/by-on-behalf-of/user:alice").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -388,7 +389,7 @@ async fn read_without_audit_read_scope_is_403_insufficient_scope() {
         &minter,
         now,
         PrincipalId::service("kamaji"),
-        vec![Scope::AuditWrite],
+        vec![yah_scopes::AUDIT_WRITE],
         "jti-noread",
     );
     let (status, body) =
@@ -423,7 +424,7 @@ async fn since_and_method_prefix_narrow_the_page() {
         &minter,
         now,
         PrincipalId::service("w127-dashboard"),
-        vec![Scope::AuditRead],
+        vec![yah_scopes::AUDIT_READ],
         "jti-filters",
     );
 
@@ -473,7 +474,7 @@ async fn cursor_paging_walks_the_whole_history_exactly_once() {
         &minter,
         now,
         PrincipalId::service("w127-dashboard"),
-        vec![Scope::AuditRead],
+        vec![yah_scopes::AUDIT_READ],
         "jti-paging",
     );
 
@@ -509,7 +510,7 @@ async fn malformed_cursor_is_400_not_a_silent_first_page() {
         &minter,
         now,
         PrincipalId::service("w127-dashboard"),
-        vec![Scope::AuditRead],
+        vec![yah_scopes::AUDIT_READ],
         "jti-badcursor",
     );
     let (status, body) = get_audit(
@@ -533,7 +534,7 @@ async fn non_user_path_principal_is_400() {
         &minter,
         now,
         PrincipalId::service("w127-dashboard"),
-        vec![Scope::AuditRead],
+        vec![yah_scopes::AUDIT_READ],
         "jti-badpath",
     );
 
@@ -556,7 +557,7 @@ async fn ingested_rows_are_readable_back_through_the_read_route() {
     // then read back over HTTP.
     let (app, minter, _store) = rig();
     let now = now();
-    let write_token = mint_service_token(&minter, now, vec![Scope::AuditWrite], "jti-e2e-w");
+    let write_token = mint_service_token(&minter, now, vec![yah_scopes::AUDIT_WRITE], "jti-e2e-w");
     let batch = serde_json::Value::Array(vec![record_json(
         "cloud.deploy",
         "rid-e2e",
@@ -579,7 +580,7 @@ async fn ingested_rows_are_readable_back_through_the_read_route() {
         &minter,
         now,
         PrincipalId::user("alice"),
-        vec![Scope::AuditRead],
+        vec![yah_scopes::AUDIT_READ],
         "jti-e2e-r",
     );
     let (status, body) =

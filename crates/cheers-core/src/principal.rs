@@ -20,30 +20,49 @@
 //! Use [`Principal::try_new`] to construct from owned parts; the validation
 //! path is the same.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
-/// The three principal kinds MCP auth recognises.
+use crate::UserId;
+
+/// The principal kinds cheers recognises: the three MCP auth kinds, plus
+/// `Key` — a non-user known only by its Ed25519 public key (knock.md, "A
+/// non-user is its key").
 ///
 /// See `.yah/docs/working/mcp-auth-and-ownership.md` §Principal kinds for the
 /// audit-trail / revocation-cascade / grant-constraint reasoning behind the
 /// split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum PrincipalKind {
     User,
     Service,
     Camp,
+    /// Id is the 32-byte Ed25519 public key, base64url without padding — the
+    /// spelling the JWKS `x` member uses for the same bytes.
+    Key,
 }
 
 impl PrincipalKind {
-    /// The wire prefix used in `sub` claims: `user`, `svc`, `camp`.
+    /// The wire prefix used in `sub` claims: `user`, `svc`, `camp`, `key`.
     pub const fn prefix(self) -> &'static str {
         match self {
             Self::User => "user",
             Self::Service => "svc",
             Self::Camp => "camp",
+            Self::Key => "key",
         }
+    }
+
+    /// `true` for the kinds that hold resource membership in a
+    /// [`SetSnapshot`](crate::SetSnapshot) and get a
+    /// [`Revoked::Membership`](crate::Revoked::Membership) when they lose it:
+    /// users and keys. Services and camps act on a user's behalf and are not
+    /// listed.
+    pub const fn is_member_kind(self) -> bool {
+        matches!(self, Self::User | Self::Key)
     }
 
     /// Inverse of [`prefix`](Self::prefix). Returns `None` for any other
@@ -53,6 +72,7 @@ impl PrincipalKind {
             "user" => Self::User,
             "svc" => Self::Service,
             "camp" => Self::Camp,
+            "key" => Self::Key,
             _ => return None,
         })
     }
@@ -67,10 +87,12 @@ impl std::fmt::Display for PrincipalKind {
 /// Typed `sub`-claim shape — a principal kind paired with an opaque id.
 ///
 /// Wire format is the single string `<prefix>:<id>` (e.g. `user:alice`,
-/// `svc:yubaba-1`, `camp:abc`). [`Serialize`] writes that string;
-/// [`Deserialize`] / [`FromStr`](std::str::FromStr) parse it back and reject
-/// unprefixed input.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `svc:yubaba-1`, `camp:abc`, `key:<base64url>`). [`Serialize`] writes that
+/// string; [`Deserialize`] / [`FromStr`](std::str::FromStr) parse it back and
+/// reject unprefixed input, and a `key:` id that is not exactly 32 bytes.
+///
+/// Ordered by `(kind, id)`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrincipalId {
     pub kind: PrincipalKind,
     pub id: String,
@@ -95,6 +117,34 @@ impl PrincipalId {
     pub fn camp(id: impl Into<String>) -> Self {
         Self::new(PrincipalKind::Camp, id)
     }
+
+    /// A `Key` principal from its id's wire spelling. Refuses any id that is
+    /// not base64url-no-pad of exactly 32 bytes, so one key has one spelling.
+    pub fn key(id: impl Into<String>) -> Result<Self, PrincipalIdParseError> {
+        let id = id.into();
+        match URL_SAFE_NO_PAD.decode(id.as_bytes()) {
+            Ok(bytes) if bytes.len() == 32 => Ok(Self::new(PrincipalKind::Key, id)),
+            _ => Err(PrincipalIdParseError::InvalidKey(id)),
+        }
+    }
+
+    /// A `Key` principal from the raw Ed25519 public key.
+    pub fn from_public_key(key: &[u8; 32]) -> Self {
+        Self::new(PrincipalKind::Key, URL_SAFE_NO_PAD.encode(key))
+    }
+}
+
+/// A user id is a `User` principal.
+impl From<UserId> for PrincipalId {
+    fn from(user: UserId) -> Self {
+        Self::user(user.as_str())
+    }
+}
+
+impl From<&UserId> for PrincipalId {
+    fn from(user: &UserId) -> Self {
+        Self::user(user.as_str())
+    }
 }
 
 impl std::fmt::Display for PrincipalId {
@@ -108,14 +158,17 @@ impl std::fmt::Display for PrincipalId {
 pub enum PrincipalIdParseError {
     /// No `:` separator — an unprefixed `sub` (the legacy session shape) is
     /// rejected so it cannot be mistaken for a `user:` principal.
-    #[error("sub claim must be prefixed 'user:<id>', 'svc:<id>', or 'camp:<id>' — got '{0}'")]
+    #[error("sub claim must be prefixed 'user:<id>', 'svc:<id>', 'camp:<id>', or 'key:<id>' — got '{0}'")]
     MissingPrefix(String),
-    /// Prefix isn't one of `user`, `svc`, `camp`.
-    #[error("unknown principal kind prefix '{0}' — expected user, svc, or camp")]
+    /// Prefix isn't one of `user`, `svc`, `camp`, `key`.
+    #[error("unknown principal kind prefix '{0}' — expected user, svc, camp, or key")]
     UnknownPrefix(String),
     /// Empty id after the prefix (`"user:"`).
     #[error("empty principal id after prefix")]
     EmptyId,
+    /// A `key:` id that is not base64url-no-pad of exactly 32 bytes.
+    #[error("key principal id must be base64url (no padding) of a 32-byte Ed25519 public key — got '{0}'")]
+    InvalidKey(String),
 }
 
 impl std::str::FromStr for PrincipalId {
@@ -129,6 +182,9 @@ impl std::str::FromStr for PrincipalId {
             .ok_or_else(|| PrincipalIdParseError::UnknownPrefix(prefix.to_owned()))?;
         if id.is_empty() {
             return Err(PrincipalIdParseError::EmptyId);
+        }
+        if kind == PrincipalKind::Key {
+            return Self::key(id);
         }
         Ok(Self {
             kind,
@@ -179,7 +235,7 @@ pub enum PrincipalError {
 /// Invariants (enforced by [`Principal::try_new`] and the [`Deserialize`] impl):
 ///
 /// - `kind == Camp` ⇒ `bound_to == Some(PrincipalId { kind: User, .. })`
-/// - `kind ∈ {User, Service}` ⇒ `bound_to == None`
+/// - `kind ∈ {User, Service, Key}` ⇒ `bound_to == None`
 ///
 /// A `Camp { bound_to: None }` JSON payload is a parse error — see the
 /// roundtrip test in this module.
@@ -206,7 +262,7 @@ impl Principal {
             (PrincipalKind::Camp, Some(b)) if b.kind != PrincipalKind::User => {
                 Err(PrincipalError::CampBoundToWrongKind(b.kind))
             }
-            (PrincipalKind::User | PrincipalKind::Service, Some(_)) => {
+            (PrincipalKind::User | PrincipalKind::Service | PrincipalKind::Key, Some(_)) => {
                 Err(PrincipalError::NonCampHasBoundTo(id.kind))
             }
             _ => Ok(Self {
@@ -251,6 +307,7 @@ mod tests {
             PrincipalKind::User,
             PrincipalKind::Service,
             PrincipalKind::Camp,
+            PrincipalKind::Key,
         ] {
             assert_eq!(PrincipalKind::from_prefix(k.prefix()), Some(k));
         }
@@ -271,6 +328,31 @@ mod tests {
             assert_eq!(pid.to_string(), wire);
             assert_eq!(wire.parse::<PrincipalId>().unwrap(), pid);
         }
+    }
+
+    #[test]
+    fn key_principal_round_trips_and_refuses_non_32_byte_ids() {
+        let raw = [7u8; 32];
+        let pid = PrincipalId::from_public_key(&raw);
+        let wire = pid.to_string();
+        assert_eq!(wire, format!("key:{}", URL_SAFE_NO_PAD.encode(raw)));
+        assert_eq!(wire.parse::<PrincipalId>().unwrap(), pid);
+        assert_eq!(PrincipalId::key(pid.id.clone()).unwrap(), pid);
+        assert_eq!(serde_json::from_str::<PrincipalId>(&serde_json::to_string(&pid).unwrap()).unwrap(), pid);
+
+        let short = URL_SAFE_NO_PAD.encode([7u8; 31]);
+        let long = URL_SAFE_NO_PAD.encode([7u8; 33]);
+        let padded = format!("{}=", URL_SAFE_NO_PAD.encode(raw));
+        let std_alphabet = base64::engine::general_purpose::STANDARD_NO_PAD.encode([0xffu8; 32]);
+        for bad in [short, long, padded, std_alphabet, "not base64!".to_owned()] {
+            assert_eq!(PrincipalId::key(bad.clone()), Err(PrincipalIdParseError::InvalidKey(bad.clone())));
+            assert_eq!(format!("key:{bad}").parse::<PrincipalId>(), Err(PrincipalIdParseError::InvalidKey(bad)));
+        }
+        assert_eq!(
+            Principal::try_new(pid.clone(), Some(PrincipalId::user("u")), PrincipalStatus::Active, 0),
+            Err(PrincipalError::NonCampHasBoundTo(PrincipalKind::Key))
+        );
+        assert!(Principal::try_new(pid, None, PrincipalStatus::Active, 0).is_ok());
     }
 
     #[test]

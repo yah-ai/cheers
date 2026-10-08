@@ -87,7 +87,6 @@
 //!
 //! @yah:relay(R727, "Persistent single-use magic-link jti storage: a UsedJtiStore impl that survives process restart")
 //! @yah:at(2026-09-11T20:49:54Z)
-//! @yah:status(open)
 //! @yah:assignee(agent:bundle-anthropic-ashguard)
 //! @yah:next("Umbrella for the persistent UsedJtiStore work. The defect, the layering question, the ordering constraint that must not break, and the acceptance test are all on the child bug. Downstream consumer: noisetable camp ticket R131-B26.")
 //!
@@ -130,6 +129,8 @@ pub mod migrate;
 mod util;
 
 pub mod audit_store;
+pub mod binding_sequence_store;
+pub mod knock_store;
 pub mod ownership_store;
 pub mod passkey_store;
 pub mod refresh_store;
@@ -144,6 +145,8 @@ pub use error::map_turso_error;
 pub use migrate::{MigrateError, Migration, MIGRATIONS};
 
 pub use audit_store::TursoAuditStore;
+pub use binding_sequence_store::TursoBindingSequenceStore;
+pub use knock_store::TursoKnockStore;
 pub use ownership_store::TursoOwnershipStore;
 pub use passkey_store::TursoPasskeyCredentialStore;
 pub use refresh_store::TursoRefreshStore;
@@ -215,6 +218,10 @@ impl AccountStores {
 
     pub fn user_tokens(&self) -> TursoUserTokenStore {
         TursoUserTokenStore::new(self.conn.clone())
+    }
+
+    pub fn binding_sequences(&self) -> TursoBindingSequenceStore {
+        TursoBindingSequenceStore::new(self.conn.clone())
     }
 }
 

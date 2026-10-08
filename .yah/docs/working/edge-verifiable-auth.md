@@ -76,6 +76,16 @@ Promote store.rs's "the product wires up the check" note into:
 Eventually-consistent by documented contract; short access TTL is the bound.
 `EdgeVerifier` checks the reader; `SessionAuthority` writes on logout/device-revoke.
 
+> **Superseded in part by R732-F6 (2026-10-06).** Entries are now
+> `Revoked::{Jti, Device, Membership{kind,id,user}}`; the writer is
+> `revoke(&Revoked)` + `snapshot()` over a per-store, strictly monotonic epoch;
+> the reader adds `is_device_revoked` / `is_membership_revoked`. The issuer
+> signs the current set (`RevocationPublisher`, PASETO v4.public with implicit
+> assertion `urn:cheers:artifact:revocation-set:v1`), publishes it at
+> `GET /.well-known/revocation-set.json`, and offline peers replicate it with
+> `cheers_verify::ReplicatedRevocations`. For standing credentials (noisetable
+> W235 §5.1) revocation, not TTL, is the only bound.
+
 ### 5. Guide by omission — routing stays out of the identity token
 Do **not** add a shard/routing field to `Claims`. Routing metadata (which Yubaba
 shard holds a user's data) travels as a separate plaintext hint (cookie /
@@ -129,6 +139,101 @@ Layering, for the consumer that drove this (noisetable society rooms): the
 Ed25519 roster is layer 1 and remains the *only* admission door. A bound user
 token is layer 2 — it may only ADD a claim about which human a machine key
 belongs to. It must never become a second way in.
+
+> **Amended by R732-F5 (2026-10-06).** "Still checks a week-old token" above
+> was false: a bound access token carries the 15-minute `exp` and the edge
+> refuses it after that. The LAN credential is now the standing binding (§7).
+
+### 7. Standing node binding — offline admission lasts until revoked (R732-F5)
+
+Noisetable W235 §0.1: no credential expiry may refuse a working setup when no
+fresher credential is reachable. This amends the short-TTL rule (§3) for
+**standing edge credentials only**; browser and API access tokens keep 15
+minutes.
+
+- **Wire.** `cheers_core::StandingBinding { issuer, sub, device, peer_key, seq,
+  iat, jti, <lease> }` — the [Lease](#lease-r734-f5) flattened in, with no
+  `exp` today. A `SignedArtifact` with implicit
+  assertion `urn:cheers:artifact:standing-binding:v1`, so it never verifies as
+  an access token and no access token verifies as it.
+- **Mint.** `SessionAuthority::establish_bound` / `rotate_bound` with
+  `DeviceBinding::LanPair` return it in `NewSession::standing`, minted by the
+  configured `StandingBinder` (issuer key + kid + `BindingSequenceStore`). An
+  authority without a binder refuses a bound LanPair session
+  (`Error::NoStandingBinder`) instead of handing out only a 15-minute token.
+- **Ordering.** `seq` is a per-device sequence on the issuer, advanced by
+  `max(prev + 1, now)` in one upsert (`binding_sequences`, migration 0011).
+  The clock floor keeps a restored-from-backup issuer above what edges hold.
+  Nothing orders bindings by `iat`.
+- **Door.** `cheers_verify::StandingVerifier::verify_standing_at(token,
+  presented, now)`: issuer signature (pinned key or JWKS issuer-role key), peer
+  key equals `presented`, not superseded (`BindingLedger`: highest `seq` seen
+  per device, only ever raised), `jti` and device not revoked
+  (`ReplicatedRevocations` offline). The lease only sets
+  `VerifiedStanding::lease`; see [Lease](#lease-r734-f5).
+- **Offline restart.** The edge persists `IssuerTrust::export()`,
+  `BindingLedger::export()` and `ReplicatedRevocations::export()` beside its
+  bindings and rebuilds from them at boot, never from a fetch it cannot make.
+- **Key rotation.** Pre-publish a new issuer kid before it signs; keep a
+  retired kid published (verify-only) until every binding it signed is
+  superseded or revoked. Removing a kid means compromise and invalidates its
+  bindings. Under that rule a fetched JWKS never lacks a kid a held credential
+  needs, so retiring a kid never strands a working offline edge.
+
+### 8. Membership snapshot — who holds what on a resource, offline (R732-F4)
+
+The second standing credential of W235 §5.1, under the same §7 rules: no `exp`,
+lease advisory ([Lease](#lease-r734-f5)), same offline-restart and
+key-rotation rules.
+
+- **Wire.** `cheers_core::SetSnapshot { issuer, kind, id, epoch, members, iat,
+  <lease> }`, with `SnapshotMember { user, relation, via }`. Implicit
+  assertion `urn:cheers:artifact:set-snapshot:v1`. Members are user
+  principals only, closure-expanded (one entry per relation held, so an edge
+  checks `member` by exact lookup) and sets flattened, and list only
+  relations the schema marks `RelationDef::membership` (R734-B6). `via` lists the
+  resources where the user's own direct tuples sit that the relation derives
+  from.
+- **Epoch.** The issuer's store-wide `ownership_version` (migration 0013),
+  advanced to `max(v + 1, now)` in the transaction of every row change.
+  `SnapshotIssuer::mint` brackets the closure walk with two reads of it and
+  retries on a mismatch, so equal epochs mean equal members.
+- **Revocation.** `cheers_server::revoke_ownership` records
+  `Revoked::Membership { kind, id, user, at_epoch }` when a user's last
+  direct tuple on `(kind, id)` goes; `revoke_principal_ownership` does the
+  same for every resource of a deleted user. An edge drops a member entry only when
+  every `via` resource is revoked for that user above the snapshot's epoch.
+  A demotion or a removed set tuple reaches the edge only in a newer snapshot.
+- **Door.** `cheers_verify::SnapshotVerifier::verify_snapshot_at(token, now)`
+  checks the issuer signature, then supersession (`SnapshotLedger`: the
+  highest epoch seen per resource, only ever raised), then masks members.
+  `VerifiedSnapshot::holds(user, relation)` answers admission questions.
+
+### Lease (R734-F5)
+
+One standard for "this credential should be renewed, and maybe lapses".
+`cheers_core::Lease { refresh_after, exp: Option }` is flattened into the
+artifact, so the wire is `"refresh_after": N` and, only when set, `"exp": N`.
+`Lease::new(iat, refresh_after, exp)` builds it; `Lease::state_at(now)` reads
+it as `LeaseState`:
+
+| `now` | State |
+|---|---|
+| `< refresh_after` | `Current` |
+| `refresh_after <= now < exp` | `Warning { exp }` |
+| `>= exp` | `Expired` (never, when `exp` is `None`) |
+
+A due lease with no `exp` reads `Warning { exp: None }`. When `exp` is set,
+`iat < refresh_after <= iat + (exp - iat) / 2`: the holder gets at least half
+the lease as warning. Construction (`LeaseError`) and verification
+(`StandingError::Lease`, `SnapshotError::Lease`) both refuse a lease that
+breaks it; with no `exp` there is no constraint. `VerifiedStanding` and
+`VerifiedSnapshot` expose `lease: LeaseState`.
+
+cheers only computes the state; it never notifies anyone. Consumers monitor
+`lease` and surface the warning. Standing bindings and snapshots carry no
+`exp`. The `Admit` of knock.md (R734-F2, not built yet) is the first artifact
+with `exp` set.
 
 ## Consumer mapping (yah side)
 

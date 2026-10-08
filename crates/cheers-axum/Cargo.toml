@@ -34,14 +34,16 @@ all-features = true
 # etc. This crate stays product-agnostic — no cookie domain hardcoding,
 # no DATABASE_URL, no yubaba coupling.
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.42" }
-cheers-server = { path = "../cheers-server", version = "0.8.42" }
+cheers-core = { path = "../cheers-core", version = "0.8.43" }
+cheers-server = { path = "../cheers-server", version = "0.8.43" }
+# R731-F6 — KeySetVerifier (key roles + JWKS cache) for McpAuthState.
+cheers-verify = { path = "../cheers-verify", version = "0.8.43" }
 # Optional — only pulled in under the `google`/`apple` features. Published as
 # `cheers-providers` (the plain `cheers` name is squatted); the alias keeps
 # `use cheers::…` in this crate's source unchanged. NOTE: an optional dep is
 # still retained in the published manifest and must resolve from the registry,
 # so this edge is load-bearing for publishing even when the feature is off.
-cheers = { package = "cheers-providers", path = "../cheers", version = "0.8.42", default-features = false, optional = true }
+cheers = { package = "cheers-providers", path = "../cheers", version = "0.8.43", default-features = false, optional = true }
 
 # axum 0.8 (hyper 1 / http 1) — dedupes against reqwest's hyper 1 in the tree.
 # default = ["json", "tokio", "http1", "matched-path", "original-uri", "form", "query", "tracing"] is
@@ -126,6 +128,9 @@ pollster = "0.4"
 # end-to-end against the bootstrap route. Same crate cheers-server's camp
 # module uses; the workspace dedupes against pasetors's transitive dep.
 ed25519-compact = { version = "2", default-features = false }
+# pasetors (dev only) — token_endpoint_basic signs a service principal's
+# PASETO v4.public client assertion, exactly as a real client would.
+pasetors = "0.7"
 
 [features]
 default = []

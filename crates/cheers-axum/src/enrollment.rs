@@ -42,11 +42,10 @@
 //!
 //! `granted_by` on the inserted row is [`ENROLLMENT_GRANTED_BY`] (a fixed
 //! `svc:` principal identifying "the enrollment route wrote this," not any
-//! externally-presentable credential — [`NewOwnership::new`] requires
-//! `granted_by` to be a service principal, and this route satisfies that
-//! in-process rather than by verifying a service-held token). `on_behalf_of`
-//! is set to the same authenticated user so `OwnershipStore::
-//! revoke_by_on_behalf_of`'s user-deletion cascade sweeps the row.
+//! externally-presentable credential: the service writes in-process under
+//! its own identity, D4). The row's holder is the authenticated user, so
+//! `OwnershipStore::revoke_by_principal`'s holder cascade sweeps it when the
+//! account goes away; `on_behalf_of` is the same user, as attribution only.
 //!
 //! Idempotent create, mirroring [`crate::ownership::create`]: repairing the
 //! same device converges on one live row (200), not a stack of duplicates.
@@ -107,8 +106,7 @@ pub const OWNS_RELATIONSHIP: &str = "owns";
 /// Fixed internal service principal this route writes `granted_by` as.
 ///
 /// Not a credential — never presented on the wire, never verified as a
-/// bearer. It exists purely to satisfy [`NewOwnership::new`]'s invariant
-/// that `granted_by` is always a service principal; the actual authorization
+/// bearer. It attributes the write to the enrollment service; the actual authorization
 /// decision is "did the caller present a valid, unexpired, unrevoked user
 /// session bearer" (checked by [`authenticate`] before this constant is ever
 /// touched).
@@ -216,10 +214,13 @@ where
         .store
         .list_for_resource(&new.resource_kind, &new.resource_id)
         .await?;
+    // Only rows held by a principal are a previous owner's; a subject-set row
+    // on the node (R732-F1) is not swept by a re-pair.
     for stale in holders.iter().filter(|r| {
         !r.is_revoked()
             && r.relationship == new.relationship
-            && r.principal_id != new.principal_id
+            && r.subject.principal().is_some()
+            && r.subject != new.subject
     }) {
         state.store.revoke_by_id(&stale.id, now).await?;
     }
@@ -229,12 +230,12 @@ where
     // resource-scoped listing from the sweep above.
     if let Some(row) = holders.into_iter().find(|r| {
         !r.is_revoked()
-            && r.principal_id == new.principal_id
+            && r.subject == new.subject
             && r.relationship == new.relationship
     }) {
         return Ok((StatusCode::OK, Json(row)));
     }
-    let row = state.store.insert(&new, now).await?;
+    let row = state.store.insert(&new, now).await?.row;
     Ok((StatusCode::CREATED, Json(row)))
 }
 

@@ -24,16 +24,50 @@
 //! this crate (the edge holds
 //! [`PasetoV4PublicVerifier`](cheers_verify::PasetoV4PublicVerifier), never a
 //! minter).
+//!
+//! @yah:ticket(R731-F3, "Relationship schema with derived grants — mint walks live tuples through the schema (D2)")
+//! @yah:status(review)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:at(2026-10-06T23:18:35Z)
+//! @yah:phase(P1)
+//! @yah:parent(R731)
+//! @yah:next("Doc D2. Per resource kind the product declares relations, what each implies, the scopes each unlocks, and which relations a holder may grant and revoke on the same resource (the D4 authority).")
+//! @yah:next("GrantStore becomes a derived view of the ownership table. Delete hand-coded impls as consumers move (noisetable PublishGrants). Lean: no direct-scope escape hatch until a consumer needs one.")
+//! @yah:next("Decide here: how a machine writer such as yubaba gets grant authority over a resource it just created. Lean a kind-level relation (provisioner on kind service grants owns on any service) over parent relations.")
+//! @yah:next("The check stays at mint (TTL at most 1 h); ownership_version stays deferred.")
+//! @yah:verify("mint paths derive scopes from tuples through the schema; admin does not imply read unless the schema says so.")
+//! @yah:depends_on(R731-F2)
+//! @yah:tier(Wizard)
+//! @yah:next("F3 DESIGN DECIDED (leader, 2026-10-06), in cheers-core beside ScopeRegistry. (1) Products declare const data: `ResourceSchema { kind, relations: &[RelationDef], kind_relations: &[RelationDef] }` with `RelationDef { name, membership: true, implies: &[&str], scopes: &[Scope], grants: &[&str] }`. (2) `SchemaRegistry::build(&[ResourceSchema], &ScopeRegistry)` validates at startup: every implies/grants target is declared in the same kind, the implies graph is acyclic, every scope is registered, and duplicates are refused. It precomputes each relation's implies-closure. (3) The closure applies to BOTH scopes and grant rights: a holder of admin, where admin implies triager, holds triager, so it gets triager's scopes and grants. Nothing is implied unless the schema says so. (4) Kind-level relations (the yubaba provisioner case) are stored as tuples on the reserved resource_kind `kind` with resource_id = the kind name, e.g. `kind/service#provisioner`. A kind_relation's grants apply to every resource of that kind and its scopes unlock as usual. No parent relations, no wildcard ids.")
+//! @yah:gotcha("F3 DERIVATION + AUTHORITY DECIDED (leader). (5) `SchemaGrantStore<O: OwnershipStore>` implements GrantStore: list_for(principal, aud) = the principal's live rows, expanded through the schema closure, scopes filtered by ScopeRegistry::is_valid_at(aud), returned as ScopeOrBundle::Scope. Empty output means the mint rejects, as today. Rows whose resource_kind has no schema are ignored by derivation (camp `owns` rows still serve the owns claim at mcp_authority ~327/610/733). An unknown relation on a known kind is skipped with tracing::warn. (6) No direct-scope escape hatch. Delete MemoryGrantStore (it has no production constructor in cheers or the yah tree; tests seed tuples through a test schema instead). Keep the GrantStore TRAIT: noisetable's PublishGrants implements it until its phase-4 migration. (7) F3 also ships the pure authority check F8 wires into the router: `SchemaRegistry::may_grant(caller_rows, kind, id, relation) -> bool`. It is true iff the caller holds on (kind,id), by closure, a relation whose grants include `relation`, OR holds on (kind, <kind>) a kind_relation whose grants include it. Revoke uses the same rule. Seed tuples are F8's.")
+//! @yah:handoff("cheers-core/src/schema.rs (new, re-exported from lib.rs): ResourceSchema{kind,relations,kind_relations}, RelationDef{name,implies,scopes,grants}, SchemaRegistry::build(&[ResourceSchema], &ScopeRegistry) -> Result<_, SchemaError> (refuses reserved kind 'kind', duplicate kind/relation, unknown implies/grants target, implies cycle via 3-colour DFS, unregistered scope) and precomputes per-relation closure (ResolvedRelation{scopes, grants}). lookup(kind,id,rel) -> Lookup::{NoSchema,UnknownRelation,Resolved}. KIND_RESOURCE='kind'; kind_relation grants name the kind's per-resource relations.")
+//! @yah:handoff("SchemaRegistry::may_grant<T: RelationTuple>(caller_rows: &[T], kind, id, relation) -> bool lives in cheers-core/src/schema.rs. It takes a RelationTuple trait (not OwnershipRow) because OwnershipRow is in cheers-server; cheers-server/src/ownership.rs implements RelationTuple for OwnershipRow, so F8 calls it with &[OwnershipRow] directly.")
+//! @yah:handoff("cheers-server/src/grants.rs: MemoryGrantStore deleted; SchemaGrantStore<O: OwnershipStore>::new(ownership, Arc<SchemaRegistry>, Arc<ScopeRegistry>) implements GrantStore (live rows -> closure -> is_valid_at(aud) -> ScopeOrBundle::Scope, sorted/deduped; NoSchema ignored; UnknownRelation tracing::warn). GrantStore trait kept. cheers-server gained a tracing dep and lib.rs exports SchemaGrantStore.")
+//! @yah:handoff("EXTRA: ownership.rs adds blanket `impl OwnershipStore for Arc<T>` so SchemaGrantStore and McpAuthority share one table. mcp_authority.rs rows_to_owns now skips resource_kind 'kind' rows: kind-level tuples are authority, not owned resources, and would otherwise leak into owns.extra['kind'].")
+//! @yah:handoff("Tests moved: mcp_authority tests seed scopes as kind/grant#<scope> tuples via a leaked test schema (TestGrants wraps SchemaGrantStore plus a `raw` map that stands in for a hand-coded GrantStore like noisetable's, used only for bundle cases and the unregistered-scope case, which no schema can express). cheers-axum tokens_basic.rs and camps.rs seed tuples through const test schemas. Behaviour changes in 3 tests: derived scopes come back in scope order (2 order asserts updated), and the 'aud with no grant' 403 now checks before any tuple exists, because yah scopes are Audiences::Any so a derived grant is held at every aud.")
+//! @yah:verify("cargo test --workspace in oss/cheers: 683 passed / 0 failed / 3 ignored (baseline 652/0/3, measured before the first edit; the delta includes peer F6 tests).")
+//! @yah:verify("cheers-core schema tests: admin_does_not_imply_read_unless_declared, implied_relations_carry_their_grants, may_grant_rules (incl. revoked row), may_grant_kind_level, build_refuses_bad_schemas, lookup_distinguishes_no_schema_and_unknown_relation. cheers-server grants::tests cover closure+aud filter, unknown kind/relation ignored, revoked confers nothing, and kind-level scopes.")
+//! @yah:handoff("FOLLOW-UP (leader decision): removed Audiences::Any. The enum is now Only(&'static [&'static str]) | BoundAtStartup, and the scopes! arm with no audiences emits BoundAtStartup. ScopeRegistryBuilder::bind_audiences(namespace, auds) binds every BoundAtStartup scope in that namespace; the registry stores the resolved audiences per scope (ScopeRegistry::audiences(scope)), and is_valid_at and validate_grant are exact. build() returns ScopeRegistryError::{Duplicate, Unbound, NoAudiences, UnusedBinding}, replacing DuplicateScope. The UnusedBinding refusal, for a namespace bound but never used, is my own addition: it catches a typo'd namespace.")
+//! @yah:handoff("yah_scopes: every scope is BoundAtStartup. registry() is gone, replaced by NAMESPACES (8), builder() (DEFS preloaded, bind per namespace from config) and registry_at(auds) for single-audience issuers and tests. cheers itself constructs no production registry. The only production site is yah app/yah/cli/src/cloud_cheers.rs::token, now bound to its --aud (one issuer serves one consumer). kamaji-bin builds no registry, so the fence held. The yah-tree compile of cloud_cheers.rs is UNVERIFIED: `cargo check -p yah --tests` is blocked by 23 unrelated pre-existing errors in crates/yah/agent-tools/src/board_tools.rs (TicketStatus::Open etc.), none of them in cheers code.")
+//! @yah:handoff("Tests: scope.rs unbound_or_empty_or_unused_bindings_fail_build; yah_scopes namespaces_cover_defs_and_unbound_fails and a_scope_is_valid_only_where_its_namespace_was_bound; tokens_basic's 403 test is back to its original shape. There a derived cloud:read tuple exists but is refused at the unbound https://not-granted.test (BOUND_AUDS). Product Only scopes behave as before (scope.rs, mcp.rs pinned test). Every test registry now binds the audiences it mints at.")
+//! @yah:verify("cargo test --workspace (oss/cheers) after the audience follow-up: 686 passed / 0 failed / 3 ignored (previous end state 683/0/3).")
+//! @yah:verify("Leader re-verify 2026-10-06, after the Audiences::Any removal: cargo test --workspace (oss/cheers) 686 pass / 0 fail / 3 ignored, no build skew; 0 remaining yah_scopes::registry() or Audiences::Any call sites across cheers, kamaji, passway, yubaba and the yah crates/app.")
+
+use std::sync::Arc;
 
 use cheers_core::{
-    validate_grant, Actor, AuthStrength, CodecError, Error, GrantError, McpClaims, Owns,
-    PrincipalId, PrincipalKind, Scope, StoreError,
+    validate_grant, Actor, AuthStrength, ClientAssertion, CodecError, Error, GrantError,
+    McpClaims, Owns, PrincipalId, PrincipalKind, Scope, ScopeRegistry, StoreError, UsedJtiStore,
 };
+use pasetors::keys::AsymmetricPublicKey;
+use pasetors::token::UntrustedToken;
+use pasetors::version4::{PublicToken, V4};
 
 use crate::bundles::{expand_scopes, BundleExpansionError, BundleStore};
 use crate::codec::PasetoV4SecretMinter;
 use crate::grants::GrantStore;
 use crate::ownership::{OwnershipRow, OwnershipStore};
+use crate::service_principal::{ServicePrincipalStore, SigningKeyStatus};
 use crate::session::generate_jti;
 
 /// TTL defaults for an MCP-call token.
@@ -173,6 +207,55 @@ pub enum McpMintError {
     /// Signing failure inside the codec layer.
     #[error(transparent)]
     Codec(#[from] CodecError),
+    /// [`mint_service`](McpAuthority::mint_service) was called on an
+    /// authority assembled without
+    /// [`with_service_assertions`](McpAuthority::with_service_assertions).
+    /// A wiring bug; surface 500.
+    #[error("service assertions are not configured on this authority")]
+    ServiceAssertionsUnconfigured,
+    /// The client assertion is not a well-formed PASETO v4.public token, has
+    /// no readable footer `kid`, fails signature verification, carries an
+    /// undecodable payload, or has an empty `jti`. Maps to 400
+    /// `invalid_client`.
+    #[error("malformed client assertion: {0}")]
+    AssertionMalformed(String),
+    /// The footer `kid` names no service-principal key cheers holds.
+    #[error("client assertion kid '{0}' is unknown")]
+    AssertionUnknownKid(String),
+    /// The footer `kid` names a key that has been rotated out (`Retiring`).
+    /// Only an ACTIVE key may sign an assertion, even inside the overlap
+    /// window that still publishes it.
+    #[error("client assertion kid '{0}' is a retired key")]
+    AssertionRetiredKey(String),
+    /// `iss` or `sub` is not the service principal that owns the signing key
+    /// (or `iss != sub`).
+    #[error("client assertion names '{iss}'/'{sub}' but kid '{kid}' belongs to '{owner}'")]
+    AssertionPrincipalMismatch {
+        kid: String,
+        owner: PrincipalId,
+        iss: PrincipalId,
+        sub: PrincipalId,
+    },
+    /// `aud` is not this deployment's token endpoint URL.
+    #[error("client assertion aud '{got}' is not the token endpoint '{expected}'")]
+    AssertionBadAudience { got: String, expected: String },
+    /// `exp <= now`.
+    #[error("client assertion expired at {exp} (now {now})")]
+    AssertionExpired { exp: i64, now: i64 },
+    /// `exp - iat` exceeds [`ClientAssertion::MAX_LIFETIME_SECONDS`].
+    #[error("client assertion lifetime {lifetime}s exceeds the {max}s maximum")]
+    AssertionLifetimeTooLong { lifetime: i64, max: i64 },
+    /// The assertion's `jti` was already consumed.
+    #[error("client assertion jti '{0}' was already used")]
+    AssertionReplayed(String),
+    /// The used-jti backend failed; the assertion was neither accepted nor
+    /// rejected. Surface 503.
+    #[error("used-jti store failure: {0}")]
+    JtiStore(String),
+    /// The principal's relationship-derived scopes for `aud`, intersected
+    /// with the request, are empty. Maps to 400 `invalid_scope`.
+    #[error("principal '{principal}' holds none of the requested scopes for aud '{aud}'")]
+    NoGrantedScopes { principal: String, aud: String },
 }
 
 impl From<McpMintError> for Error {
@@ -206,12 +289,25 @@ pub struct McpAuthority<B, G, O> {
     bundles: B,
     grants: G,
     ownership: O,
+    /// The deployment's scope vocabulary. Every scope a mint path is about to
+    /// sign runs through [`validate_grant`] against it.
+    scopes: Arc<ScopeRegistry>,
     iss: String,
     /// `kid` stamped into every minted token's PASETO footer (R592-B7 wire
     /// convention) — identifies which published key `minter` signs with, so
     /// an edge verifier's JWKS/footer lookup can find the matching pubkey.
     kid: String,
     policy: McpPolicy,
+    /// Service-principal key table + used-jti ledger for
+    /// [`mint_service`](Self::mint_service). `None` until
+    /// [`with_service_assertions`](Self::with_service_assertions).
+    service: Option<ServiceAssertions>,
+}
+
+/// What [`McpAuthority::mint_service`] needs beyond the user-facing paths.
+struct ServiceAssertions {
+    keys: Arc<dyn ServicePrincipalStore>,
+    used_jtis: Arc<dyn UsedJtiStore>,
 }
 
 impl<B, G, O> McpAuthority<B, G, O>
@@ -230,6 +326,7 @@ where
         bundles: B,
         grants: G,
         ownership: O,
+        scopes: Arc<ScopeRegistry>,
         iss: impl Into<String>,
         kid: impl Into<String>,
     ) -> Self {
@@ -238,9 +335,11 @@ where
             bundles,
             grants,
             ownership,
+            scopes,
             iss: iss.into(),
             kid: kid.into(),
             policy: McpPolicy::default(),
+            service: None,
         }
     }
 
@@ -252,6 +351,27 @@ where
 
     pub fn policy(&self) -> &McpPolicy {
         &self.policy
+    }
+
+    /// Enable [`mint_service`](Self::mint_service): `keys` resolves an
+    /// assertion's footer `kid` to a service-principal signing key, and
+    /// `used_jtis` consumes each assertion `jti` exactly once.
+    pub fn with_service_assertions(
+        mut self,
+        keys: Arc<dyn ServicePrincipalStore>,
+        used_jtis: Arc<dyn UsedJtiStore>,
+    ) -> Self {
+        self.service = Some(ServiceAssertions { keys, used_jtis });
+        self
+    }
+
+    /// The URL a client assertion's `aud` must name: `<issuer>/token`.
+    pub fn token_endpoint(&self) -> String {
+        format!("{}/token", self.iss.trim_end_matches('/'))
+    }
+
+    pub fn scopes(&self) -> &ScopeRegistry {
+        &self.scopes
     }
 
     pub fn issuer(&self) -> &str {
@@ -305,7 +425,7 @@ where
 
         let scopes = expand_scopes(&self.bundles, &entries).await?;
         for s in &scopes {
-            validate_grant(user.kind, *s)?;
+            validate_grant(&self.scopes, user.kind, s, &aud)?;
         }
 
         let owns = match &camp_id {
@@ -420,7 +540,7 @@ where
 
         let effective = expand_scopes(&self.bundles, &entries).await?;
         for s in &effective {
-            validate_grant(user.kind, *s)?;
+            validate_grant(&self.scopes, user.kind, s, &aud)?;
         }
 
         let scopes = attenuate(requested, effective, &user, &aud)?;
@@ -489,9 +609,9 @@ where
 
         let mut ceiling: Vec<Scope> = Vec::with_capacity(held.len());
         for s in held {
-            validate_grant(user.kind, *s)?;
+            validate_grant(&self.scopes, user.kind, s, &aud)?;
             if !ceiling.contains(s) {
-                ceiling.push(*s);
+                ceiling.push(s.clone());
             }
         }
 
@@ -565,7 +685,7 @@ where
     ///
     /// Same pipeline as [`mint_user_fresh`](Self::mint_user_fresh): grants →
     /// [`expand_scopes`] → [`validate_grant`] per scope (rule (4) defence —
-    /// catches a bundle that smuggles `ownership:write` into a camp grant) →
+    /// catches a bundle that smuggles `audit:write` into a camp grant) →
     /// ownership lookup → sign with `mint_mcp`.
     pub async fn mint_bootstrap(
         &self,
@@ -591,7 +711,7 @@ where
 
         let scopes = expand_scopes(&self.bundles, &entries).await?;
         for s in &scopes {
-            validate_grant(camp.kind, *s)?;
+            validate_grant(&self.scopes, camp.kind, s, &aud)?;
         }
 
         let rows = self.ownership.list_for_principal(&camp).await?;
@@ -685,7 +805,7 @@ where
         }
         let user_scopes = expand_scopes(&self.bundles, &user_entries).await?;
         for s in &user_scopes {
-            validate_grant(user.kind, *s)?;
+            validate_grant(&self.scopes, user.kind, s, &aud)?;
         }
 
         // (2) Camp side — same rule (5) check. Even though the result is
@@ -700,7 +820,7 @@ where
         }
         let camp_scopes = expand_scopes(&self.bundles, &camp_entries).await?;
         for s in &camp_scopes {
-            validate_grant(camp.kind, *s)?;
+            validate_grant(&self.scopes, camp.kind, s, &aud)?;
         }
 
         // (3) RFC 8693 — every requested scope must be in BOTH principals'
@@ -709,7 +829,7 @@ where
         for s in &requested_scope {
             if !user_scopes.contains(s) || !camp_scopes.contains(s) {
                 return Err(McpMintError::InvalidScope {
-                    scope: *s,
+                    scope: s.clone(),
                     aud: aud.clone(),
                 });
             }
@@ -742,7 +862,142 @@ where
         let token = self.minter.mint_mcp(&claims, &self.kid)?;
         Ok(MintedMcpToken { token, claims })
     }
+
+    /// **Mint path 5** — service principal via RFC 7523 client assertion
+    /// (R731-F4, doc D3).
+    ///
+    /// `assertion` is a PASETO v4.public token carrying [`ClientAssertion`]
+    /// claims, signed by one of the principal's own ACTIVE keys and naming it
+    /// in the footer `kid`. Checks, in order: footer kid → key known → key
+    /// active → signature → `iss == sub ==` the key's owner → `aud ==`
+    /// [`token_endpoint`](Self::token_endpoint) → `exp > now` →
+    /// `exp - iat <= 300s` → `jti` consumed (replay rejected). Each failure is
+    /// its own [`McpMintError`] variant.
+    ///
+    /// Scopes are the principal's relationship-derived grants for `aud`
+    /// intersected with `requested_scopes` (an empty request takes every held
+    /// scope); an empty result is [`McpMintError::NoGrantedScopes`]. The
+    /// access token is signed by cheers's issuer key with `sub = svc:<id>`,
+    /// TTL `min(policy.access_ttl, 1h)`, and no ceiling.
+    pub async fn mint_service(
+        &self,
+        assertion: &str,
+        aud: impl Into<String>,
+        requested_scopes: &[Scope],
+        now: i64,
+    ) -> Result<MintedMcpToken, McpMintError> {
+        let aud = aud.into();
+        let svc = self
+            .service
+            .as_ref()
+            .ok_or(McpMintError::ServiceAssertionsUnconfigured)?;
+        let malformed = |m: &str| McpMintError::AssertionMalformed(m.to_owned());
+
+        let untrusted = UntrustedToken::<pasetors::token::Public, V4>::try_from(assertion)
+            .map_err(|_| malformed("not a v4.public token"))?;
+        // The footer is bound into the signature; reading it first only
+        // selects the key.
+        let kid = serde_json::from_slice::<serde_json::Value>(untrusted.untrusted_footer())
+            .ok()
+            .and_then(|f| f.get("kid").and_then(|k| k.as_str()).map(str::to_owned))
+            .ok_or_else(|| malformed("footer has no kid"))?;
+
+        let key = svc
+            .keys
+            .list_all_signing_keys()
+            .await?
+            .into_iter()
+            .find(|k| k.kid == kid)
+            .ok_or_else(|| McpMintError::AssertionUnknownKid(kid.clone()))?;
+        if key.status != SigningKeyStatus::Active {
+            return Err(McpMintError::AssertionRetiredKey(kid));
+        }
+
+        let public = AsymmetricPublicKey::<V4>::from(&key.public_key[..])
+            .map_err(|_| malformed("stored public key is not Ed25519"))?;
+        let trusted = PublicToken::verify(&public, &untrusted, None, None)
+            .map_err(|_| malformed("signature verification failed"))?;
+        let claims: ClientAssertion = serde_json::from_str(trusted.payload())
+            .map_err(|e| McpMintError::AssertionMalformed(format!("payload: {e}")))?;
+
+        if claims.iss != key.principal_id
+            || claims.sub != key.principal_id
+            || key.principal_id.kind != PrincipalKind::Service
+        {
+            return Err(McpMintError::AssertionPrincipalMismatch {
+                kid,
+                owner: key.principal_id,
+                iss: claims.iss,
+                sub: claims.sub,
+            });
+        }
+        let expected = self.token_endpoint();
+        if claims.aud != expected {
+            return Err(McpMintError::AssertionBadAudience {
+                got: claims.aud,
+                expected,
+            });
+        }
+        if claims.exp <= now {
+            return Err(McpMintError::AssertionExpired { exp: claims.exp, now });
+        }
+        let lifetime = claims.exp - claims.iat;
+        if lifetime > ClientAssertion::MAX_LIFETIME_SECONDS {
+            return Err(McpMintError::AssertionLifetimeTooLong {
+                lifetime,
+                max: ClientAssertion::MAX_LIFETIME_SECONDS,
+            });
+        }
+        if claims.jti.is_empty() {
+            return Err(malformed("empty jti"));
+        }
+        // Consume the jti last, so a rejected assertion doesn't burn it.
+        if !svc
+            .used_jtis
+            .try_mark_used(&claims.jti, claims.exp)
+            .await
+            .map_err(McpMintError::JtiStore)?
+        {
+            return Err(McpMintError::AssertionReplayed(claims.jti));
+        }
+
+        let principal = claims.sub;
+        let entries = self.grants.list_for(&principal, &aud).await?;
+        let held = expand_scopes(&self.bundles, &entries).await?;
+        for s in &held {
+            validate_grant(&self.scopes, principal.kind, s, &aud)?;
+        }
+        let scopes: Vec<Scope> = if requested_scopes.is_empty() {
+            held
+        } else {
+            held.into_iter()
+                .filter(|s| requested_scopes.contains(s))
+                .collect()
+        };
+        if scopes.is_empty() {
+            return Err(McpMintError::NoGrantedScopes {
+                principal: principal.to_string(),
+                aud,
+            });
+        }
+
+        let ttl = self.policy.access_ttl_seconds.min(SERVICE_MAX_TTL_SECONDS);
+        let claims = McpClaims::new(
+            self.iss.clone(),
+            aud,
+            principal,
+            now,
+            now + ttl,
+            generate_jti(),
+            scopes,
+        );
+        let token = self.minter.mint_mcp(&claims, &self.kid)?;
+        Ok(MintedMcpToken { token, claims })
+    }
 }
+
+/// Hard cap on a service access token's lifetime (doc D3: TTL <= 1 h).
+const SERVICE_MAX_TTL_SECONDS: i64 = 60 * 60;
 
 /// Intersect what a caller *asked* for with the `ceiling` they are entitled
 /// to, or take the whole ceiling when they asked for nothing.
@@ -765,7 +1020,7 @@ fn attenuate(
     let unentitled: Vec<Scope> = requested
         .iter()
         .filter(|s| !ceiling.contains(s))
-        .copied()
+        .cloned()
         .collect();
     if !unentitled.is_empty() {
         return Err(McpMintError::UnentitledScopes {
@@ -779,7 +1034,7 @@ fn attenuate(
     let mut out: Vec<Scope> = Vec::with_capacity(requested.len());
     for s in requested {
         if !out.contains(s) {
-            out.push(*s);
+            out.push(s.clone());
         }
     }
     Ok(out)
@@ -804,7 +1059,9 @@ fn rows_to_owns(rows: &[OwnershipRow]) -> Owns {
     }
     let mut o = Owns::default();
     for r in rows {
-        if r.is_revoked() {
+        // Kind-level tuples (`kind/<kind>#rel`) are authority, not ownership
+        // of a resource — they never appear in the owns claim.
+        if r.is_revoked() || r.resource_kind == cheers_core::KIND_RESOURCE {
             continue;
         }
         match r.resource_kind.as_str() {
@@ -825,119 +1082,73 @@ mod tests {
     use super::*;
     use crate::bundles::{BundleName, MemoryBundleStore, ScopeOrBundle};
     use crate::codec::PasetoV4SecretMinter;
-    use crate::grants::MemoryGrantStore;
-    use crate::ownership::{NewOwnership, OwnershipRow, OwnershipStore};
+    use crate::grants::SchemaGrantStore;
+    use cheers_core::{RelationDef, ResourceSchema, SchemaRegistry, KIND_RESOURCE};
+    use std::collections::HashMap;
+    use crate::ownership::{MemoryOwnershipStore, NewOwnership, OwnershipStore};
     use async_trait::async_trait;
-    use cheers_core::{Scope, StoreError};
+    use cheers_core::{yah_scopes, Scope, StoreError};
     use cheers_verify::PasetoV4PublicVerifier;
     use std::sync::Mutex;
 
-    // ---- in-memory OwnershipStore (test-only) ------------------------------
+    // ---- grants ------------------------------------------------------------
     //
-    // cheers-sqlx ships the persistent impls; cheers-server tests only need
-    // a process-local one. Lives here rather than in ownership.rs because
-    // F4 deliberately kept that module impl-free for the trait surface.
+    // Scopes are seeded as ownership tuples through a test schema: kind
+    // `grant`, one kind-level relation per yah scope (named by its wire form)
+    // unlocking exactly that scope. Kind-level rows stay out of `owns`, so the
+    // owns assertions below see only the resource rows each test inserts.
+    // `raw` stands in for a hand-coded GrantStore (noisetable's
+    // PublishGrants): bundles and unregistered scopes, which no schema can
+    // express, go there.
 
-    #[derive(Default)]
-    struct MemOwnershipStore {
-        rows: Mutex<Vec<OwnershipRow>>,
-        next_id: Mutex<u64>,
+    const GRANT_KIND: &str = "grant";
+
+    fn test_schema(scopes: &cheers_core::ScopeRegistry) -> SchemaRegistry {
+        let rels: Vec<RelationDef> = yah_scopes::DEFS
+            .iter()
+            .map(|d| RelationDef {
+                name: Box::leak(d.scope.as_wire().to_owned().into_boxed_str()),
+                membership: true,
+                implies: &[],
+                scopes: Box::leak(vec![d.scope.clone()].into_boxed_slice()),
+                grants: &[],
+            })
+            .collect();
+        SchemaRegistry::build(
+            &[ResourceSchema {
+                kind: GRANT_KIND,
+                relations: &[],
+                kind_relations: Box::leak(rels.into_boxed_slice()),
+            }],
+            scopes,
+        )
+        .unwrap()
     }
 
-    impl MemOwnershipStore {
-        fn new() -> Self {
-            Self::default()
+    struct TestGrants {
+        schema: SchemaGrantStore<MemoryOwnershipStore>,
+        ownership: MemoryOwnershipStore,
+        raw: Mutex<HashMap<(PrincipalId, String), Vec<ScopeOrBundle>>>,
+    }
+
+    impl TestGrants {
+        fn put_raw(&self, principal: PrincipalId, aud: &str, entries: Vec<ScopeOrBundle>) {
+            self.raw.lock().unwrap().insert((principal, aud.to_owned()), entries);
         }
     }
 
     #[async_trait]
-    impl OwnershipStore for MemOwnershipStore {
-        async fn insert(
-            &self,
-            ownership: &NewOwnership,
-            now: i64,
-        ) -> Result<OwnershipRow, StoreError> {
-            let mut id_g = self.next_id.lock().unwrap();
-            *id_g += 1;
-            let id = format!("row-{}", *id_g);
-            drop(id_g);
-            let row = OwnershipRow::new(
-                id,
-                ownership.principal_id.clone(),
-                ownership.resource_kind.clone(),
-                ownership.resource_id.clone(),
-                ownership.relationship.clone(),
-                ownership.granted_by.clone(),
-                ownership.on_behalf_of.clone(),
-                now,
-                None,
-            );
-            self.rows.lock().unwrap().push(row.clone());
-            Ok(row)
-        }
-
-        async fn get(&self, id: &str) -> Result<Option<OwnershipRow>, StoreError> {
-            Ok(self.rows.lock().unwrap().iter().find(|r| r.id == id).cloned())
-        }
-
-        async fn revoke_by_id(&self, id: &str, now: i64) -> Result<(), StoreError> {
-            let mut g = self.rows.lock().unwrap();
-            let row = g
-                .iter_mut()
-                .find(|r| r.id == id)
-                .ok_or(StoreError::NotFound)?;
-            if row.revoked_at.is_none() {
-                row.revoked_at = Some(now);
-            }
-            Ok(())
-        }
-
-        async fn revoke_by_on_behalf_of(
-            &self,
-            user: &PrincipalId,
-            now: i64,
-        ) -> Result<u64, StoreError> {
-            let mut count = 0u64;
-            for r in self.rows.lock().unwrap().iter_mut() {
-                if r.revoked_at.is_none() && r.on_behalf_of.as_ref() == Some(user) {
-                    r.revoked_at = Some(now);
-                    count += 1;
-                }
-            }
-            Ok(count)
-        }
-
-        async fn list_for_principal(
+    impl GrantStore for TestGrants {
+        async fn list_for(
             &self,
             principal: &PrincipalId,
-        ) -> Result<Vec<OwnershipRow>, StoreError> {
-            Ok(self
-                .rows
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|r| r.revoked_at.is_none() && r.principal_id == *principal)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_for_resource(
-            &self,
-            resource_kind: &str,
-            resource_id: &str,
-        ) -> Result<Vec<OwnershipRow>, StoreError> {
-            Ok(self
-                .rows
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|r| {
-                    r.revoked_at.is_none()
-                        && r.resource_kind == resource_kind
-                        && r.resource_id == resource_id
-                })
-                .cloned()
-                .collect())
+            aud: &str,
+        ) -> Result<Vec<ScopeOrBundle>, StoreError> {
+            let mut out = self.schema.list_for(principal, aud).await?;
+            if let Some(raw) = self.raw.lock().unwrap().get(&(principal.clone(), aud.to_owned())) {
+                out.extend(raw.iter().cloned());
+            }
+            Ok(out)
         }
     }
 
@@ -948,26 +1159,71 @@ mod tests {
     const RIG_KID: &str = "mcp-authority-test-kid-1";
 
     fn rig() -> (
-        McpAuthority<MemoryBundleStore, MemoryGrantStore, MemOwnershipStore>,
+        McpAuthority<MemoryBundleStore, TestGrants, MemoryOwnershipStore>,
         PasetoV4PublicVerifier,
     ) {
         let (minter, verifier) = PasetoV4SecretMinter::generate().unwrap();
         let bundles = MemoryBundleStore::with_defaults();
-        let grants = MemoryGrantStore::new();
-        let ownership = MemOwnershipStore::new();
+        let ownership = MemoryOwnershipStore::new();
+        let scopes = Arc::new(
+            yah_scopes::registry_at([
+                "https://aud.example",
+                "https://kamaji.camp.example",
+                "https://kamaji.example",
+            ])
+            .unwrap(),
+        );
+        let grants = TestGrants {
+            schema: SchemaGrantStore::new(
+                ownership.clone(),
+                Arc::new(test_schema(&scopes)),
+                scopes.clone(),
+            ),
+            ownership: ownership.clone(),
+            raw: Mutex::default(),
+        };
         let authority = McpAuthority::new(
             minter,
             bundles,
             grants,
             ownership,
+            scopes,
             "https://cheers.example",
             RIG_KID,
         );
         (authority, verifier)
     }
 
-    fn put_simple_grant(authority: &McpAuthority<MemoryBundleStore, MemoryGrantStore, MemOwnershipStore>, principal: PrincipalId, aud: &str, entries: Vec<ScopeOrBundle>) {
-        authority.grants.put(principal, aud, entries);
+    /// Scopes become `kind/grant#<scope>` tuples; bundles go to the raw
+    /// store. `aud` only matters for raw entries — derived scopes are filtered
+    /// by the registry's audiences (all `Any` for yah).
+    fn put_simple_grant(
+        authority: &McpAuthority<MemoryBundleStore, TestGrants, MemoryOwnershipStore>,
+        principal: PrincipalId,
+        aud: &str,
+        entries: Vec<ScopeOrBundle>,
+    ) {
+        let mut raw = Vec::new();
+        for e in entries {
+            match e {
+                ScopeOrBundle::Scope(scope) => {
+                    let n = NewOwnership::new(
+                        principal.clone(),
+                        KIND_RESOURCE,
+                        GRANT_KIND,
+                        scope.as_wire(),
+                        PrincipalId::service("seed"),
+                        None,
+                    )
+                    .unwrap();
+                    pollster::block_on(authority.grants.ownership.insert(&n, 1)).unwrap();
+                }
+                bundle => raw.push(bundle),
+            }
+        }
+        if !raw.is_empty() {
+            authority.grants.put_raw(principal, aud, raw);
+        }
     }
 
     // ---- McpPolicy ---------------------------------------------------------
@@ -993,7 +1249,7 @@ mod tests {
             &authority,
             user.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudDeploy), ScopeOrBundle::Scope(Scope::CloudRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY), ScopeOrBundle::Scope(yah_scopes::CLOUD_READ)],
         );
 
         pollster::block_on(async {
@@ -1017,7 +1273,7 @@ mod tests {
             let back = verifier.verify_mcp_at(&minted.token, 1_100, RIG_KID).unwrap();
             assert_eq!(back, minted.claims);
             assert_eq!(back.sub, user);
-            assert_eq!(back.scope, vec![Scope::CloudDeploy, Scope::CloudRead]);
+            assert_eq!(back.scope, vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ]);
         });
     }
 
@@ -1041,14 +1297,14 @@ mod tests {
                 .mint_user_fresh(user.clone(), None, None, aud, 1_000)
                 .await
                 .unwrap();
-            assert!(first.claims.scope.contains(&Scope::CloudDestroy));
+            assert!(first.claims.scope.contains(&yah_scopes::CLOUD_DESTROY));
 
             // Edit the bundle: drop CloudDestroy. Grant is untouched.
             authority
                 .bundles
                 .put(
                     &BundleName::new("deploy-admin"),
-                    &[Scope::CloudRead, Scope::CloudDeploy],
+                    &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY],
                 )
                 .await
                 .unwrap();
@@ -1057,8 +1313,8 @@ mod tests {
                 .mint_user_fresh(user, None, None, aud, 1_100)
                 .await
                 .unwrap();
-            assert!(!second.claims.scope.contains(&Scope::CloudDestroy));
-            assert_eq!(second.claims.scope, vec![Scope::CloudRead, Scope::CloudDeploy]);
+            assert!(!second.claims.scope.contains(&yah_scopes::CLOUD_DESTROY));
+            assert_eq!(second.claims.scope, vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
         });
     }
 
@@ -1072,7 +1328,7 @@ mod tests {
             &authority,
             user.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CampRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CAMP_READ)],
         );
         // Seed two owned resources under the camp principal.
         pollster::block_on(async {
@@ -1134,7 +1390,7 @@ mod tests {
             &authority,
             user.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CampRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CAMP_READ)],
         );
 
         pollster::block_on(async {
@@ -1206,8 +1462,8 @@ mod tests {
             user.clone(),
             aud,
             vec![
-                ScopeOrBundle::Scope(Scope::CloudRead),
-                ScopeOrBundle::Scope(Scope::CloudDeploy),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
             ],
         );
 
@@ -1223,9 +1479,10 @@ mod tests {
             assert_eq!(minted.claims.auth_strength, Some(AuthStrength::ApiToken));
             assert_eq!(minted.claims.sub, user);
             // Empty `requested` = everything held for this aud, frozen now.
+            // Derived grants come back in scope order, not seed order.
             assert_eq!(
                 minted.claims.scope,
-                vec![Scope::CloudRead, Scope::CloudDeploy]
+                vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ]
             );
             // Same signing key, same envelope — it verifies at the ordinary
             // edge with no new verification path.
@@ -1246,18 +1503,18 @@ mod tests {
             user.clone(),
             aud,
             vec![
-                ScopeOrBundle::Scope(Scope::CloudRead),
-                ScopeOrBundle::Scope(Scope::CloudDeploy),
-                ScopeOrBundle::Scope(Scope::CloudDestroy),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DESTROY),
             ],
         );
 
         pollster::block_on(async {
             let minted = authority
-                .mint_api_token(user, aud, &[Scope::CloudRead], None, 1_000)
+                .mint_api_token(user, aud, &[yah_scopes::CLOUD_READ], None, 1_000)
                 .await
                 .unwrap();
-            assert_eq!(minted.claims.scope, vec![Scope::CloudRead]);
+            assert_eq!(minted.claims.scope, vec![yah_scopes::CLOUD_READ]);
         });
     }
 
@@ -1273,7 +1530,7 @@ mod tests {
             &authority,
             user.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_READ)],
         );
 
         pollster::block_on(async {
@@ -1281,7 +1538,7 @@ mod tests {
                 .mint_api_token(
                     user,
                     aud,
-                    &[Scope::CloudRead, Scope::CloudDestroy, Scope::CampAdmin],
+                    &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DESTROY, yah_scopes::CAMP_ADMIN],
                     None,
                     1_000,
                 )
@@ -1289,7 +1546,7 @@ mod tests {
                 .unwrap_err();
             match err {
                 McpMintError::UnentitledScopes { ref scopes, .. } => {
-                    assert_eq!(scopes, &vec![Scope::CloudDestroy, Scope::CampAdmin]);
+                    assert_eq!(scopes, &vec![yah_scopes::CLOUD_DESTROY, yah_scopes::CAMP_ADMIN]);
                     let msg = err.to_string();
                     assert!(msg.contains("cloud:destroy"), "{msg}");
                     assert!(msg.contains("camp:admin"), "{msg}");
@@ -1313,11 +1570,11 @@ mod tests {
                 .bundles
                 .put(
                     &BundleName::new("dangerous"),
-                    &[Scope::CampRead, Scope::OwnershipWrite],
+                    &[yah_scopes::CAMP_READ, yah_scopes::AUDIT_WRITE],
                 )
                 .await
                 .unwrap();
-            authority.grants.put(
+            authority.grants.put_raw(
                 user.clone(),
                 aud,
                 vec![ScopeOrBundle::Bundle(BundleName::new("dangerous"))],
@@ -1327,7 +1584,7 @@ mod tests {
                     scope,
                     kind,
                 })) => {
-                    assert_eq!(scope, Scope::OwnershipWrite);
+                    assert_eq!(scope, yah_scopes::AUDIT_WRITE);
                     assert_eq!(kind, PrincipalKind::User);
                 }
                 other => panic!("expected GrantMisconfigured, got {other:?}"),
@@ -1344,7 +1601,7 @@ mod tests {
             &authority,
             user.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_READ)],
         );
 
         pollster::block_on(async {
@@ -1410,7 +1667,7 @@ mod tests {
             &authority,
             user.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_READ)],
         );
 
         pollster::block_on(async {
@@ -1462,13 +1719,13 @@ mod tests {
             .rotate_api_token(
                 user.clone(),
                 aud,
-                &[Scope::CloudRead, Scope::CloudDeploy],
+                &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY],
                 &[],
                 None,
                 1_000,
             )
             .unwrap();
-        assert_eq!(minted.claims.scope, vec![Scope::CloudRead, Scope::CloudDeploy]);
+        assert_eq!(minted.claims.scope, vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
         assert_eq!(minted.claims.auth_strength, Some(AuthStrength::ApiToken));
         assert_eq!(minted.claims.sub, user.clone());
         assert_eq!(minted.claims.aud, aud);
@@ -1497,9 +1754,9 @@ mod tests {
             user.clone(),
             aud,
             vec![
-                ScopeOrBundle::Scope(Scope::CloudRead),
-                ScopeOrBundle::Scope(Scope::CloudDeploy),
-                ScopeOrBundle::Scope(Scope::CloudDestroy),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DESTROY),
             ],
         );
 
@@ -1508,26 +1765,26 @@ mod tests {
             .rotate_api_token(
                 user.clone(),
                 aud,
-                &[Scope::CloudRead, Scope::CloudDeploy],
-                &[Scope::CloudRead],
+                &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY],
+                &[yah_scopes::CLOUD_READ],
                 None,
                 1_000,
             )
             .unwrap();
-        assert_eq!(narrowed.claims.scope, vec![Scope::CloudRead]);
+        assert_eq!(narrowed.claims.scope, vec![yah_scopes::CLOUD_READ]);
 
         // Widening — to a scope the GRANT holds but the token does not — is
         // refused by name.
         match authority.rotate_api_token(
             user,
             aud,
-            &[Scope::CloudRead],
-            &[Scope::CloudDestroy],
+            &[yah_scopes::CLOUD_READ],
+            &[yah_scopes::CLOUD_DESTROY],
             None,
             1_000,
         ) {
             Err(McpMintError::UnentitledScopes { scopes, .. }) => {
-                assert_eq!(scopes, vec![Scope::CloudDestroy]);
+                assert_eq!(scopes, vec![yah_scopes::CLOUD_DESTROY]);
             }
             other => panic!("expected UnentitledScopes, got {other:?}"),
         }
@@ -1543,7 +1800,7 @@ mod tests {
         let aud = "https://kamaji.example";
 
         let default_ttl = authority
-            .rotate_api_token(user.clone(), aud, &[Scope::CloudRead], &[], None, 5_000)
+            .rotate_api_token(user.clone(), aud, &[yah_scopes::CLOUD_READ], &[], None, 5_000)
             .unwrap();
         assert_eq!(
             default_ttl.claims.exp - default_ttl.claims.iat,
@@ -1555,7 +1812,7 @@ mod tests {
             match authority.rotate_api_token(
                 user.clone(),
                 aud,
-                &[Scope::CloudRead],
+                &[yah_scopes::CLOUD_READ],
                 &[],
                 Some(bad),
                 5_000,
@@ -1579,7 +1836,7 @@ mod tests {
             authority.rotate_api_token(
                 PrincipalId::user("alice"),
                 "https://kamaji.example",
-                &[Scope::OwnershipWrite],
+                &[yah_scopes::AUDIT_WRITE],
                 &[],
                 None,
                 1_000,
@@ -1594,7 +1851,7 @@ mod tests {
         match authority.rotate_api_token(
             PrincipalId::camp("c1"),
             "https://aud.example",
-            &[Scope::CloudRead],
+            &[yah_scopes::CLOUD_READ],
             &[],
             None,
             1,
@@ -1608,9 +1865,32 @@ mod tests {
     }
 
     #[test]
+    fn mint_user_fresh_rejects_scope_missing_from_registry() {
+        // R731-F2: a grant row naming a well-formed scope the deployment's
+        // registry does not declare is refused at mint, before signing.
+        let (authority, _verifier) = rig();
+        let user = PrincipalId::user("alice");
+        let aud = "https://aud.example";
+        let unknown: Scope = "cloud:nuke".parse().unwrap();
+        authority.grants.put_raw(
+            user.clone(),
+            aud,
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_READ), ScopeOrBundle::Scope(unknown.clone())],
+        );
+        let err = pollster::block_on(authority.mint_user_fresh(user, None, None, aud, 1_000))
+            .unwrap_err();
+        match err {
+            McpMintError::GrantMisconfigured(GrantError::UnknownScope { scope }) => {
+                assert_eq!(scope, unknown);
+            }
+            other => panic!("expected UnknownScope, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mint_user_fresh_rejects_service_only_scope_smuggled_via_bundle() {
         // Defence in depth for composition rule (4): if a bundle granted to
-        // a User principal contains ownership:write, the mint path catches
+        // a User principal contains audit:write, the mint path catches
         // it via validate_grant BEFORE signing — the misconfigured bundle
         // never becomes a mintable token.
         let (authority, _verifier) = rig();
@@ -1622,11 +1902,11 @@ mod tests {
                 .bundles
                 .put(
                     &BundleName::new("dangerous"),
-                    &[Scope::CampRead, Scope::OwnershipWrite],
+                    &[yah_scopes::CAMP_READ, yah_scopes::AUDIT_WRITE],
                 )
                 .await
                 .unwrap();
-            authority.grants.put(
+            authority.grants.put_raw(
                 user.clone(),
                 aud,
                 vec![ScopeOrBundle::Bundle(BundleName::new("dangerous"))],
@@ -1638,7 +1918,7 @@ mod tests {
                 .unwrap_err();
             match err {
                 McpMintError::GrantMisconfigured(GrantError::ServiceOnlyScope { scope, kind }) => {
-                    assert_eq!(scope, Scope::OwnershipWrite);
+                    assert_eq!(scope, yah_scopes::AUDIT_WRITE);
                     assert_eq!(kind, PrincipalKind::User);
                 }
                 other => panic!("expected GrantMisconfigured(ServiceOnlyScope), got {other:?}"),
@@ -1658,8 +1938,8 @@ mod tests {
             camp.clone(),
             aud,
             vec![
-                ScopeOrBundle::Scope(Scope::CloudDeploy),
-                ScopeOrBundle::Scope(Scope::CloudRead),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
             ],
         );
 
@@ -1691,7 +1971,7 @@ mod tests {
             // no per-call cheers round trip.
             let back = verifier.verify_mcp_at(&minted.token, 1_100, RIG_KID).unwrap();
             assert_eq!(back, minted.claims);
-            assert_eq!(back.scope, vec![Scope::CloudDeploy, Scope::CloudRead]);
+            assert_eq!(back.scope, vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ]);
         });
     }
 
@@ -1705,7 +1985,7 @@ mod tests {
             &authority,
             camp.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CampRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CAMP_READ)],
         );
 
         pollster::block_on(async {
@@ -1754,7 +2034,7 @@ mod tests {
         let mk = |id: &str, kind: &str, rid: &str| {
             OwnershipRow::new(
                 id.to_owned(),
-                camp.clone(),
+                camp.clone().into(),
                 kind.to_owned(),
                 rid.to_owned(),
                 "owns".to_owned(),
@@ -1796,7 +2076,7 @@ mod tests {
             &authority,
             camp.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CampRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CAMP_READ)],
         );
 
         pollster::block_on(async {
@@ -1831,13 +2111,13 @@ mod tests {
                 .mint_bootstrap(camp.clone(), aud, 1_000)
                 .await
                 .unwrap();
-            assert!(first.claims.scope.contains(&Scope::CloudDestroy));
+            assert!(first.claims.scope.contains(&yah_scopes::CLOUD_DESTROY));
 
             authority
                 .bundles
                 .put(
                     &BundleName::new("deploy-admin"),
-                    &[Scope::CloudRead, Scope::CloudDeploy],
+                    &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY],
                 )
                 .await
                 .unwrap();
@@ -1846,8 +2126,8 @@ mod tests {
                 .mint_bootstrap(camp, aud, 1_100)
                 .await
                 .unwrap();
-            assert!(!second.claims.scope.contains(&Scope::CloudDestroy));
-            assert_eq!(second.claims.scope, vec![Scope::CloudRead, Scope::CloudDeploy]);
+            assert!(!second.claims.scope.contains(&yah_scopes::CLOUD_DESTROY));
+            assert_eq!(second.claims.scope, vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
         });
     }
 
@@ -1916,7 +2196,7 @@ mod tests {
 
     #[test]
     fn mint_bootstrap_rejects_service_only_scope_smuggled_via_bundle() {
-        // Composition rule (4) — `ownership:write` and `audit:write` are
+        // Composition rule (4) — `audit:write` is
         // grantable to kind=service ONLY. A bundle granted to a camp
         // principal that expands to a service-only scope is rejected by
         // validate_grant BEFORE signing, mirroring F6's defence in depth on
@@ -1930,11 +2210,11 @@ mod tests {
                 .bundles
                 .put(
                     &BundleName::new("dangerous"),
-                    &[Scope::CampRead, Scope::OwnershipWrite],
+                    &[yah_scopes::CAMP_READ, yah_scopes::AUDIT_WRITE],
                 )
                 .await
                 .unwrap();
-            authority.grants.put(
+            authority.grants.put_raw(
                 camp.clone(),
                 aud,
                 vec![ScopeOrBundle::Bundle(BundleName::new("dangerous"))],
@@ -1946,7 +2226,7 @@ mod tests {
                 .unwrap_err();
             match err {
                 McpMintError::GrantMisconfigured(GrantError::ServiceOnlyScope { scope, kind }) => {
-                    assert_eq!(scope, Scope::OwnershipWrite);
+                    assert_eq!(scope, yah_scopes::AUDIT_WRITE);
                     assert_eq!(kind, PrincipalKind::Camp);
                 }
                 other => panic!("expected GrantMisconfigured(ServiceOnlyScope), got {other:?}"),
@@ -1970,8 +2250,8 @@ mod tests {
             user.clone(),
             aud,
             vec![
-                ScopeOrBundle::Scope(Scope::CloudDeploy),
-                ScopeOrBundle::Scope(Scope::CloudRead),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
             ],
         );
         put_simple_grant(
@@ -1979,8 +2259,8 @@ mod tests {
             camp.clone(),
             aud,
             vec![
-                ScopeOrBundle::Scope(Scope::CloudDeploy),
-                ScopeOrBundle::Scope(Scope::CloudRead),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
             ],
         );
 
@@ -2003,7 +2283,7 @@ mod tests {
                     camp.clone(),
                     Some(Actor::new(PrincipalId::service("agent-claude"))),
                     aud,
-                    vec![Scope::CloudDeploy],
+                    vec![yah_scopes::CLOUD_DEPLOY],
                     1_000,
                 )
                 .await
@@ -2023,7 +2303,7 @@ mod tests {
             // user-fresh — the user authenticated locally.
             assert_eq!(minted.claims.auth_strength, Some(AuthStrength::UserFresh));
             // Result scope is the requested scope (verified in intersection).
-            assert_eq!(minted.claims.scope, vec![Scope::CloudDeploy]);
+            assert_eq!(minted.claims.scope, vec![yah_scopes::CLOUD_DEPLOY]);
             // owns comes from the CAMP, not the user.
             assert_eq!(minted.claims.owns.service, vec!["svc-prod".to_string()]);
             // jti present, iat/exp respect policy.
@@ -2056,15 +2336,15 @@ mod tests {
             user.clone(),
             aud,
             vec![
-                ScopeOrBundle::Scope(Scope::CloudDeploy),
-                ScopeOrBundle::Scope(Scope::CloudRead),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
             ],
         );
         put_simple_grant(
             &authority,
             camp.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_READ)],
         );
 
         pollster::block_on(async {
@@ -2075,12 +2355,12 @@ mod tests {
                     camp.clone(),
                     None,
                     aud,
-                    vec![Scope::CloudRead],
+                    vec![yah_scopes::CLOUD_READ],
                     1_000,
                 )
                 .await
                 .unwrap();
-            assert_eq!(minted.claims.scope, vec![Scope::CloudRead]);
+            assert_eq!(minted.claims.scope, vec![yah_scopes::CLOUD_READ]);
 
             // Requesting CloudDeploy fails — camp lacks it. The whole
             // exchange rejects (not a partial token).
@@ -2090,14 +2370,14 @@ mod tests {
                     camp,
                     None,
                     aud,
-                    vec![Scope::CloudRead, Scope::CloudDeploy],
+                    vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY],
                     1_000,
                 )
                 .await
                 .unwrap_err();
             match err {
                 McpMintError::InvalidScope { scope, aud: a } => {
-                    assert_eq!(scope, Scope::CloudDeploy);
+                    assert_eq!(scope, yah_scopes::CLOUD_DEPLOY);
                     assert_eq!(a, aud);
                 }
                 other => panic!("expected InvalidScope, got {other:?}"),
@@ -2117,15 +2397,15 @@ mod tests {
             &authority,
             user.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_READ)],
         );
         put_simple_grant(
             &authority,
             camp.clone(),
             aud,
             vec![
-                ScopeOrBundle::Scope(Scope::CloudRead),
-                ScopeOrBundle::Scope(Scope::CloudDeploy),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
+                ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
             ],
         );
 
@@ -2136,14 +2416,14 @@ mod tests {
                     camp,
                     None,
                     aud,
-                    vec![Scope::CloudDeploy],
+                    vec![yah_scopes::CLOUD_DEPLOY],
                     1_000,
                 )
                 .await
                 .unwrap_err();
             match err {
                 McpMintError::InvalidScope { scope, aud: _ } => {
-                    assert_eq!(scope, Scope::CloudDeploy);
+                    assert_eq!(scope, yah_scopes::CLOUD_DEPLOY);
                 }
                 other => panic!("expected InvalidScope, got {other:?}"),
             }
@@ -2213,12 +2493,12 @@ mod tests {
             &authority,
             camp.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_READ)],
         );
 
         pollster::block_on(async {
             let err = authority
-                .mint_token_exchange(user, camp, None, aud, vec![Scope::CloudRead], 1_000)
+                .mint_token_exchange(user, camp, None, aud, vec![yah_scopes::CLOUD_READ], 1_000)
                 .await
                 .unwrap_err();
             match err {
@@ -2242,12 +2522,12 @@ mod tests {
             &authority,
             user.clone(),
             aud,
-            vec![ScopeOrBundle::Scope(Scope::CloudRead)],
+            vec![ScopeOrBundle::Scope(yah_scopes::CLOUD_READ)],
         );
 
         pollster::block_on(async {
             let err = authority
-                .mint_token_exchange(user, camp, None, aud, vec![Scope::CloudRead], 1_000)
+                .mint_token_exchange(user, camp, None, aud, vec![yah_scopes::CLOUD_READ], 1_000)
                 .await
                 .unwrap_err();
             match err {
@@ -2274,7 +2554,7 @@ mod tests {
                 .bundles
                 .put(
                     &BundleName::new("dangerous"),
-                    &[Scope::CampRead, Scope::OwnershipWrite],
+                    &[yah_scopes::CAMP_READ, yah_scopes::AUDIT_WRITE],
                 )
                 .await
                 .unwrap();
@@ -2282,7 +2562,7 @@ mod tests {
                 &authority,
                 user.clone(),
                 aud,
-                vec![ScopeOrBundle::Scope(Scope::CampRead)],
+                vec![ScopeOrBundle::Scope(yah_scopes::CAMP_READ)],
             );
             put_simple_grant(
                 &authority,
@@ -2297,14 +2577,14 @@ mod tests {
                     PrincipalId::camp("c-sneaky"),
                     None,
                     aud,
-                    vec![Scope::CampRead],
+                    vec![yah_scopes::CAMP_READ],
                     1_000,
                 )
                 .await
                 .unwrap_err();
             match err {
                 McpMintError::GrantMisconfigured(GrantError::ServiceOnlyScope { scope, kind }) => {
-                    assert_eq!(scope, Scope::OwnershipWrite);
+                    assert_eq!(scope, yah_scopes::AUDIT_WRITE);
                     assert_eq!(kind, PrincipalKind::Camp);
                 }
                 other => panic!("expected GrantMisconfigured(ServiceOnlyScope), got {other:?}"),
@@ -2331,5 +2611,171 @@ mod tests {
 
         let e: Error = McpMintError::Codec(CodecError::Malformed).into();
         assert!(matches!(e, Error::Codec(CodecError::Malformed)));
+    }
+
+    // ---- mint_service (R731-F4) ---------------------------------------------
+
+    use crate::service_principal::{
+        MemoryServicePrincipalStore, NewServicePrincipal, ProvisionedKey, ServicePrincipalAuthority,
+    };
+    use cheers_core::{ClientAssertion, MemoryUsedJtiStore};
+
+    const TOKEN_ENDPOINT: &str = "https://cheers.example/token";
+    const SVC_AUD: &str = "https://kamaji.example";
+
+    struct SvcRig {
+        authority: McpAuthority<MemoryBundleStore, TestGrants, MemoryOwnershipStore>,
+        verifier: PasetoV4PublicVerifier,
+        sps: ServicePrincipalAuthority<MemoryServicePrincipalStore>,
+        key: ProvisionedKey,
+    }
+
+    fn svc_rig() -> SvcRig {
+        let (authority, verifier) = rig();
+        let store = MemoryServicePrincipalStore::new();
+        let authority = authority.with_service_assertions(
+            Arc::new(store.clone()),
+            Arc::new(MemoryUsedJtiStore::new()),
+        );
+        let sps = ServicePrincipalAuthority::new(store);
+        let key = pollster::block_on(sps.provision(NewServicePrincipal::new("yubaba"), 1)).unwrap();
+        SvcRig { authority, verifier, sps, key }
+    }
+
+    fn sign_assertion(key: &ProvisionedKey, claims: &ClientAssertion) -> String {
+        let sk = pasetors::keys::AsymmetricSecretKey::<V4>::from(&key.secret_key[..]).unwrap();
+        let footer = serde_json::to_vec(&serde_json::json!({ "kid": key.signing_key.kid })).unwrap();
+        let payload = serde_json::to_vec(claims).unwrap();
+        PublicToken::sign(&sk, &payload, Some(&footer), None).unwrap()
+    }
+
+    fn good_assertion(jti: &str) -> ClientAssertion {
+        ClientAssertion::new(PrincipalId::service("yubaba"), TOKEN_ENDPOINT, jti, 1000, 1060)
+    }
+
+    fn seed_svc_scope(r: &SvcRig, scope: Scope) {
+        put_simple_grant(
+            &r.authority,
+            PrincipalId::service("yubaba"),
+            SVC_AUD,
+            vec![ScopeOrBundle::Scope(scope)],
+        );
+    }
+
+    fn mint(r: &SvcRig, a: &ClientAssertion) -> Result<MintedMcpToken, McpMintError> {
+        let t = sign_assertion(&r.key, a);
+        pollster::block_on(r.authority.mint_service(&t, SVC_AUD, &[], 1010))
+    }
+
+    #[test]
+    fn mint_service_happy_path_scopes_from_relationship() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        let minted = mint(&r, &good_assertion("j-ok")).unwrap();
+        let claims = r.verifier.verify_mcp_at(&minted.token, 1010, RIG_KID).unwrap();
+        assert_eq!(claims.sub, PrincipalId::service("yubaba"));
+        assert_eq!(claims.aud, SVC_AUD);
+        assert_eq!(claims.scope, vec![yah_scopes::CLOUD_READ]);
+        assert!(claims.exp - claims.iat <= 3600);
+        assert!(claims.ceiling.is_none());
+    }
+
+    #[test]
+    fn mint_service_intersects_requested_and_rejects_empty() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        let t = sign_assertion(&r.key, &good_assertion("j-a"));
+        let other = [yah_scopes::CLOUD_DEPLOY];
+        let err = pollster::block_on(r.authority.mint_service(&t, SVC_AUD, &other, 1010)).unwrap_err();
+        assert!(matches!(err, McpMintError::NoGrantedScopes { .. }), "{err:?}");
+        // No relationship at all: also rejected.
+        let r = svc_rig();
+        let err = mint(&r, &good_assertion("j-b")).unwrap_err();
+        assert!(matches!(err, McpMintError::NoGrantedScopes { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn mint_service_rejects_unknown_kid() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        let other = pollster::block_on(
+            ServicePrincipalAuthority::new(MemoryServicePrincipalStore::new())
+                .provision(NewServicePrincipal::new("yubaba"), 1),
+        )
+        .unwrap();
+        let t = sign_assertion(&other, &good_assertion("j"));
+        let err = pollster::block_on(r.authority.mint_service(&t, SVC_AUD, &[], 1010)).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionUnknownKid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn mint_service_rejects_retired_key() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        pollster::block_on(r.sps.rotate(&PrincipalId::service("yubaba"), 2)).unwrap();
+        let err = mint(&r, &good_assertion("j")).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionRetiredKey(_)), "{err:?}");
+    }
+
+    #[test]
+    fn mint_service_rejects_principal_mismatch() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        let mut a = good_assertion("j1");
+        a.sub = PrincipalId::service("someone-else");
+        let err = mint(&r, &a).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionPrincipalMismatch { .. }), "{err:?}");
+        let mut a = good_assertion("j2");
+        a.iss = PrincipalId::service("someone-else");
+        let err = mint(&r, &a).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionPrincipalMismatch { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn mint_service_rejects_bad_aud() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        let mut a = good_assertion("j");
+        a.aud = SVC_AUD.into();
+        let err = mint(&r, &a).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionBadAudience { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn mint_service_rejects_expired_and_too_long_assertions() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        let mut a = good_assertion("j1");
+        a.exp = 1010;
+        let err = mint(&r, &a).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionExpired { .. }), "{err:?}");
+        let mut a = good_assertion("j2");
+        a.exp = a.iat + ClientAssertion::MAX_LIFETIME_SECONDS + 1;
+        let err = mint(&r, &a).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionLifetimeTooLong { .. }), "{err:?}");
+        // Exactly the maximum is fine.
+        let mut a = good_assertion("j3");
+        a.exp = a.iat + ClientAssertion::MAX_LIFETIME_SECONDS;
+        mint(&r, &a).unwrap();
+    }
+
+    #[test]
+    fn mint_service_rejects_replay() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        let a = good_assertion("j-once");
+        mint(&r, &a).unwrap();
+        let err = mint(&r, &a).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionReplayed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn mint_service_requires_configuration_and_wellformed_token() {
+        let (authority, _) = rig();
+        let err = pollster::block_on(authority.mint_service("x", SVC_AUD, &[], 0)).unwrap_err();
+        assert!(matches!(err, McpMintError::ServiceAssertionsUnconfigured));
+        let r = svc_rig();
+        let err = pollster::block_on(r.authority.mint_service("v4.public.garbage", SVC_AUD, &[], 0)).unwrap_err();
+        assert!(matches!(err, McpMintError::AssertionMalformed(_)), "{err:?}");
     }
 }

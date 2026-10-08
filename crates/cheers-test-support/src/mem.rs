@@ -4,14 +4,12 @@
 //! when you need real SQL constraints/ordering; use these for lightweight unit
 //! tests where the storage semantics don't matter.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use cheers_core::{DeviceId, StoreError, User, UserId};
 use cheers_server::store::{NewUser, ProviderKey, RefreshStore, RefreshTokenRecord, UserStore};
-use cheers_server::RevocationWriter;
-use cheers_verify::RevocationReader;
 
 // ── MemUserStore ─────────────────────────────────────────────────────────────
 
@@ -132,22 +130,6 @@ impl RefreshStore for MemRefreshStore {
     }
 }
 
-// ── MemRevocations ────────────────────────────────────────────────────────────
-
-#[derive(Clone, Default)]
-pub struct MemRevocations(Arc<Mutex<HashSet<String>>>);
-
-#[async_trait]
-impl RevocationReader for MemRevocations {
-    async fn is_revoked(&self, jti: &str) -> Result<bool, StoreError> {
-        Ok(self.0.lock().unwrap().contains(jti))
-    }
-}
-
-#[async_trait]
-impl RevocationWriter for MemRevocations {
-    async fn revoke(&self, jti: &str) -> Result<(), StoreError> {
-        self.0.lock().unwrap().insert(jti.to_owned());
-        Ok(())
-    }
-}
+// The in-memory revocation log is `cheers_server::MemoryRevocationStore`: it
+// carries the epoch the revocation set needs (R732-F6), so it is not
+// duplicated here.

@@ -25,7 +25,6 @@
 //!
 //! @yah:relay(R019, "Edge-verifiable session auth: mint/verify split + asymmetric codec + access/refresh tiers + revocation")
 //! @yah:at(2026-05-26T17:51:47Z)
-//! @yah:status(open)
 //! @yah:next("Full design, the locality contract, and the five implementation moves are in .yah/docs/working/edge-verifiable-auth.md; each move is filed as a child feature under this relay.")
 //! @yah:next("Suggested quest placement: foundation (Q002) owns the core codec/claims/store changes; the driver is the yah-platform edge deployment (Q005). Filed standalone to avoid presuming where it slots — maintainers reparent.")
 //! @yah:gotcha("The current Codec (PasetoV4Codec v4.local / HmacBlobCodec) is SYMMETRIC — the same key mints AND verifies. Edge verification therefore can't be done without shipping minting power to the CF edge (forge-any-session blast radius). The asymmetric codec is the prerequisite for ANY edge verification; do not edge-verify the symmetric token.")

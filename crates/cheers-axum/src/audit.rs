@@ -50,6 +50,7 @@
 //! ```
 
 use std::str::FromStr;
+use cheers_core::yah_scopes;
 use std::sync::Arc;
 
 use axum::Json;
@@ -59,7 +60,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
-use cheers_core::{PrincipalId, PrincipalKind, Scope};
+use cheers_core::{PrincipalId, PrincipalKind};
 use cheers_server::{AuditCursor, AuditQuery, AuditRecord, AuditRow, AuditStore};
 
 use crate::error::RouteError;
@@ -153,8 +154,8 @@ where
     A: AuditStore,
 {
     let now = now_unix();
-    let claims = authenticate_mcp(&headers, &state.mcp, now)?;
-    claims.require_scope(Scope::AuditWrite)?;
+    let claims = authenticate_mcp(&headers, &state.mcp, now).await?;
+    claims.require_scope(yah_scopes::AUDIT_WRITE)?;
     // Validate the whole batch first — atomic semantics mean we don't
     // start writing until every record passes. Kamaji retries the
     // corrected batch on 4xx; a partial commit would defeat that.
@@ -188,8 +189,8 @@ where
     A: AuditStore,
 {
     let now = now_unix();
-    let claims = authenticate_mcp(&headers, &state.mcp, now)?;
-    claims.require_scope(Scope::AuditRead)?;
+    let claims = authenticate_mcp(&headers, &state.mcp, now).await?;
+    claims.require_scope(yah_scopes::AUDIT_READ)?;
 
     let target = PrincipalId::from_str(&user)
         .map_err(|e| RouteError::InvalidAuditQuery(format!("path principal: {e}")))?;

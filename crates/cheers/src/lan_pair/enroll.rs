@@ -48,9 +48,9 @@
 //!
 //! So the only "secret" [`HttpEnrollmentSink`] carries is the user's own
 //! short-TTL, revocable session token — not a static, distributed, ledger-wide
-//! credential. `on_behalf_of` is set by the server to the same authenticated
-//! user, so `OwnershipStore::revoke_by_on_behalf_of`'s cascade sweeps the row
-//! when the account goes away.
+//! credential. The row's holder (`principal_id`) is the same authenticated
+//! user, so `OwnershipStore::revoke_by_principal`'s holder cascade sweeps the
+//! row when the account goes away.
 //!
 //! ## UserDelegation (W268 §binding ceremonies) — still deferred
 //!

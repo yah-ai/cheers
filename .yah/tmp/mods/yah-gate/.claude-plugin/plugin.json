@@ -1,0 +1,6 @@
+{
+  "name": "yah-gate",
+  "version": "0.1.0",
+  "author": { "name": "yah", "email": "human@yah.dev" },
+  "description": "Routes every tool call core would ask about to the host's approval endpoint over a Unix socket; fails closed"
+}

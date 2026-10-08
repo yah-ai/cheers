@@ -30,7 +30,7 @@
 //! |---|---|---|---|
 //! | Refresh record | `cheers:refresh:{token}` | string (JSON) | `expires_at - now` at put time |
 //! | Chain index | `cheers:chain:{chain_id}` | set of tokens | matches the longest member |
-//! | Revocation set | `cheers:revoked:{jti}` | string (revoked_at) | matches access TTL |
+//! | Revocation set | `cheers:revocations` + `cheers:revocations:epoch` | zset (score = lapse time) + integer | jtis lapse after the access TTL; devices and memberships never (R732-F6) |
 //!
 //! The prefix is configurable per-store ([`RedisRefreshStore::with_prefix`]
 //! and [`RedisRevocationStore::with_prefix`]) for multi-tenant redis

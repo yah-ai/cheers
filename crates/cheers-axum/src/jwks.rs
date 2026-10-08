@@ -13,8 +13,10 @@
 //! ## Wire shape
 //!
 //! Per RFC 8037 (CFRG curves) and RFC 7517 (JWKS): each entry is
-//! `{ kty: "OKP", crv: "Ed25519", x: <base64url-no-pad pubkey>, kid, use: "sig" }`
-//! wrapped in `{ "keys": [...] }`. The handler sorts by `kid` before serializing
+//! `{ kty: "OKP", crv: "Ed25519", x: <base64url-no-pad pubkey>, kid, use: "sig", principal, role }`
+//! wrapped in `{ "keys": [...] }`. `principal` + `role` are cheers extensions
+//! (§D5): platform keys publish `role: "issuer"`, service-principal keys
+//! `role: "assertion"`; a verifier accepts access tokens only from issuer keys. The handler sorts by `kid` before serializing
 //! so the body is deterministic across calls — a precondition for a stable
 //! `ETag`.
 //!
@@ -49,12 +51,37 @@
 //! #     S: ServicePrincipalStore + 'static,
 //! # {
 //! let state = Arc::new(JwksState {
+//!     issuer: "https://cheers.example".into(),
 //!     platform_keys: vec![PlatformSigningKey::new("platform-kid-1", platform_pubkey)],
 //!     authority,
 //! });
 //! let app: Router = Router::new().merge(router(state));
 //! # Ok(()) }
 //! ```
+//!
+//! @yah:ticket(R731-B1, "Service-principal keys verify as the issuer at kamaji — give JWKS keys a role and enforce it")
+//! @yah:status(review)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:at(2026-10-06T22:53:06Z)
+//! @yah:phase(P0)
+//! @yah:parent(R731)
+//! @yah:next("LIVE HOLE: cheers-axum/src/jwks.rs:178 publishes platform keys and every service-principal key in one flat JwkSet; Jwk has no principal or role field. oss/kamaji/crates/kamaji-bin/src/auth/verifier.rs:159-213 accepts any kid in that set and checks only iss/aud/exp, so any provisioned service principal can sign an access token with any sub and scope that kamaji accepts.")
+//! @yah:next("First: check whether any service principal is provisioned on the live cheers. If one is, treat this as an incident and tell the operator before landing anything.")
+//! @yah:next("Fix: each published JWK carries its principal and a role (issuer | assertion | self-signer, doc D5). Every service-principal key publishes as assertion. kamaji accepts only role=issuer keys for access tokens; its on-disk JWKS cache format changes with it.")
+//! @yah:next("kamaji lives in the yah camp (oss/kamaji, shared repo); operator allowed the fix to land under this cheers ticket on 2026-10-06. Note it on yah R426.")
+//! @yah:verify("kamaji verifier test: a token signed by a service-principal key with sub=user:x is rejected; a platform-key token still verifies.")
+//! @yah:verify("cargo test -p cheers-axum jwks, and the kamaji-bin auth tests in oss/kamaji.")
+//! @yah:tier(Warrior)
+//! @yah:handoff("LANDED (uncommitted, git policy defer): cheers-core/src/jwk.rs new KeyRole enum {Issuer, Assertion, SelfSigner}, kebab-case, re-exported as cheers_core::KeyRole. cheers-axum/src/jwks.rs: Jwk gains required `principal: String` + `role: KeyRole`; JwksState gains `issuer: String`; platform keys publish principal=issuer role=issuer, service keys principal=svc:<id> role=assertion; nothing emits self-signer.")
+//! @yah:handoff("kamaji (oss/kamaji, operator-authorized 2026-10-06): kamaji-bin now path-depends on cheers-core (=0.8.43-pre.1, it had no cheers dep before). auth/jwks.rs JwkKey gains required principal+role; JwksCache stores CachedKey{public_key, role}; verifier.rs rejects any non-issuer kid with new VerifyError::NotIssuerKey{kid, role} plus a warn log (self-signer also refused, comment points at D5/R731-F6). deny.rs + audit/record.rs map the new variant (audit tag not_issuer_key).")
+//! @yah:handoff("kamaji on-disk cache: StoredCache gains required `format` (CACHE_FORMAT=2); load_from_disk reads only a header first and deletes + returns None for any other/missing format, so boot refetches. No old-shape reader.")
+//! @yah:handoff("SCOPE WIDENED (loud): cheers-test-support/src/fixtures.rs build_jwks_json + fixtures/jwks.json gained principal/role (golden JWKS must match the new wire shape; 2-line hunk, no ownership code touched). kamaji cheers-mock/src/mock_issuer.rs JWKS now publishes principal=issuer_url role=issuer.")
+//! @yah:handoff("STEP 0: no cheers-server/JWKS-serving workload exists in /Users/leif/ss/yah/.yah/infra (only the camp-local cloud-admin issuer with a mounted verify key), so I found no live /.well-known/jwks.json to inspect. Live provisioning status could NOT be determined read-only; no incident message sent.")
+//! @yah:verify("Baseline cheers-axum: 68+66 pass, 11 pass/2 ignored. After: lib 68/68 (8 jwks incl. role/principal pins); tests/main 65/66, the 1 failure ownership_basic::post_with_user_sub_is_rejected_by_defense_in_depth (201 vs 400) is in R731-F7's in-flight ownership.rs area, not jwks. cheers-core 72+1 pass.")
+//! @yah:verify("kamaji-bin auth:: baseline 68 -> 72 pass (new: rejects_token_signed_by_service_principal_assertion_key, rejects_token_signed_by_self_signer_key, role_is_required_on_the_wire, old_format_cache_is_discarded_not_parsed). audit:: 37 pass, cheers-mock 18+1 pass.")
+//! @yah:verify("cheers-test-support lib did not compile at test time due to peer in-flight revoke_by_principal (R731-F7); fixture regeneration test jwks_json_matches_pinned_seed not run.")
+//! @yah:handoff("Live-provisioning check (leader): no reachable live cheers issuer. auth.yah.dev does not resolve, and .yah/infra/machines declares no cheers JWKS workload, so the courier's read-only finding stands and no incident message was sent. Re-check before the first cheers deploy that provisions an svc: principal: kamaji instances still running the pre-B1 binary accept any key in the set.")
+//! @yah:verify("Leader re-verify 2026-10-06: kamaji-bin auth tests 72 pass / 0 fail; cheers workspace 640 pass / 0 fail (the ownership_basic failure the courier saw was R731-F7 mid-flight, and it is green now).")
 
 use std::sync::Arc;
 
@@ -68,6 +95,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use cheers_core::KeyRole;
 use cheers_server::{ServicePrincipalAuthority, ServicePrincipalStore, SigningKey};
 
 use crate::error::RouteError;
@@ -116,6 +144,8 @@ impl PlatformSigningKey {
 /// `authority` is the live source for service-principal keys (`Active` +
 /// `Retiring`-in-window).
 pub struct JwksState<S> {
+    /// The issuer id platform keys publish as their `principal`.
+    pub issuer: String,
     pub platform_keys: Vec<PlatformSigningKey>,
     pub authority: Arc<ServicePrincipalAuthority<S>>,
 }
@@ -145,6 +175,12 @@ pub struct Jwk {
     pub kid: String,
     #[serde(rename = "use")]
     pub r#use: String,
+    /// Who owns this key: the issuer id for platform keys, `svc:<id>` for a
+    /// service principal's key.
+    pub principal: String,
+    /// What this key may sign (§D5). Verifiers MUST check it: only
+    /// [`KeyRole::Issuer`] keys sign access tokens.
+    pub role: KeyRole,
 }
 
 /// The wrapper shape returned by `GET /.well-known/jwks.json` — `{ "keys": [...] }`.
@@ -176,7 +212,7 @@ where
 {
     let now = now_unix();
     let published = state.authority.published_signing_keys(now).await?;
-    let set = build_jwk_set(&state.platform_keys, &published);
+    let set = build_jwk_set(&state.issuer, &state.platform_keys, &published);
     let body = serde_json::to_vec(&set).map_err(|e| RouteError::Store(e.to_string()))?;
     let etag = strong_etag(&body);
 
@@ -205,7 +241,7 @@ where
 /// Build the JWK Set from cheers's platform keys + the live service-principal
 /// keys. Sorts deterministically by `kid` so the same logical set hashes to
 /// the same ETag across calls.
-fn build_jwk_set(platform: &[PlatformSigningKey], service: &[SigningKey]) -> JwkSet {
+fn build_jwk_set(issuer: &str, platform: &[PlatformSigningKey], service: &[SigningKey]) -> JwkSet {
     let mut keys: Vec<Jwk> = Vec::with_capacity(platform.len() + service.len());
     for pk in platform {
         keys.push(Jwk {
@@ -214,6 +250,8 @@ fn build_jwk_set(platform: &[PlatformSigningKey], service: &[SigningKey]) -> Jwk
             x: URL_SAFE_NO_PAD.encode(pk.public_key),
             kid: pk.kid.clone(),
             r#use: "sig".to_string(),
+            principal: issuer.to_string(),
+            role: KeyRole::Issuer,
         });
     }
     for sk in service {
@@ -223,6 +261,8 @@ fn build_jwk_set(platform: &[PlatformSigningKey], service: &[SigningKey]) -> Jwk
             x: URL_SAFE_NO_PAD.encode(sk.public_key),
             kid: sk.kid.clone(),
             r#use: "sig".to_string(),
+            principal: sk.principal_id.to_string(),
+            role: KeyRole::Assertion,
         });
     }
     keys.sort_by(|a, b| a.kid.cmp(&b.kid));
@@ -230,7 +270,7 @@ fn build_jwk_set(platform: &[PlatformSigningKey], service: &[SigningKey]) -> Jwk
 }
 
 /// Strong ETag: `"<hex(sha256(body))>"`. Quoted per RFC 7232 §2.3.
-fn strong_etag(body: &[u8]) -> String {
+pub(crate) fn strong_etag(body: &[u8]) -> String {
     let digest = Sha256::digest(body);
     let mut out = String::with_capacity(2 + digest.len() * 2);
     out.push('"');
@@ -276,6 +316,7 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheers_core::yah_scopes;
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, header};
@@ -293,6 +334,8 @@ mod tests {
             .expect("clock past epoch")
     }
 
+    const TEST_ISSUER: &str = "https://cheers.test";
+
     fn rig(
         platform: Vec<PlatformSigningKey>,
         overlap_seconds: i64,
@@ -305,6 +348,7 @@ mod tests {
                 .with_policy(OverlapPolicy::new(overlap_seconds)),
         );
         let state = Arc::new(JwksState {
+            issuer: TEST_ISSUER.to_string(),
             platform_keys: platform,
             authority: authority.clone(),
         });
@@ -357,6 +401,8 @@ mod tests {
         assert_eq!(entry.crv, "Ed25519");
         assert_eq!(entry.r#use, "sig");
         assert_eq!(entry.kid, "platform-1");
+        assert_eq!(entry.principal, TEST_ISSUER);
+        assert_eq!(entry.role, KeyRole::Issuer);
         let decoded = URL_SAFE_NO_PAD.decode(entry.x.as_bytes()).unwrap();
         assert_eq!(decoded, &platform[0].public_key);
     }
@@ -382,6 +428,9 @@ mod tests {
         assert_eq!(set.keys.len(), 1);
         let entry = &set.keys[0];
         assert_eq!(entry.kid, provisioned.signing_key.kid);
+        assert_eq!(entry.role, KeyRole::Assertion);
+        assert_eq!(entry.principal, provisioned.signing_key.principal_id.to_string());
+        assert!(entry.principal.starts_with("svc:"));
         let decoded = URL_SAFE_NO_PAD.decode(entry.x.as_bytes()).unwrap();
         assert_eq!(
             decoded.as_slice(),
@@ -567,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn jwks_published_pubkey_verifies_an_off_cheers_minted_mcp_token() {
         use cheers_core::{
-            Actor, AuthStrength, McpClaims, Owns, PrincipalId, Scope,
+            Actor, AuthStrength, McpClaims, Owns, PrincipalId,
         };
 
         let (app, authority) = rig(vec![], OverlapPolicy::DEFAULT_OVERLAP_SECONDS);
@@ -607,7 +656,7 @@ mod tests {
             1_000,
             1_600,
             "jti-jwks-e2e",
-            vec![Scope::OwnershipWrite],
+            vec![yah_scopes::AUDIT_WRITE],
         )
         .with_act(Actor::new(PrincipalId::service("yubaba-e2e")))
         .with_owns(owns)

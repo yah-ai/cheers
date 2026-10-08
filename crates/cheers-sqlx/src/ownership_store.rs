@@ -1,15 +1,16 @@
 //! [`OwnershipStore`](cheers_server::OwnershipStore) over `sqlx`.
 //!
-//! The trait-level invariants on `granted_by` / `on_behalf_of` are also
-//! enforced by SQL `CHECK` constraints in the schema (see
-//! `migrations/{pg,sqlite}/0002_ownership.sql`). The CHECK is the belt; the
+//! The trait-level invariants on `on_behalf_of` and the one-form subject are
+//! also enforced by SQL `CHECK` constraints in the schema (see
+//! `migrations/{pg,sqlite}/0009_ownership_subject_sets.sql`). The CHECK is the belt; the
 //! Rust-side validation in [`NewOwnership::new`](cheers_server::NewOwnership)
 //! is the suspenders — a misconfigured insert never makes a round-trip to be
 //! rejected.
 
 use async_trait::async_trait;
-use cheers_core::{PrincipalId, StoreError};
-use cheers_server::ownership::{NewOwnership, OwnershipRow, OwnershipStore};
+use cheers_core::{AdmissionPolicy, PrincipalId, RevocationKey, StoreError, Subject};
+use cheers_server::ownership::{
+    TupleLease, decode_admission_policy, encode_admission_policy, new_revocation_key, Inserted, NewOwnership, OwnershipRow, OwnershipStore};
 
 use crate::error::map_sqlx_error;
 
@@ -45,6 +46,33 @@ fn parse_pid(s: String, column: &'static str) -> Result<PrincipalId, StoreError>
     })
 }
 
+/// An `ownership_version` column value as the trait's `u64`. The column only
+/// ever holds `max(v + 1, now)` from 0, so a negative value is corruption.
+#[cfg(any(feature = "pg", feature = "sqlite"))]
+fn version_from_sql(version: i64) -> Result<u64, StoreError> {
+    u64::try_from(version).map_err(|_| StoreError::Backend(format!("negative ownership version {version}")))
+}
+
+/// The column list every read shares, in the order both `row_from`s read.
+const COLUMNS: &str = "id, principal_id, subject_kind, subject_id, subject_relation, \
+                       resource_kind, resource_id, relationship, \
+                       granted_by, on_behalf_of, granted_at, revoked_at, \
+                       lease_iat, lease_refresh_after, lease_exp";
+
+/// Rebuild a row's [`Subject`] from its four subject columns. The schema's
+/// one-form CHECK makes a failure here a data-integrity error, like
+/// [`parse_pid`].
+fn parse_subject(
+    principal_id: Option<String>,
+    kind: Option<String>,
+    id: Option<String>,
+    relation: Option<String>,
+) -> Result<Subject, StoreError> {
+    let principal = principal_id.map(|s| parse_pid(s, "principal_id")).transpose()?;
+    Subject::from_parts(principal, kind, id, relation)
+        .map_err(|e| StoreError::Backend(format!("invalid subject in ownership row: {e}")))
+}
+
 #[cfg(feature = "pg")]
 mod pg {
     use super::*;
@@ -78,7 +106,12 @@ mod pg {
             .transpose()?;
         Ok(OwnershipRow::new(
             row.get("id"),
-            parse_pid(row.get("principal_id"), "principal_id")?,
+            parse_subject(
+                row.get("principal_id"),
+                row.get("subject_kind"),
+                row.get("subject_id"),
+                row.get("subject_relation"),
+            )?,
             row.get("resource_kind"),
             row.get("resource_id"),
             row.get("relationship"),
@@ -86,40 +119,61 @@ mod pg {
             on_behalf_of,
             row.get("granted_at"),
             row.get("revoked_at"),
-        ))
+        )
+        .with_lease(TupleLease::from_columns(row.get("lease_iat"), row.get("lease_refresh_after"), row.get("lease_exp"))?))
+    }
+
+    /// Advance the ownership version inside `tx` and return it — the same
+    /// transaction as the row change it versions.
+    async fn advance_version(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, now: i64) -> Result<u64, StoreError> {
+        let version: i64 =
+            sqlx::query_scalar("UPDATE ownership_version SET version = GREATEST(version + 1, $1) RETURNING version")
+                .bind(now)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        version_from_sql(version)
     }
 
     #[async_trait]
     impl OwnershipStore for PgOwnershipStore {
-        async fn insert(
-            &self,
-            o: &NewOwnership,
-            now: i64,
-        ) -> Result<OwnershipRow, StoreError> {
+        async fn insert(&self, o: &NewOwnership, now: i64) -> Result<Inserted, StoreError> {
             let id = mint_row_id();
-            let principal = o.principal_id.to_string();
+            let principal = o.subject.principal().map(|p| p.to_string());
+            let set = o.subject.as_set();
             let granted_by = o.granted_by.to_string();
             let on_behalf_of = o.on_behalf_of.as_ref().map(|p| p.to_string());
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
             sqlx::query(
                 "INSERT INTO ownership
-                    (id, principal_id, resource_kind, resource_id, relationship,
-                     granted_by, on_behalf_of, granted_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    (id, principal_id, subject_kind, subject_id, subject_relation,
+                     resource_kind, resource_id, relationship,
+                     granted_by, on_behalf_of, granted_at,
+                     lease_iat, lease_refresh_after, lease_exp)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             )
             .bind(&id)
-            .bind(&principal)
+            .bind(principal.as_deref())
+            .bind(set.map(|s| s.0))
+            .bind(set.map(|s| s.1))
+            .bind(set.map(|s| s.2))
             .bind(&o.resource_kind)
             .bind(&o.resource_id)
             .bind(&o.relationship)
             .bind(&granted_by)
             .bind(on_behalf_of.as_deref())
             .bind(now)
-            .execute(&self.pool)
+            .bind(o.lease.map(|l| l.iat))
+            .bind(o.lease.map(|l| l.lease.refresh_after()))
+            .bind(o.lease.and_then(|l| l.lease.exp()))
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-            Ok(OwnershipRow::new(
+            let version = advance_version(&mut tx, now).await?;
+            tx.commit().await.map_err(map_sqlx_error)?;
+            let row = OwnershipRow::new(
                 id,
-                o.principal_id.clone(),
+                o.subject.clone(),
                 o.resource_kind.clone(),
                 o.resource_id.clone(),
                 o.relationship.clone(),
@@ -127,15 +181,15 @@ mod pg {
                 o.on_behalf_of.clone(),
                 now,
                 None,
-            ))
+            )
+            .with_lease(o.lease);
+            Ok(Inserted { row, version })
         }
 
         async fn get(&self, id: &str) -> Result<Option<OwnershipRow>, StoreError> {
-            let row = sqlx::query(
-                "SELECT id, principal_id, resource_kind, resource_id, relationship,
-                        granted_by, on_behalf_of, granted_at, revoked_at
-                 FROM ownership WHERE id = $1",
-            )
+            let row = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership WHERE id = $1"
+            ))
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -143,59 +197,90 @@ mod pg {
             row.map(row_from).transpose()
         }
 
-        async fn revoke_by_id(&self, id: &str, now: i64) -> Result<(), StoreError> {
+        async fn revoke_by_id(&self, id: &str, now: i64) -> Result<u64, StoreError> {
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
             let res = sqlx::query(
                 "UPDATE ownership SET revoked_at = $1
                  WHERE id = $2 AND revoked_at IS NULL",
             )
             .bind(now)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-            if res.rows_affected() == 0 {
-                // Distinguish "unknown" from "already revoked" — only the
-                // former is NotFound, the latter is an idempotent no-op.
-                let exists = sqlx::query("SELECT 1 AS one FROM ownership WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(map_sqlx_error)?
-                    .is_some();
-                if !exists {
-                    return Err(StoreError::NotFound);
-                }
+            if res.rows_affected() > 0 {
+                let version = advance_version(&mut tx, now).await?;
+                tx.commit().await.map_err(map_sqlx_error)?;
+                return Ok(version);
             }
-            Ok(())
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            // Nothing changed: unknown id (NotFound), or already revoked — an
+            // idempotent no-op that reports the version as it stands.
+            let exists = sqlx::query("SELECT 1 AS one FROM ownership WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?
+                .is_some();
+            if !exists {
+                return Err(StoreError::NotFound);
+            }
+            self.current_version().await
         }
 
-        async fn revoke_by_on_behalf_of(
+        async fn revoke_by_principal(
             &self,
-            user: &PrincipalId,
+            principal: &PrincipalId,
             now: i64,
         ) -> Result<u64, StoreError> {
-            let res = sqlx::query(
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+            let swept = sqlx::query(
                 "UPDATE ownership SET revoked_at = $1
-                 WHERE on_behalf_of = $2 AND revoked_at IS NULL",
+                 WHERE principal_id = $2 AND revoked_at IS NULL",
             )
             .bind(now)
-            .bind(user.to_string())
-            .execute(&self.pool)
+            .bind(principal.to_string())
+            .execute(&mut *tx)
             .await
-            .map_err(map_sqlx_error)?;
-            Ok(res.rows_affected())
+            .map_err(map_sqlx_error)?
+            .rows_affected();
+            if swept > 0 {
+                let version = advance_version(&mut tx, now).await?;
+                tx.commit().await.map_err(map_sqlx_error)?;
+                return Ok(version);
+            }
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            self.current_version().await
+        }
+
+        async fn list_history_for_principal(
+            &self,
+            principal: &PrincipalId,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            let rows = sqlx::query(&format!("SELECT {COLUMNS} FROM ownership WHERE principal_id = $1"))
+                .bind(principal.to_string())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            rows.into_iter().map(row_from).collect()
+        }
+
+        async fn current_version(&self) -> Result<u64, StoreError> {
+            let version: i64 = sqlx::query_scalar("SELECT version FROM ownership_version")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            version_from_sql(version)
         }
 
         async fn list_for_principal(
             &self,
             principal: &PrincipalId,
         ) -> Result<Vec<OwnershipRow>, StoreError> {
-            let rows = sqlx::query(
-                "SELECT id, principal_id, resource_kind, resource_id, relationship,
-                        granted_by, on_behalf_of, granted_at, revoked_at
-                 FROM ownership
-                 WHERE principal_id = $1 AND revoked_at IS NULL",
-            )
+            let rows = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership
+                 WHERE principal_id = $1 AND revoked_at IS NULL"
+            ))
             .bind(principal.to_string())
             .fetch_all(&self.pool)
             .await
@@ -208,18 +293,111 @@ mod pg {
             resource_kind: &str,
             resource_id: &str,
         ) -> Result<Vec<OwnershipRow>, StoreError> {
-            let rows = sqlx::query(
-                "SELECT id, principal_id, resource_kind, resource_id, relationship,
-                        granted_by, on_behalf_of, granted_at, revoked_at
-                 FROM ownership
-                 WHERE resource_kind = $1 AND resource_id = $2 AND revoked_at IS NULL",
-            )
+            let rows = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership
+                 WHERE resource_kind = $1 AND resource_id = $2 AND revoked_at IS NULL"
+            ))
             .bind(resource_kind)
             .bind(resource_id)
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
             rows.into_iter().map(row_from).collect()
+        }
+
+        async fn list_for_subject_set(
+            &self,
+            kind: &str,
+            id: &str,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            let rows = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership
+                 WHERE subject_kind = $1 AND subject_id = $2 AND revoked_at IS NULL"
+            ))
+            .bind(kind)
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            rows.into_iter().map(row_from).collect()
+        }
+
+        async fn list_for_kind(
+            &self,
+            resource_kind: &str,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            let rows = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership
+                 WHERE resource_kind = $1 AND revoked_at IS NULL"
+            ))
+            .bind(resource_kind)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            rows.into_iter().map(row_from).collect()
+        }
+
+        async fn revocation_key(&self, kind: &str, id: &str) -> Result<RevocationKey, StoreError> {
+            // Insert-or-ignore, then reread: a concurrent creator's row wins
+            // and both callers return it (migration 0014).
+            sqlx::query(
+                "INSERT INTO revocation_keys (resource_kind, resource_id, key) VALUES ($1, $2, $3)
+                 ON CONFLICT (resource_kind, resource_id) DO NOTHING",
+            )
+            .bind(kind)
+            .bind(id)
+            .bind(new_revocation_key().as_bytes().to_vec())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            let bytes: Vec<u8> =
+                sqlx::query_scalar("SELECT key FROM revocation_keys WHERE resource_kind = $1 AND resource_id = $2")
+                    .bind(kind)
+                    .bind(id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            super::revocation_key_from_sql(kind, id, bytes)
+        }
+
+        async fn admission_policy(&self, kind: &str, id: &str) -> Result<Option<AdmissionPolicy>, StoreError> {
+            let column: Option<String> = sqlx::query_scalar(
+                "SELECT policy FROM admission_policies WHERE resource_kind = $1 AND resource_id = $2",
+            )
+            .bind(kind)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            column.map(|c| decode_admission_policy(kind, id, &c)).transpose()
+        }
+
+        async fn set_admission_policy(
+            &self,
+            kind: &str,
+            id: &str,
+            policy: Option<&AdmissionPolicy>,
+            now: i64,
+        ) -> Result<u64, StoreError> {
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+            match policy {
+                Some(p) => sqlx::query(
+                    "INSERT INTO admission_policies (resource_kind, resource_id, policy) VALUES ($1, $2, $3)
+                     ON CONFLICT (resource_kind, resource_id) DO UPDATE SET policy = excluded.policy",
+                )
+                .bind(kind)
+                .bind(id)
+                .bind(encode_admission_policy(p)),
+                None => sqlx::query("DELETE FROM admission_policies WHERE resource_kind = $1 AND resource_id = $2")
+                    .bind(kind)
+                    .bind(id),
+            }
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            let version = advance_version(&mut tx, now).await?;
+            tx.commit().await.map_err(map_sqlx_error)?;
+            Ok(version)
         }
     }
 }
@@ -257,7 +435,12 @@ mod sqlite {
             .transpose()?;
         Ok(OwnershipRow::new(
             row.get("id"),
-            parse_pid(row.get("principal_id"), "principal_id")?,
+            parse_subject(
+                row.get("principal_id"),
+                row.get("subject_kind"),
+                row.get("subject_id"),
+                row.get("subject_relation"),
+            )?,
             row.get("resource_kind"),
             row.get("resource_id"),
             row.get("relationship"),
@@ -265,40 +448,61 @@ mod sqlite {
             on_behalf_of,
             row.get("granted_at"),
             row.get("revoked_at"),
-        ))
+        )
+        .with_lease(TupleLease::from_columns(row.get("lease_iat"), row.get("lease_refresh_after"), row.get("lease_exp"))?))
+    }
+
+    /// Advance the ownership version inside `tx` and return it — the same
+    /// transaction as the row change it versions.
+    async fn advance_version(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, now: i64) -> Result<u64, StoreError> {
+        let version: i64 =
+            sqlx::query_scalar("UPDATE ownership_version SET version = MAX(version + 1, ?) RETURNING version")
+                .bind(now)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        version_from_sql(version)
     }
 
     #[async_trait]
     impl OwnershipStore for SqliteOwnershipStore {
-        async fn insert(
-            &self,
-            o: &NewOwnership,
-            now: i64,
-        ) -> Result<OwnershipRow, StoreError> {
+        async fn insert(&self, o: &NewOwnership, now: i64) -> Result<Inserted, StoreError> {
             let id = mint_row_id();
-            let principal = o.principal_id.to_string();
+            let principal = o.subject.principal().map(|p| p.to_string());
+            let set = o.subject.as_set();
             let granted_by = o.granted_by.to_string();
             let on_behalf_of = o.on_behalf_of.as_ref().map(|p| p.to_string());
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
             sqlx::query(
                 "INSERT INTO ownership
-                    (id, principal_id, resource_kind, resource_id, relationship,
-                     granted_by, on_behalf_of, granted_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (id, principal_id, subject_kind, subject_id, subject_relation,
+                     resource_kind, resource_id, relationship,
+                     granted_by, on_behalf_of, granted_at,
+                     lease_iat, lease_refresh_after, lease_exp)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
-            .bind(&principal)
+            .bind(principal.as_deref())
+            .bind(set.map(|s| s.0))
+            .bind(set.map(|s| s.1))
+            .bind(set.map(|s| s.2))
             .bind(&o.resource_kind)
             .bind(&o.resource_id)
             .bind(&o.relationship)
             .bind(&granted_by)
             .bind(on_behalf_of.as_deref())
             .bind(now)
-            .execute(&self.pool)
+            .bind(o.lease.map(|l| l.iat))
+            .bind(o.lease.map(|l| l.lease.refresh_after()))
+            .bind(o.lease.and_then(|l| l.lease.exp()))
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-            Ok(OwnershipRow::new(
+            let version = advance_version(&mut tx, now).await?;
+            tx.commit().await.map_err(map_sqlx_error)?;
+            let row = OwnershipRow::new(
                 id,
-                o.principal_id.clone(),
+                o.subject.clone(),
                 o.resource_kind.clone(),
                 o.resource_id.clone(),
                 o.relationship.clone(),
@@ -306,15 +510,15 @@ mod sqlite {
                 o.on_behalf_of.clone(),
                 now,
                 None,
-            ))
+            )
+            .with_lease(o.lease);
+            Ok(Inserted { row, version })
         }
 
         async fn get(&self, id: &str) -> Result<Option<OwnershipRow>, StoreError> {
-            let row = sqlx::query(
-                "SELECT id, principal_id, resource_kind, resource_id, relationship,
-                        granted_by, on_behalf_of, granted_at, revoked_at
-                 FROM ownership WHERE id = ?",
-            )
+            let row = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership WHERE id = ?"
+            ))
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -322,57 +526,90 @@ mod sqlite {
             row.map(row_from).transpose()
         }
 
-        async fn revoke_by_id(&self, id: &str, now: i64) -> Result<(), StoreError> {
+        async fn revoke_by_id(&self, id: &str, now: i64) -> Result<u64, StoreError> {
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
             let res = sqlx::query(
                 "UPDATE ownership SET revoked_at = ?
                  WHERE id = ? AND revoked_at IS NULL",
             )
             .bind(now)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-            if res.rows_affected() == 0 {
-                let exists = sqlx::query("SELECT 1 AS one FROM ownership WHERE id = ?")
-                    .bind(id)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(map_sqlx_error)?
-                    .is_some();
-                if !exists {
-                    return Err(StoreError::NotFound);
-                }
+            if res.rows_affected() > 0 {
+                let version = advance_version(&mut tx, now).await?;
+                tx.commit().await.map_err(map_sqlx_error)?;
+                return Ok(version);
             }
-            Ok(())
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            // Nothing changed: unknown id (NotFound), or already revoked — an
+            // idempotent no-op that reports the version as it stands.
+            let exists = sqlx::query("SELECT 1 AS one FROM ownership WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?
+                .is_some();
+            if !exists {
+                return Err(StoreError::NotFound);
+            }
+            self.current_version().await
         }
 
-        async fn revoke_by_on_behalf_of(
+        async fn revoke_by_principal(
             &self,
-            user: &PrincipalId,
+            principal: &PrincipalId,
             now: i64,
         ) -> Result<u64, StoreError> {
-            let res = sqlx::query(
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+            let swept = sqlx::query(
                 "UPDATE ownership SET revoked_at = ?
-                 WHERE on_behalf_of = ? AND revoked_at IS NULL",
+                 WHERE principal_id = ? AND revoked_at IS NULL",
             )
             .bind(now)
-            .bind(user.to_string())
-            .execute(&self.pool)
+            .bind(principal.to_string())
+            .execute(&mut *tx)
             .await
-            .map_err(map_sqlx_error)?;
-            Ok(res.rows_affected())
+            .map_err(map_sqlx_error)?
+            .rows_affected();
+            if swept > 0 {
+                let version = advance_version(&mut tx, now).await?;
+                tx.commit().await.map_err(map_sqlx_error)?;
+                return Ok(version);
+            }
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            self.current_version().await
+        }
+
+        async fn list_history_for_principal(
+            &self,
+            principal: &PrincipalId,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            let rows = sqlx::query(&format!("SELECT {COLUMNS} FROM ownership WHERE principal_id = ?"))
+                .bind(principal.to_string())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            rows.into_iter().map(row_from).collect()
+        }
+
+        async fn current_version(&self) -> Result<u64, StoreError> {
+            let version: i64 = sqlx::query_scalar("SELECT version FROM ownership_version")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            version_from_sql(version)
         }
 
         async fn list_for_principal(
             &self,
             principal: &PrincipalId,
         ) -> Result<Vec<OwnershipRow>, StoreError> {
-            let rows = sqlx::query(
-                "SELECT id, principal_id, resource_kind, resource_id, relationship,
-                        granted_by, on_behalf_of, granted_at, revoked_at
-                 FROM ownership
-                 WHERE principal_id = ? AND revoked_at IS NULL",
-            )
+            let rows = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership
+                 WHERE principal_id = ? AND revoked_at IS NULL"
+            ))
             .bind(principal.to_string())
             .fetch_all(&self.pool)
             .await
@@ -385,12 +622,10 @@ mod sqlite {
             resource_kind: &str,
             resource_id: &str,
         ) -> Result<Vec<OwnershipRow>, StoreError> {
-            let rows = sqlx::query(
-                "SELECT id, principal_id, resource_kind, resource_id, relationship,
-                        granted_by, on_behalf_of, granted_at, revoked_at
-                 FROM ownership
-                 WHERE resource_kind = ? AND resource_id = ? AND revoked_at IS NULL",
-            )
+            let rows = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership
+                 WHERE resource_kind = ? AND resource_id = ? AND revoked_at IS NULL"
+            ))
             .bind(resource_kind)
             .bind(resource_id)
             .fetch_all(&self.pool)
@@ -398,5 +633,108 @@ mod sqlite {
             .map_err(map_sqlx_error)?;
             rows.into_iter().map(row_from).collect()
         }
+
+        async fn list_for_subject_set(
+            &self,
+            kind: &str,
+            id: &str,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            let rows = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership
+                 WHERE subject_kind = ? AND subject_id = ? AND revoked_at IS NULL"
+            ))
+            .bind(kind)
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            rows.into_iter().map(row_from).collect()
+        }
+
+        async fn list_for_kind(
+            &self,
+            resource_kind: &str,
+        ) -> Result<Vec<OwnershipRow>, StoreError> {
+            let rows = sqlx::query(&format!(
+                "SELECT {COLUMNS} FROM ownership
+                 WHERE resource_kind = ? AND revoked_at IS NULL"
+            ))
+            .bind(resource_kind)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            rows.into_iter().map(row_from).collect()
+        }
+
+        async fn revocation_key(&self, kind: &str, id: &str) -> Result<RevocationKey, StoreError> {
+            // Insert-or-ignore, then reread: a concurrent creator's row wins
+            // and both callers return it (migration 0014).
+            sqlx::query(
+                "INSERT INTO revocation_keys (resource_kind, resource_id, key) VALUES (?, ?, ?)
+                 ON CONFLICT (resource_kind, resource_id) DO NOTHING",
+            )
+            .bind(kind)
+            .bind(id)
+            .bind(new_revocation_key().as_bytes().to_vec())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            let bytes: Vec<u8> =
+                sqlx::query_scalar("SELECT key FROM revocation_keys WHERE resource_kind = ? AND resource_id = ?")
+                    .bind(kind)
+                    .bind(id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            super::revocation_key_from_sql(kind, id, bytes)
+        }
+
+        async fn admission_policy(&self, kind: &str, id: &str) -> Result<Option<AdmissionPolicy>, StoreError> {
+            let column: Option<String> = sqlx::query_scalar(
+                "SELECT policy FROM admission_policies WHERE resource_kind = ? AND resource_id = ?",
+            )
+            .bind(kind)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            column.map(|c| decode_admission_policy(kind, id, &c)).transpose()
+        }
+
+        async fn set_admission_policy(
+            &self,
+            kind: &str,
+            id: &str,
+            policy: Option<&AdmissionPolicy>,
+            now: i64,
+        ) -> Result<u64, StoreError> {
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+            match policy {
+                Some(p) => sqlx::query(
+                    "INSERT INTO admission_policies (resource_kind, resource_id, policy) VALUES (?, ?, ?)
+                     ON CONFLICT (resource_kind, resource_id) DO UPDATE SET policy = excluded.policy",
+                )
+                .bind(kind)
+                .bind(id)
+                .bind(encode_admission_policy(p)),
+                None => sqlx::query("DELETE FROM admission_policies WHERE resource_kind = ? AND resource_id = ?")
+                    .bind(kind)
+                    .bind(id),
+            }
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            let version = advance_version(&mut tx, now).await?;
+            tx.commit().await.map_err(map_sqlx_error)?;
+            Ok(version)
+        }
     }
+}
+
+/// The 32 bytes a `revocation_keys.key` column read back as.
+fn revocation_key_from_sql(kind: &str, id: &str, bytes: Vec<u8>) -> Result<RevocationKey, StoreError> {
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| StoreError::Backend(format!("revocation key for {kind}/{id} is not 32 bytes")))?;
+    Ok(RevocationKey::from_bytes(bytes))
 }

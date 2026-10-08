@@ -130,6 +130,22 @@ pub struct Rotated {
     pub record: RefreshTokenRecord,
 }
 
+/// A refresh record that [`RefreshRotator::check`] found spendable at the
+/// time of the check: known, not revoked, not consumed, not expired.
+///
+/// Opaque on purpose: the only way to build one is a successful check, so the
+/// only way to reach [`RefreshRotator::commit`] is through it.
+#[derive(Debug, Clone)]
+pub struct LiveRefresh(RefreshTokenRecord);
+
+impl LiveRefresh {
+    /// The checked record — read `user_id` / `device_id` off it to decide
+    /// whether to commit.
+    pub fn record(&self) -> &RefreshTokenRecord {
+        &self.0
+    }
+}
+
 /// Mint and rotate refresh tokens against a [`RefreshStore`].
 ///
 /// Holds a borrow of the store; the rotator itself is cheap to construct
@@ -182,7 +198,24 @@ impl<'s, S: RefreshStore + ?Sized> RefreshRotator<'s, S> {
     /// - [`RefreshError::Replay`] — the token was already consumed; the
     ///   chain is revoked as a side effect of this call.
     /// - [`RefreshError::Expired`] — within TTL is required.
+    ///
+    /// Equivalent to [`check`](Self::check) followed by
+    /// [`commit`](Self::commit); split callers use the gap between the two to
+    /// refuse a rotation without spending the token.
     pub async fn rotate(&self, presented: &str, now: i64) -> Result<Rotated, RefreshError> {
+        let live = self.check(presented, now).await?;
+        self.commit(live, now).await
+    }
+
+    /// Phase one of a rotation: look `presented` up and prove it is spendable,
+    /// **without spending it**.
+    ///
+    /// Every failure of [`rotate`](Self::rotate) except a lost consume race
+    /// surfaces here — including replay, whose chain revocation happens here
+    /// as a side effect. A successful check mutates nothing, so a caller that
+    /// decides not to [`commit`](Self::commit) (R730: no device binding to
+    /// mint with) leaves the chain exactly as it found it.
+    pub async fn check(&self, presented: &str, now: i64) -> Result<LiveRefresh, RefreshError> {
         // The store is keyed by hash, so hash the presented secret before every
         // lookup/mutation. `existing.token` read back is therefore already the
         // hash (used as-is for mark_consumed and as the successor's `parent`).
@@ -206,6 +239,17 @@ impl<'s, S: RefreshStore + ?Sized> RefreshRotator<'s, S> {
         if existing.expires_at <= now {
             return Err(RefreshError::Expired);
         }
+        Ok(LiveRefresh(existing))
+    }
+
+    /// Phase two of a rotation: spend the checked token and issue its
+    /// successor on the same chain.
+    ///
+    /// The [`LiveRefresh`] argument can only come from [`check`](Self::check),
+    /// so a commit is always preceded by the full validity check. The check
+    /// result is a snapshot, though, and the consume below is the real gate.
+    pub async fn commit(&self, live: LiveRefresh, now: i64) -> Result<Rotated, RefreshError> {
+        let LiveRefresh(existing) = live;
 
         // Atomically consume *first*, and treat losing the race as a replay.
         // The `existing.consumed` check above is only a fast path off a stale

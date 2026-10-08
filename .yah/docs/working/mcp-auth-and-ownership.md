@@ -145,12 +145,26 @@ Composition rules cheers enforces at grant time and at mint time (per yah/W159
 3. **`<category>:admin` is distinct.** Granting `camp:admin` does NOT imply
    `camp:read` or `camp:write` — they must be in the same grant or a
    separate one. Kamaji does exact-match against the token's scope list.
-4. **`ownership:write` is `kind=service` only.** Grant API rejects
-   `(principal_kind=user, scope=ownership:write)`. Same for `audit:write`.
+4. **`audit:write` is `kind=service` only.** Grant API rejects
+   `(principal_kind=user, scope=audit:write)`. *Superseded in part by D4
+   (`product-scopes-and-authorization.md` §D4, R731-F8): the
+   `ownership:write` half of this rule is gone along with the scope itself —
+   ownership writes are authorized by relationship, not by scope.*
 5. **`aud`-scoping is mandatory.** Cheers refuses to mint a token whose `aud`
    the principal isn't entitled to (membership check at mint).
 
 ## Ownership table
+
+> **Superseded by D4** (`product-scopes-and-authorization.md` §D4, R731-F8).
+> The write path below (`POST /ownership` gated on `ownership:write`, yubaba
+> only, per-writer scoping) no longer exists. The router now accepts a
+> session or MCP bearer and allows a write/revoke of relation `r` on `R` only
+> when the caller holds on `R` a relation whose grants include `r`
+> (`SchemaRegistry::may_grant`); `granted_by` is the verified actor and
+> `on_behalf_of` comes only from a verified `act` claim. First grant-holders
+> are seeded at startup by `seed_ownership`, never through the router. The
+> table shape itself is unchanged. Open: whether a grant should require a
+> recent passkey ceremony (nothing enforces session age today).
 
 Generic `principal × resource × kind` shape so cheers doesn't grow a per-kind
 table for every new resource type yah adds.

@@ -68,6 +68,7 @@
 //! ```
 //!
 //! @yah:relay(R729, "Publish cheers-axum with PasskeyRegistrationObserver (committed 8fb16523, unpublished) — noisetable R131-T37 compiles only under a devcrate burst until it ships")
+//! @yah:status(review)
 //! @yah:at(2026-10-01T21:44:01Z)
 //! @yah:assignee(agent:bundle-anthropic-ashguard)
 //! @yah:next("OPERATOR: run `scripts/release-all.sh 0.8.42 --execute --allow-dirty-tree` (operator chose a full lockstep 0.8.42 on 2026-10-01; camp git-policy=defer, so agents cannot commit, tag, push, or publish). Preflight passed on 2026-10-01 (log /tmp/che-r729-pre1.log): all 12 oss workspaces are clean at 0.8.41; root crates are still blocked on workspace-hack (pre-existing, not this ticket).")
@@ -75,6 +76,8 @@
 //! @yah:blocked_on(operator)
 //! @yah:handoff("2026-10-01 (Ashguard): verified that PasskeyRegistrationObserver is in the tree. `cargo test -p cheers-axum` is green (60+68+10 passed). The operator chose a lockstep 0.8.42 via the release-all wizard rather than a cheers-only release (cheers depends on mshr at 0.8.41, so a single-repo bump would desync the train). The release-all.sh 0.8.42 preflight exited 0 and wrote nothing. Git and publish steps are the operator's to run under git-policy=defer.")
 //! @yah:handoff("Tree anchor at handoff: 84caba1edf35c5c47b6c9b66c74e703568d46612 — the shared tree as I left it. Diff against it (`git diff 84caba1edf35c5c47b6c9b66c74e703568d46612..HEAD`) to see what landed under you, and quote this SHA rather than 'HEAD' in any revert/restore instruction.")
+//! @yah:handoff("cheers-axum 0.8.42 is on crates.io (max_version 0.8.42) with PasskeyRegistrationObserver. The consumer side landed in noisetable R131-T38: five cheers* pins bumped to 0.8.42, the cheers devcrate burst ended, and web/services/Cargo.lock now resolves all six cheers* packages from the registry at 0.8.42. Done by the noisetable R131 leader @Ashguard:polaris (session:08934dc6).")
+//! @yah:verify("Independent second-agent check (noisetable session:6be910b8): `cd web/services && cargo test -p noisetable-account --no-fail-fast` gave 368 pass / 0 fail, matching the 368/0 baseline. The noisetable QED pipeline web-services-published, which resolves against crates.io only, came back green.")
 //! @yah:gotcha("0.8.42 is semver-compatible with ^0.8 in cargo, but the new required PasskeyAuthState.registration_observer field breaks any external constructor on `cargo update`. The operator accepted this on 2026-10-01 (pre-1.0, consumers are internal).")
 
 use std::collections::HashMap;

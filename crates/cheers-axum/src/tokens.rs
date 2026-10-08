@@ -168,7 +168,10 @@ use axum::routing::{delete, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use cheers_core::{Claims, McpClaims, PrincipalId, PrincipalKind, Scope, TokenVerifier, UserId};
+use cheers_core::{
+    Claims, McpClaims, PrincipalId, PrincipalKind, Revoked, Scope, ScopeRegistry, TokenVerifier,
+    UserId,
+};
 use cheers_server::{
     AuditRecord, AuditStore, BundleStore, EdgeVerifier, GrantStore, McpAuthority, McpMintError,
     OwnershipStore, PasetoV4PublicVerifier, RevocationReader, RevocationWriter, UserTokenRecord,
@@ -285,21 +288,31 @@ pub struct RotateTokenBody {
 /// credential management could manage credentials, and none of the verbs this
 /// gates grants authority at an audience.
 pub struct ApiTokenTrust {
-    pub verifier: Arc<PasetoV4PublicVerifier>,
-    pub expected_kid: String,
+    pub verifier: Arc<cheers_verify::KeySetVerifier>,
     pub expected_iss: String,
 }
 
 impl ApiTokenTrust {
+    /// Static key set: `verifier`'s key as the one issuer-role key under `kid`
+    /// (R731-F6 — same key-set path as [`McpAuthState`](crate::McpAuthState)).
     pub fn new(
         verifier: PasetoV4PublicVerifier,
-        expected_kid: impl Into<String>,
+        kid: impl Into<String>,
         expected_iss: impl Into<String>,
     ) -> Self {
+        let expected_iss = expected_iss.into();
+        let key: [u8; 32] = verifier
+            .public_key()
+            .as_bytes()
+            .try_into()
+            .expect("Ed25519 public key is 32 bytes");
         Self {
-            verifier: Arc::new(verifier),
-            expected_kid: expected_kid.into(),
-            expected_iss: expected_iss.into(),
+            verifier: Arc::new(cheers_verify::KeySetVerifier::from_issuer_key(
+                kid,
+                &key,
+                expected_iss.clone(),
+            )),
+            expected_iss,
         }
     }
 }
@@ -307,7 +320,6 @@ impl ApiTokenTrust {
 impl std::fmt::Debug for ApiTokenTrust {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApiTokenTrust")
-            .field("expected_kid", &self.expected_kid)
             .field("expected_iss", &self.expected_iss)
             .finish_non_exhaustive()
     }
@@ -444,12 +456,12 @@ where
     let claims = verify_mcp_bearer(
         headers,
         &state.pat.verifier,
-        &state.pat.expected_kid,
         &state.pat.expected_iss,
         // No audience policy — deliberate, see the module docs.
         None,
         now,
-    )?;
+    )
+    .await?;
     if claims.sub.kind != PrincipalKind::User {
         return Err(RouteError::Unauthorized);
     }
@@ -504,7 +516,7 @@ where
     if body.aud.trim().is_empty() {
         return Err(RouteError::InvalidTokenRequest("aud must not be empty".into()));
     }
-    let requested = parse_scopes(&body.scopes)?;
+    let requested = parse_scopes(state.mcp.scopes(), &body.scopes)?;
 
     let principal = PrincipalId::user(claims.sub.as_str());
     let minted = state
@@ -613,7 +625,7 @@ where
         return Err(RouteError::UnknownToken);
     }
 
-    state.revocations.revoke(&row.jti).await?;
+    state.revocations.revoke(&Revoked::jti(&row.jti, Some(row.expires_at))).await?;
     state.tokens.mark_revoked(&row.jti).await?;
 
     write_audit(
@@ -729,7 +741,7 @@ where
         Some(n) => n.trim().to_owned(),
         None => row.name.clone(),
     };
-    let requested = parse_scopes(&body.scopes)?;
+    let requested = parse_scopes(state.mcp.scopes(), &body.scopes)?;
 
     // The ceiling, and the aud, come from the credential in hand. For a PAT
     // the signed claims are the authority; the metadata row is only what the
@@ -763,7 +775,7 @@ where
     );
     state.tokens.insert(&record).await?;
 
-    state.revocations.revoke(&row.jti).await?;
+    state.revocations.revoke(&Revoked::jti(&row.jti, Some(row.expires_at))).await?;
     state.tokens.mark_revoked(&row.jti).await?;
 
     // Two rows, one event: the rotation is findable from either id, which is
@@ -807,10 +819,18 @@ where
 /// wildcard scope is a 400 naming it — [`Scope::from_str`] is where
 /// composition rule (1) (no wildcards on the wire) is enforced, so this is
 /// also the wildcard rejection.
-fn parse_scopes(raw: &[String]) -> Result<Vec<Scope>, RouteError> {
+/// Parse client-requested scopes and refuse any this deployment's registry
+/// does not declare — an unknown scope is a malformed request, not merely an
+/// unheld one.
+fn parse_scopes(registry: &ScopeRegistry, raw: &[String]) -> Result<Vec<Scope>, RouteError> {
     raw.iter()
         .map(|s| {
-            Scope::from_str(s).map_err(|e| RouteError::InvalidTokenRequest(e.to_string()))
+            let scope =
+                Scope::from_str(s).map_err(|e| RouteError::InvalidTokenRequest(e.to_string()))?;
+            if !registry.contains(&scope) {
+                return Err(RouteError::InvalidTokenRequest(format!("unknown scope '{scope}'")));
+            }
+            Ok(scope)
         })
         .collect()
 }
@@ -863,19 +883,21 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheers_core::yah_scopes;
 
     #[test]
     fn parse_scopes_maps_wire_strings_and_rejects_unknown() {
-        let ok = parse_scopes(&["cloud:read".into(), "board:write".into()]).unwrap();
-        assert_eq!(ok, vec![Scope::CloudRead, Scope::BoardWrite]);
-        assert!(parse_scopes(&["cloud:everything".into()]).is_err());
+        let reg = yah_scopes::registry_at(["https://kamaji.example"]).unwrap();
+        let ok = parse_scopes(&reg, &["cloud:read".into(), "board:write".into()]).unwrap();
+        assert_eq!(ok, vec![yah_scopes::CLOUD_READ, yah_scopes::BOARD_WRITE]);
+        assert!(parse_scopes(&reg, &["cloud:everything".into()]).is_err());
     }
 
     /// Composition rule (1): no wildcards on the wire. The request body is the
     /// outermost place a `cloud:*` could arrive, so it must die here.
     #[test]
     fn parse_scopes_rejects_a_wildcard() {
-        let err = parse_scopes(&["cloud:*".into()]).unwrap_err();
+        let err = parse_scopes(&yah_scopes::registry_at(["https://kamaji.example"]).unwrap(), &["cloud:*".into()]).unwrap_err();
         assert!(matches!(err, RouteError::InvalidTokenRequest(_)));
     }
 
@@ -885,7 +907,7 @@ mod tests {
             "j1",
             cheers_core::UserId::new("alice"),
             "ci",
-            vec![Scope::CloudRead],
+            vec![yah_scopes::CLOUD_READ],
             "https://kamaji.example",
             1_000,
             9_000,

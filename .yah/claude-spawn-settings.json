@@ -21,7 +21,6 @@
         "hooks": [
           {
             "input": {
-              "background_task_id": "${tool_response.backgroundTaskId}",
               "command": "${tool_input.command}",
               "hook_event_name": "${hook_event_name}",
               "session_id": "${session_id}"
@@ -72,6 +71,40 @@
           }
         ],
         "matcher": "Read"
+      },
+      {
+        "hooks": [
+          {
+            "input": {
+              "command": "${tool_input.command}",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}"
+            },
+            "server": "yah",
+            "timeout": 5,
+            "tool": "git.policy",
+            "type": "mcp_tool"
+          }
+        ],
+        "matcher": "Bash"
+      },
+      {
+        "hooks": [
+          {
+            "input": {
+              "cwd": "${cwd}",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "tool_input": "${tool_input}",
+              "tool_name": "${tool_name}"
+            },
+            "server": "yah",
+            "timeout": 5,
+            "tool": "path.policy",
+            "type": "mcp_tool"
+          }
+        ],
+        "matcher": "Read|Grep|Glob|Edit|Write|MultiEdit|NotebookEdit|Bash"
       }
     ]
   },
@@ -81,7 +114,8 @@
         "mcp",
         "/Users/leif/ss/yah/oss/cheers"
       ],
-      "command": "/Applications/yah.app/Contents/MacOS/yah"
+      "command": "/Applications/yah.app/Contents/MacOS/yah",
+      "timeout": 3900000
     }
   }
 }

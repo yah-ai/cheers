@@ -50,7 +50,6 @@
 //!
 //! @yah:relay(R020, "MCP auth and ownership — principal kinds, ownership table, mint paths, audit")
 //! @yah:at(2026-06-04T01:34:48Z)
-//! @yah:status(open)
 //! @yah:next("Resolve wire-envelope open question (PASETO v4.public vs JWT/Ed25519) in the -S1 spike before any mint-path ticket starts.")
 //! @yah:next("Land foundation tickets (principal kinds, scope vocab, ownership table) in cheers-core/cheers-server before mint paths.")
 //! @yah:next("Mint paths, admin endpoints, JWKS, audit can ship in parallel once the foundation is in.")
@@ -62,28 +61,61 @@
 //! @arch:see(.yah/docs/working/mcp-auth-and-ownership.md)
 //! @arch:see(.yah/docs/working/edge-verifiable-auth.md)
 //! @yah:depends_on(R019-F6)
+//! @yah:gotcha("SUPERSEDED 2026-10-06 (operator decision, R731 / product-scopes-and-authorization.md D4): ownership:write and granted_by are no longer service-only; the right to grant becomes a relationship. Do not build new code on the service-only rule.")
 
+pub mod admission;
+pub mod artifact;
+pub mod assertion;
+pub mod ceiling;
 pub mod claims;
 pub mod codec;
 pub mod delegation;
 pub mod error;
+pub mod jwk;
+pub mod knock;
+pub mod lease;
 pub mod mcp;
 pub mod principal;
+pub mod revocation;
+pub mod schema;
+pub mod scope;
+pub mod snapshot;
+pub mod standing;
 pub mod store;
+pub mod yah_scopes;
 
 pub use claims::{
     Claims, Credential, DeviceBinding, DeviceId, PeerKey, PeerKeyAlgorithm, PeerKeyError, User,
     UserId,
 };
+pub use artifact::SignedArtifact;
+pub use assertion::ClientAssertion;
+pub use revocation::{MembershipTag, RevocationEntry, RevocationKey, RevocationSet, Revoked};
+pub use snapshot::{ResourceRevocationKey, SetSnapshot, SnapshotMember};
+pub use knock::{Admit, AdmitSource, DeviceSigned, Knock, KnockError, Offer};
+pub use lease::{Lease, LeaseError, LeaseState};
+pub use admission::{
+    evaluate_admit, AdmissionMode, AdmissionPath, AdmissionPolicy, AdmissionRefusal, AdmitFacts, Confirmation, LeaseRequest,
+    PathLeases, PolicyError, PostedLease,
+};
+pub use standing::StandingBinding;
+pub use ceiling::{CeilingError, ServiceCeiling};
 pub use delegation::{DelegationError, UserDelegation};
 // The keyless capability traits + the codec error. The verify/mint impls that
 // satisfy these live in cheers-verify / cheers-server — cheers-core ships only
 // the contract, so a device or verify-only consumer can name `TokenVerifier`
 // (e.g. hold a `dyn TokenVerifier`) without compiling any crypto.
 pub use codec::{Codec, CodecError, TokenMinter, TokenVerifier};
+pub use jwk::KeyRole;
 pub use error::{Error, RefreshError, Result};
-pub use mcp::{
-    validate_grant, Actor, AuthStrength, GrantError, McpClaims, Owns, Scope, ScopeParseError,
+pub use mcp::{validate_grant, Actor, AuthStrength, GrantError, McpClaims, Owns};
+pub use schema::{
+    Holdings, Lookup, Member, RelationDef, RelationTuple, ResolvedRelation, ResourceSchema, SchemaError,
+    SchemaRegistry, Subject, SubjectFormError, TupleSource, KIND_RESOURCE, MAX_SET_HOPS,
+};
+pub use scope::{
+    Audiences, Scope, ScopeDef, ScopeParseError, ScopeRegistry, ScopeRegistryError,
+    ScopeRegistryBuilder,
 };
 pub use principal::{
     Principal, PrincipalError, PrincipalId, PrincipalIdParseError, PrincipalKind, PrincipalStatus,

@@ -256,6 +256,7 @@ impl UserTokenStore for MemoryUserTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheers_core::yah_scopes;
     use pollster::block_on;
 
     fn rec(jti: &str, user: &str, expires_at: i64) -> UserTokenRecord {
@@ -263,7 +264,7 @@ mod tests {
             jti,
             UserId::new(user),
             "ci",
-            vec![Scope::CloudRead],
+            vec![yah_scopes::CLOUD_READ],
             "https://kamaji.example",
             1_000,
             expires_at,
@@ -313,7 +314,7 @@ mod tests {
 
     #[test]
     fn scopes_round_trip_through_the_column_encoding() {
-        let scopes = vec![Scope::CloudRead, Scope::BoardWrite, Scope::CampAdmin];
+        let scopes = vec![yah_scopes::CLOUD_READ, yah_scopes::BOARD_WRITE, yah_scopes::CAMP_ADMIN];
         let raw = encode_scopes(&scopes);
         assert_eq!(raw, "cloud:read board:write camp:admin");
         assert_eq!(decode_scopes(&raw).unwrap(), scopes);
@@ -324,12 +325,15 @@ mod tests {
         assert_eq!(decode_scopes("").unwrap(), Vec::<Scope>::new());
     }
 
-    /// A scope cheers cannot parse in a row cheers wrote means the table has
-    /// drifted from the code. Loud, not a silently shorter list.
+    /// Storage decodes any well-formed scope (R731-F2: registry membership is
+    /// a grant/mint concern, not a storage one) but a malformed one means the
+    /// table has drifted from the code. Loud, not a silently shorter list.
     #[test]
-    fn decode_scopes_refuses_an_unknown_token() {
-        match decode_scopes("cloud:read cloud:teleport") {
-            Err(StoreError::Backend(msg)) => assert!(msg.contains("cloud:teleport"), "{msg}"),
+    fn decode_scopes_accepts_undeclared_and_refuses_malformed() {
+        let ok = decode_scopes("cloud:read issues:triage").unwrap();
+        assert_eq!(ok[1].as_wire(), "issues:triage");
+        match decode_scopes("cloud:read cloud:Teleport") {
+            Err(StoreError::Backend(msg)) => assert!(msg.contains("cloud:Teleport"), "{msg}"),
             other => panic!("expected Backend, got {other:?}"),
         }
     }

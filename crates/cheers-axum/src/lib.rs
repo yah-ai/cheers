@@ -22,6 +22,9 @@
 //!   for the WebAuthn ceremonies wired to a [`SessionAuthority`].
 //! - [`magic_link`] (feature `email`) — `POST /auth/magic-link/request` +
 //!   `GET /auth/magic-link/verify` for the email-token sign-in flow.
+//! - [`refresh`] (always on) — `POST /auth/refresh`, the RFC 6749 §6
+//!   refresh-token grant with rotation + reuse detection over
+//!   [`SessionAuthority::rotate`](cheers_server::SessionAuthority::rotate).
 //!
 //! Each module exposes:
 //!
@@ -184,7 +187,7 @@
 //! @yah:verify("cargo test -p cheers-axum --lib discovery (4/4 inline discovery::tests pass)")
 //! @yah:verify("cargo test -p cheers-axum discovery::tests::discovery_doc_matches_known_good_fixture — verify line #1 (JSON shape vs known-good fixture)")
 //! @yah:verify("cargo test -p cheers-core mcp::tests::scope_all_is_exhaustive — verify line #2 (regression test pinning scopes_supported = full Scope enum at compile time via exhaustive intra-crate match)")
-//! @yah:verify("cargo test -p cheers-axum discovery::tests::scopes_supported_equals_the_full_scope_enum — the runtime half of verify line #2 (endpoint output reflects Scope::ALL)")
+//! @yah:verify("cargo test -p cheers-axum discovery::tests::scopes_supported_equals_the_registry — endpoint output reflects the deployment ScopeRegistry (R731-F2 replaced Scope::ALL)")
 //! @yah:verify("cargo test -p cheers-core && cargo test -p cheers-server && cargo test -p cheers-verify && cargo test -p cheers-axum (parent relay smoke all green)")
 //! @yah:verify("cargo check --workspace --all-features clean")
 //!
@@ -311,10 +314,14 @@ pub mod discovery;
 pub mod enrollment;
 pub mod error;
 pub mod jwks;
+pub mod knock;
 pub mod mcp;
 pub mod me;
 pub mod ownership;
+pub mod refresh;
+pub mod revocation_set;
 pub mod session;
+pub mod token_endpoint;
 pub mod tokens;
 
 #[cfg(feature = "google")]
@@ -347,6 +354,7 @@ pub use discovery::{
     SUBJECT_TYPES_SUPPORTED,
 };
 pub use error::RouteError;
+pub use knock::{KnockRouteError, KnockState, RateLimiter};
 pub use jwks::{Jwk, JwkSet, JwksState, PlatformSigningKey, DEFAULT_JWKS_MAX_AGE_SECONDS};
 pub use mcp::{authenticate_mcp, verify_mcp_bearer, McpAuthState, McpClaimsExt};
 pub use me::{
@@ -354,6 +362,12 @@ pub use me::{
     SessionRecorder,
 };
 pub use ownership::{CreateOwnershipBody, OwnershipState};
+pub use refresh::{
+    router as refresh_router, DirectoryBindings, RefreshAuthState, RefreshBody,
+};
+pub use revocation_set::{
+    router as revocation_set_router, RevocationSetBody, REVOCATION_SET_PATH,
+};
 pub use session::SessionBody;
 pub use tokens::{
     authenticate_any, router as tokens_router, ApiTokenTrust, Caller, CreateTokenBody,

@@ -23,6 +23,7 @@
 //! the new one.
 
 use std::sync::Arc;
+use cheers_core::yah_scopes;
 
 use cheers_core::{DeviceId, UserId};
 use cheers_server::store::{
@@ -323,7 +324,6 @@ async fn turso_migration_rows(conn: &TursoConn) -> Vec<(i64, String, Vec<u8>)> {
 /// revoke, after it.
 #[tokio::test]
 async fn user_token_rows_survive_the_flip_in_both_directions() {
-    use cheers_core::Scope;
     use cheers_server::{UserTokenRecord, UserTokenStore};
 
     let dir = tempfile::tempdir().unwrap();
@@ -336,7 +336,7 @@ async fn user_token_rows_survive_the_flip_in_both_directions() {
         .create(NewUser::new().with_email("pat@example.com"))
         .await
         .expect("create via sqlx");
-    let scopes = vec![Scope::CloudRead, Scope::CloudDeploy, Scope::BoardWrite];
+    let scopes = vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY, yah_scopes::BOARD_WRITE];
     SqliteUserTokenStore::new(pool.clone())
         .insert(&UserTokenRecord::new(
             "jti-sqlx",
@@ -382,7 +382,7 @@ async fn user_token_rows_survive_the_flip_in_both_directions() {
             "jti-turso",
             user.id.clone(),
             "laptop",
-            vec![Scope::CampAdmin],
+            vec![yah_scopes::CAMP_ADMIN],
             "https://kamaji.example",
             1_100,
             9_000,
@@ -404,7 +404,7 @@ async fn user_token_rows_survive_the_flip_in_both_directions() {
         .await
         .unwrap()
         .expect("the turso-written token row must be visible");
-    assert_eq!(back.scopes, vec![Scope::CampAdmin]);
+    assert_eq!(back.scopes, vec![yah_scopes::CAMP_ADMIN]);
     assert_eq!(back.name, "laptop");
 
     let live = sqlx_tokens.list_live_for_user(&user.id, 2_000).await.unwrap();

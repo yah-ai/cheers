@@ -36,6 +36,15 @@
 //! assert!(captured.html.unwrap().contains(&req.url));
 //! # });
 //! ```
+//!
+//! @yah:relay(R733, "MagicLinkEmail: let a product supply the opening line and drop the greeting paragraph")
+//! @yah:status(review)
+//! @yah:at(2026-10-07T06:59:06Z)
+//! @yah:assignee(bundle-anthropic-ashguard)
+//! @yah:next("render() always writes the greeting paragraph first, defaulting to \"Hi,\". A product that wants the first line of the email to state the fact has nowhere to put it except the greeting slot, and with_greeting(\"\") leaves an empty first line and an empty <p>. Add an explicit seam (e.g. Option-typed greeting that renders nothing when cleared, or a with_opening(line) that replaces greeting+intro) so callers own the opening line. Keep render() as the single renderer; no pre-rendered bodies. Consumer: noisetable web/services/account/src/mailer.rs::magic_link_email (noisetable R801-F6), which currently puts its fact line in the greeting slot.")
+//! @yah:handoff("Added MagicLinkEmail::without_greeting(); an empty greeting (also with_greeting(\"\")) now renders no greeting paragraph in text or HTML, so with_intro(line) becomes the opening line. render() stays the single renderer. Simplified intro defaulting. Test: without_greeting_makes_intro_the_opening_line.")
+//! @yah:verify("cargo test --manifest-path oss/cheers/crates/cheers/Cargo.toml --lib email::template — 5 passed")
+//! @yah:cleanup("noisetable R801-F6: switch mailer.rs::magic_link_email to .without_greeting().with_intro(fact_line)")
 
 use crate::email::magic_link::MagicLinkRequest;
 use crate::email::mailer::EmailMessage;
@@ -87,6 +96,14 @@ impl MagicLinkEmail {
         self
     }
 
+    /// Drop the greeting paragraph entirely, so the intro (see
+    /// [`with_intro`](Self::with_intro)) is the email's opening line.
+    /// `with_greeting("")` is equivalent: an empty greeting renders nothing.
+    pub fn without_greeting(mut self) -> Self {
+        self.greeting = Some(String::new());
+        self
+    }
+
     pub fn with_intro(mut self, s: impl Into<String>) -> Self {
         self.intro = Some(s.into());
         self
@@ -124,14 +141,9 @@ impl MagicLinkEmail {
             .clone()
             .unwrap_or_else(|| format!("Sign in to {}", self.product_name));
         let greeting = self.greeting.as_deref().unwrap_or("Hi,");
-        let intro = self.intro.as_deref().unwrap_or_else(|| {
-            // borrow-checker: we need a stable str so build below uses owned form.
-            ""
-        });
-        let intro_owned = if intro.is_empty() {
-            format!("Click the link below to sign in to {}.", self.product_name)
-        } else {
-            intro.to_owned()
+        let intro_owned = match self.intro.as_deref() {
+            Some(i) if !i.is_empty() => i.to_owned(),
+            _ => format!("Click the link below to sign in to {}.", self.product_name),
         };
         let button = self.button_label.as_deref().unwrap_or("Sign in");
         let fallback = self
@@ -144,8 +156,10 @@ impl MagicLinkEmail {
         let footer_line = self.footer.as_deref();
 
         let mut text = String::new();
-        text.push_str(greeting);
-        text.push_str("\n\n");
+        if !greeting.is_empty() {
+            text.push_str(greeting);
+            text.push_str("\n\n");
+        }
         text.push_str(&intro_owned);
         text.push_str("\n\n");
         text.push_str(&req.url);
@@ -159,9 +173,12 @@ impl MagicLinkEmail {
 
         let mut html = String::new();
         html.push_str("<!doctype html><html><body style=\"font-family:system-ui,sans-serif;line-height:1.5\">");
+        if !greeting.is_empty() {
+            html.push_str("<p>");
+            html.push_str(&escape_html(greeting));
+            html.push_str("</p>");
+        }
         html.push_str("<p>");
-        html.push_str(&escape_html(greeting));
-        html.push_str("</p><p>");
         html.push_str(&escape_html(&intro_owned));
         html.push_str("</p><p><a href=\"");
         html.push_str(&escape_html_attr(&req.url));
@@ -288,6 +305,24 @@ mod tests {
             assert!(html.contains("a &amp; b &lt; c"));
             // product_name only flows into subject (plaintext), not html greeting.
             assert!(msg.subject.contains("Ac<me>"));
+        });
+    }
+
+    #[test]
+    fn without_greeting_makes_intro_the_opening_line() {
+        pollster::block_on(async {
+            let p = provider();
+            let req = p.request("a@b.co", 1_000).await.unwrap();
+            for t in [
+                MagicLinkEmail::new("Acme", "n@a.co").without_greeting(),
+                MagicLinkEmail::new("Acme", "n@a.co").with_greeting(""),
+            ] {
+                let msg = t.with_intro("Your sign-in link.").render("a@b.co", &req);
+                assert!(msg.text.starts_with("Your sign-in link.\n\n"));
+                let html = msg.html.unwrap();
+                assert!(!html.contains("<p></p>"));
+                assert!(html.contains("\"><p>Your sign-in link.</p>"));
+            }
         });
     }
 

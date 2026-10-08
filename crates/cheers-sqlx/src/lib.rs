@@ -119,6 +119,8 @@ pub mod revocation;
 #[cfg(any(feature = "pg", feature = "sqlite"))]
 pub mod ownership_store;
 #[cfg(any(feature = "pg", feature = "sqlite"))]
+pub mod knock_store;
+#[cfg(any(feature = "pg", feature = "sqlite"))]
 pub mod service_principal_store;
 #[cfg(any(feature = "pg", feature = "sqlite"))]
 pub mod audit_store;
@@ -128,7 +130,13 @@ pub mod passkey_store;
 pub mod used_jti_store;
 #[cfg(any(feature = "pg", feature = "sqlite"))]
 pub mod user_token_store;
+#[cfg(any(feature = "pg", feature = "sqlite"))]
+pub mod binding_sequence_store;
 
+#[cfg(feature = "pg")]
+pub use binding_sequence_store::PgBindingSequenceStore;
+#[cfg(feature = "sqlite")]
+pub use binding_sequence_store::SqliteBindingSequenceStore;
 #[cfg(feature = "pg")]
 pub use user_store::PgUserStore;
 #[cfg(feature = "sqlite")]
@@ -143,6 +151,10 @@ pub use revocation::PgRevocationStore;
 pub use revocation::SqliteRevocationStore;
 #[cfg(feature = "pg")]
 pub use ownership_store::PgOwnershipStore;
+#[cfg(feature = "pg")]
+pub use knock_store::PgKnockStore;
+#[cfg(feature = "sqlite")]
+pub use knock_store::SqliteKnockStore;
 #[cfg(feature = "sqlite")]
 pub use ownership_store::SqliteOwnershipStore;
 #[cfg(feature = "pg")]

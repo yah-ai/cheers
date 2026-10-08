@@ -153,7 +153,7 @@ pub enum RouteError {
     InvalidTokenRequest(String),
 
     /// An MCP-call token authenticated but lacks a scope the handler requires
-    /// (e.g. `ownership:write` on `POST /ownership`). 403 — the principal is
+    /// (e.g. `camp:read` on a camp route). 403 — the principal is
     /// known, the request is just not authorized.
     #[error("insufficient scope: required '{required}'")]
     InsufficientScope { required: Scope },
@@ -165,12 +165,23 @@ pub enum RouteError {
     #[error("ownership_invalid: {0}")]
     OwnershipInvalid(#[from] OwnershipValidationError),
 
+    /// `GET /ownership` named neither a resource nor a subject, only part of
+    /// one, or both forms at once. 400.
+    #[error("invalid ownership query: {0}")]
+    InvalidOwnershipQuery(String),
+
     /// `DELETE /ownership/{id}` targeted an id no [`OwnershipStore`] row
     /// matches. 404 — the absence is reported, not the cause.
     ///
     /// [`OwnershipStore`]: cheers_server::OwnershipStore
     #[error("unknown ownership")]
     UnknownOwnership,
+
+    /// The caller holds no relation on the resource whose grants include the
+    /// relation it tried to write, revoke, or (for a list) any relation at
+    /// all — the D4 grant door's refusal. 403: the caller is known.
+    #[error("grant forbidden")]
+    GrantForbidden,
 
     /// `POST /audit/ingest` body parsed as JSON but a record violated an
     /// [`AuditRecord`] invariant (e.g. empty `aud`, non-positive `at`). 400
@@ -265,7 +276,11 @@ impl RouteError {
                 (StatusCode::FORBIDDEN, "insufficient_scope")
             }
             RouteError::OwnershipInvalid(_) => (StatusCode::BAD_REQUEST, "ownership_invalid"),
+            RouteError::InvalidOwnershipQuery(_) => {
+                (StatusCode::BAD_REQUEST, "invalid_ownership_query")
+            }
             RouteError::UnknownOwnership => (StatusCode::NOT_FOUND, "unknown_ownership"),
+            RouteError::GrantForbidden => (StatusCode::FORBIDDEN, "grant_forbidden"),
             RouteError::AuditInvalid(_) => (StatusCode::BAD_REQUEST, "audit_invalid"),
             RouteError::AuditSubjectForbidden => {
                 (StatusCode::FORBIDDEN, "audit_subject_forbidden")

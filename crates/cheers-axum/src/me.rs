@@ -70,7 +70,6 @@
 //!
 //! @yah:relay(R516, "SessionRecorder seam in cheers-axum so a product can populate SessionDirectory")
 //! @yah:at(2026-09-09T06:03:22Z)
-//! @yah:status(open)
 //! @yah:assignee(agent:claude)
 //! @yah:parent(Q003)
 //! @yah:gotcha("The three establish call sites are all INSIDE cheers-axum, so no product code is ever on the stack when a binding is known: crates/cheers-axum/src/magic_link.rs:189 (DeviceBinding::EmailMagicLink, device id freshly minted there by generate_device_id), crates/cheers-axum/src/passkey.rs:341 (register, Passkey) and passkey.rs:461 (authenticate, Passkey). This is the whole gap — not a missing store impl, a missing observation point. The only SessionDirectory impl in the tree today is the test one at crates/cheers-axum/tests/common/mod.rs.")
@@ -96,7 +95,6 @@
 //!
 //! @yah:relay(R728, "User API tokens: a non-interactive credential that IS the user, not a service principal standing next to one")
 //! @yah:at(2026-09-12T19:47:16Z)
-//! @yah:status(open)
 //! @yah:assignee(agent:bundle-anthropic-ashguard)
 //! @yah:gotcha("Do NOT reach for the session-signing key to work around the absence of this. That is what happened on noisetable R700-T5: with no non-interactive path to a user identity, an agent read the production session-signing key out of the vault into a 0600 file, minted a session directly, and deleted the file. It was careful and it worked, and it is precisely the operation this relay exists to make unnecessary.")
 //!
@@ -263,6 +261,14 @@ pub trait SessionDirectory: Send + Sync {
 /// than insert, and are free to overwrite `binding` — the latest ceremony is
 /// the honest answer to "how is this device signed in".
 ///
+/// **Also called on every refresh rotation** (`refresh::router`, R730), with
+/// the same `(user_id, device_id)` and binding, the extended `expires_at`, and
+/// the *rotation* time as `issued_at`. An impl that reports first-sign-in time
+/// (as [`SessionDescriptor::issued_at`] documents) keeps its stored
+/// `issued_at` on conflict and takes the new `expires_at`. On that path an
+/// error is logged rather than failing the request — the token is already
+/// spent, so refusing would make the client's retry a replay.
+///
 /// **An error fails the sign-in.** That is deliberate: a session that minted
 /// but did not record is one the user can neither see on `GET /me/sessions`
 /// nor revoke from it, which is a worse outcome than a failed sign-in the
@@ -421,13 +427,13 @@ where
     let target = DeviceId::new(device_id);
     state
         .authority
-        .revoke_device(&claims.sub, &target)
+        .revoke_device(&claims.sub, &target, now)
         .await
         .map_err(map_authority_error)?;
     if target == claims.device {
         state
             .authority
-            .revoke_session(&claims.jti)
+            .revoke_session(&claims.jti, claims.expires_at)
             .await
             .map_err(map_authority_error)?;
     }

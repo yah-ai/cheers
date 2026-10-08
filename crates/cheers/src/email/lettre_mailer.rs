@@ -22,7 +22,6 @@
 //!
 //! @yah:relay(R518, "Mail transport surface: reach dev-tier and non-standard-port SMTP relays without forcing a direct lettre dep")
 //! @yah:at(2026-09-11T06:15:14Z)
-//! @yah:status(open)
 //! @yah:assignee(agent:bundle-anthropic-glimmerstone)
 //!
 //! @yah:ticket(R518-F1, "LettreMailer::plaintext(host, port) — a third constructor beside starttls and implicit_tls")

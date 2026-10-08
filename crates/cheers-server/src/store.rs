@@ -60,7 +60,6 @@
 //!
 //! @yah:relay(R517, "User-by-id lookup on UserStore")
 //! @yah:at(2026-09-10T07:02:42Z)
-//! @yah:status(open)
 //! @yah:assignee(agent:bundle-anthropic-ashguard)
 //! @yah:next("UserStore can find a user by (provider, subject) but never by UserId, so a service holding a verified bearer cannot recover the user record behind it. Downstream consumers are keyed on email as a workaround. Close the gap with a by-id accessor.")
 //!

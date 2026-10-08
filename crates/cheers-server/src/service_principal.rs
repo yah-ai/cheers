@@ -4,14 +4,16 @@
 //! bootstrap for the install-time contract this implements:
 //!
 //! 1. An operator-authenticated `POST /admin/service-principals` call
-//!    (HTTP layer is a peer ticket) provides a `desired_id` and the operator's
-//!    intended grants. Cheers allocates the [`Principal`] record, generates a
+//!    provides a `desired_id` — nothing else: a service principal's scopes
+//!    come only from its relationship tuples (D2/D3). Cheers allocates the [`Principal`] record, generates a
 //!    fresh Ed25519 keypair, persists the public half (kid'd, status=active),
 //!    and returns the **secret half exactly once** in the `ProvisionedKey`.
 //! 2. The consumer (yubaba) stores the secret in its config dir (mode 0600)
-//!    and mints its own short-lived MCP tokens from that keypair. Cheers
-//!    verifies those tokens via the JWKS endpoint (R020-F11) that publishes
-//!    the principal's public key alongside cheers's own signing keys.
+//!    and signs short-lived [`ClientAssertion`](cheers_core::ClientAssertion)s
+//!    with it, which [`McpAuthority::mint_service`](crate::McpAuthority::mint_service)
+//!    trades for an access token signed by cheers's issuer key. The key is
+//!    published with `role=assertion` and is never valid at a resource
+//!    server.
 //! 3. Rotation registers a fresh keypair without invalidating in-flight
 //!    tokens: the previously-active key flips to `Retiring` with
 //!    `retire_at = now + overlap_seconds` (default 24 h, per
@@ -24,6 +26,28 @@
 //! Worker) never depends on `cheers-server` and never sees a
 //! [`PasetoV4SecretMinter`] — it links `cheers-verify` and consumes the public
 //! halves via JWKS.
+//!
+//! @yah:ticket(R731-F4, "mint_service + client-assertion verification for service principals (D3)")
+//! @yah:status(review)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:at(2026-10-06T23:36:35Z)
+//! @yah:phase(P2)
+//! @yah:parent(R731)
+//! @yah:next("Doc D3; operator decided token exchange on 2026-10-06. No McpAuthority mint path accepts a svc: principal today.")
+//! @yah:next("Assertion: PASETO v4.public with RFC 7523 claims (iss = sub = svc:<id>, aud = token endpoint, jti, exp at most 5 min), verified against the principal own published keys, replay blocked through UsedJtiStore.")
+//! @yah:next("Scopes come from the principal relationships (D2). Provisioning (POST /admin/service-principals, R020-T17) needs no grants field.")
+//! @yah:next("Assertion keys carry role=assertion and are never valid at a resource server.")
+//! @yah:depends_on(R731-F3)
+//! @yah:tier(Warrior)
+//! @yah:next("F4 DECIDED (leader, 2026-10-06). (1) Add a `ClientAssertion` claims type in cheers-core: iss, sub, aud, jti, iat, exp. (2) `McpAuthority::mint_service(assertion, aud, requested_scopes, now)`: read the footer kid and look it up in the service-principal key store. The key must be ACTIVE (not retired) and belong to the principal named in sub. Verify PASETO v4.public, then require iss == sub == svc:<id>, aud == the deployment's token endpoint URL (issuer + \"/token\"), exp > now, exp - iat <= 300s, and jti present, consumed through UsedJtiStore so a replay is rejected. (3) Scopes = SchemaGrantStore::list_for(svc, aud) intersected with requested; an empty result is rejected. The issuer key mints the access token with sub = svc:<id>, TTL <= 1h, no ceiling. (4) A svc principal MAY hold service-only scopes (validate_grant already allows it). (5) Remove any `grants` field from the POST /admin/service-principals body; scopes come only from relationships. (6) Distinct McpMintError variants for unknown kid, retired key, principal mismatch, bad aud, expired / too-long assertion, and replay. Each is tested.")
+//! @yah:handoff("cheers-core/src/assertion.rs (new; lib.rs re-exports it): ClientAssertion{iss,sub: PrincipalId, aud, jti, iat, exp}, MAX_LIFETIME_SECONDS=300, and ClientAssertion::new(principal, aud, jti, iat, exp), which sets iss=sub.")
+//! @yah:handoff("cheers-server/src/mcp_authority.rs: McpAuthority::with_service_assertions(Arc<dyn ServicePrincipalStore>, Arc<dyn UsedJtiStore>) and token_endpoint() = issuer + '/token'. pub async fn mint_service(&self, assertion: &str, aud: impl Into<String>, requested_scopes: &[Scope], now: i64) -> Result<MintedMcpToken, McpMintError>. Check order: footer kid, key known (list_all_signing_keys), key Active, sig verify against the key's public bytes, iss==sub==key owner (svc kind), aud==token_endpoint, exp>now, exp-iat<=300, non-empty jti, jti consumed via try_mark_used(jti, exp). Scopes = grants.list_for(svc,aud) -> expand_scopes -> validate_grant, intersected with requested; an empty request takes every held scope. An empty result is NoGrantedScopes. Sign with the issuer key; TTL = min(policy.access_ttl, 3600); no ceiling, no auth_strength.")
+//! @yah:handoff("New McpMintError variants: ServiceAssertionsUnconfigured, AssertionMalformed, AssertionUnknownKid, AssertionRetiredKey, AssertionPrincipalMismatch, AssertionBadAudience, AssertionExpired, AssertionLifetimeTooLong, AssertionReplayed, JtiStore, NoGrantedScopes.")
+//! @yah:handoff("Decision (5): CreateServicePrincipalBody in cheers-axum/src/admin.rs already had only desired_id, so nothing to remove. Fixed the stale module doc in service_principal.rs, which claimed provisioning takes 'intended grants' and that yubaba self-mints MCP tokens.")
+//! @yah:handoff("Defaults I picked: AuthStrength has no Service variant, and I left mcp.rs alone because F8 owns it, so service tokens carry no auth_strength. A follow-up could add AuthStrength::Service. The jti is consumed only after every other check passes, so a rejected assertion does not burn its jti.")
+//! @yah:verify("cargo test --workspace --no-fail-fast (oss/cheers): 696 passed / 0 failed / 4 ignored vs the 686/0/3 baseline measured before the first edit. My +10: 9 mint_service tests plus 1 cheers-core assertion test. The remainder, including the extra ignored test, is concurrent F8 work. An intermediate run hit F8's in-flight ownership_basic.rs and discovery.rs scope-count breakage, which F8 then fixed.")
+//! @yah:verify("mcp_authority tests: mint_service_happy_path_scopes_from_relationship (scope from a seeded kind/grant tuple, verified at the edge, TTL<=1h, ceiling None); _intersects_requested_and_rejects_empty; _rejects_unknown_kid; _rejects_retired_key (after rotate); _rejects_principal_mismatch (sub and iss); _rejects_bad_aud; _rejects_expired_and_too_long_assertions (exactly 300s accepted); _rejects_replay; _requires_configuration_and_wellformed_token.")
+//! @yah:verify("Leader final re-verify 2026-10-06 on a quiet tree (all R731 children landed, no build skew): cargo test --workspace --no-fail-fast (oss/cheers) 702 pass / 0 fail / 4 ignored; cheers-sqlx pg 17/17 + libsql 7/7 (OrbStack DOCKER_HOST); kamaji-bin 242/0; yah-cloud-admin 60/0; yah --lib cloud_cheers 6/0.")
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -600,6 +624,7 @@ impl ServicePrincipalStore for MemoryServicePrincipalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheers_core::yah_scopes;
     use cheers_verify::PasetoV4PublicVerifier;
     use pollster::block_on;
 
@@ -660,7 +685,7 @@ mod tests {
         // half is what a service principal would carry off-cheers. Tokens
         // it mints must verify under the pubkey cheers retained.
         use cheers_core::{
-            Actor, AuthStrength, McpClaims, Owns, PrincipalId, Scope,
+            Actor, AuthStrength, McpClaims, Owns, PrincipalId,
         };
 
         let authority = rig();
@@ -689,7 +714,7 @@ mod tests {
                 1_000,
                 1_600,
                 "jti-rt",
-                vec![Scope::OwnershipWrite],
+                vec![yah_scopes::AUDIT_WRITE],
             )
             .with_act(Actor::new(PrincipalId::service("yubaba-2")))
             .with_owns(owns)

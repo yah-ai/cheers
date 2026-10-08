@@ -447,7 +447,6 @@
 <!--
 @yah:relay(R018, "P12 — yah-platform integration")
 @yah:at(2026-05-15T05:17:50Z)
-@yah:status(open)
 @yah:phase(P12)
 @yah:parent(Q005)
 @yah:next("Wire cheers (google,apple,passkey,email) into yah-platform with pg-backed UserStore + auth routes")
@@ -458,7 +457,6 @@
 <!--
 @yah:relay(R017, "P10 — LAN-pair")
 @yah:at(2026-05-15T05:17:49Z)
-@yah:status(open)
 @yah:phase(P10)
 @yah:parent(Q004)
 @yah:next("PairOffer/PairAccept over xlb-net with confirmation strategies")
@@ -496,7 +494,6 @@
 <!--
 @yah:relay(R015, "P8 — CredentialStore impls")
 @yah:at(2026-05-15T05:17:45Z)
-@yah:status(open)
 @yah:phase(P8)
 @yah:parent(Q004)
 @yah:next("KeyringStore + EncryptedFileStore + MemoryStore behind feature flags")
@@ -508,7 +505,6 @@
 <!--
 @yah:relay(R014, "P7 — passkey (WebAuthn server-side)")
 @yah:at(2026-05-15T05:17:41Z)
-@yah:status(open)
 @yah:phase(P7)
 @yah:parent(Q003)
 @yah:next("PasskeyRelyingParty wrapping webauthn-rs with register + authenticate ceremonies")
@@ -519,7 +515,6 @@
 <!--
 @yah:relay(R013, "P6 — Apple Sign In")
 @yah:at(2026-05-15T05:17:40Z)
-@yah:status(open)
 @yah:phase(P6)
 @yah:parent(Q003)
 @yah:next("ES256 client_secret JWT + redirect/native flows + JWKS cache + one-shot name capture")
@@ -530,7 +525,6 @@
 <!--
 @yah:relay(R012, "P5 — OIDC infra + Google")
 @yah:at(2026-05-15T05:17:38Z)
-@yah:status(open)
 @yah:phase(P5)
 @yah:parent(Q003)
 @yah:next("Stand up OidcProvider + GoogleProvider with discovery, PKCE, state+nonce")
@@ -562,7 +556,6 @@
 <!--
 @yah:relay(R010, "P3 — email magic-link provider")
 @yah:at(2026-05-15T05:17:35Z)
-@yah:status(open)
 @yah:phase(P3)
 @yah:parent(Q003)
 @yah:next("Land magic_link token + Mailer trait + LettreMailer impl")
@@ -605,7 +598,6 @@
 <!--
 @yah:relay(R007, "P1 — cheers-core foundation")
 @yah:at(2026-05-15T05:17:24Z)
-@yah:status(open)
 @yah:phase(P1)
 @yah:parent(Q002)
 @yah:next("Land Claims/Codec/Store/Error contract surface in cheers-core")

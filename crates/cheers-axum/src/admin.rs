@@ -240,6 +240,21 @@ mod tests {
         async fn is_revoked(&self, _jti: &str) -> Result<bool, cheers_core::StoreError> {
             Ok(false)
         }
+
+        async fn is_device_revoked(&self, _device: &DeviceId, _seq: u64) -> Result<bool, cheers_core::StoreError> {
+            Ok(false)
+        }
+
+        async fn is_membership_revoked(
+            &self,
+            _key: &cheers_core::RevocationKey,
+            _kind: &str,
+            _id: &str,
+            _principal: &cheers_core::PrincipalId,
+            _snapshot_epoch: u64,
+        ) -> Result<bool, cheers_core::StoreError> {
+            Ok(false)
+        }
     }
 
     /// Static allow-list `OperatorPolicy` for tests. A real product wires

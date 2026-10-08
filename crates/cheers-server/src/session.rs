@@ -131,10 +131,15 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use cheers_core::{Claims, DeviceBinding, DeviceId, Error, PeerKey, TokenMinter, UserId};
+use async_trait::async_trait;
+use cheers_core::{
+    Claims, DeviceBinding, DeviceId, Error, PeerKey, RefreshError, Revoked, StoreError, TokenMinter,
+    UserId,
+};
 
 use crate::refresh::{RefreshRotator, Rotated};
 use crate::revocation::RevocationWriter;
+use crate::standing::{SignedStandingBinding, StandingBinder};
 use crate::store::{RefreshStore, UserStore};
 
 /// Length of a generated `jti` in bytes (128 bits — uniqueness only, not a
@@ -198,6 +203,40 @@ impl Default for SessionPolicy {
     }
 }
 
+/// Where a rotation gets the [`DeviceBinding`] to mint its access token with.
+///
+/// The refresh record deliberately carries no binding (R018, guide by
+/// omission), so whoever rotates must supply one. A fixed [`DeviceBinding`] is
+/// itself a resolver — the caller that ran the ceremony already knows it. A
+/// generic refresh door does not, and resolves it from the product's own
+/// per-device session rows (R730; cheers-axum's `refresh` module adapts a
+/// `SessionDirectory`).
+///
+/// `Ok(None)` means "no binding recorded for this device" and makes the
+/// rotation refuse with [`RefreshError::Unbound`] before the token is spent.
+/// `Err` is a store failure and surfaces as [`Error::Store`].
+#[async_trait]
+pub trait BindingResolver: Send + Sync {
+    async fn resolve_binding(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        now: i64,
+    ) -> Result<Option<DeviceBinding>, StoreError>;
+}
+
+#[async_trait]
+impl BindingResolver for DeviceBinding {
+    async fn resolve_binding(
+        &self,
+        _user_id: &UserId,
+        _device_id: &DeviceId,
+        _now: i64,
+    ) -> Result<Option<DeviceBinding>, StoreError> {
+        Ok(Some(self.clone()))
+    }
+}
+
 /// A freshly established or rotated session: the minted access token (hand to
 /// the client as a bearer/cookie), the [`Claims`] it carries (so the caller can
 /// read `jti` / expiry without re-verifying), and the refresh token + record.
@@ -210,6 +249,11 @@ pub struct NewSession {
     pub claims: Claims,
     /// The refresh token + persisted record (the stateful, rotatable half).
     pub refresh: Rotated,
+    /// The standing node binding (R732-F5) — present exactly when the access
+    /// token is peer-key-bound and the binding is
+    /// [`DeviceBinding::LanPair`]. It is the credential an offline edge
+    /// admits the node on; the access token keeps its short TTL.
+    pub standing: Option<SignedStandingBinding>,
 }
 
 /// Origin facade: everything that can *create or destroy* sessions.
@@ -226,6 +270,10 @@ pub struct SessionAuthority<M, R, U, W> {
     users: U,
     revoke: W,
     policy: SessionPolicy,
+    /// Mints standing node bindings for LanPair sessions (R732-F5). `None` on
+    /// an authority that serves no LAN nodes; such an authority refuses a
+    /// bound LanPair session ([`Error::NoStandingBinder`]).
+    standing: Option<StandingBinder>,
 }
 
 impl<M, R, U, W> SessionAuthority<M, R, U, W>
@@ -243,12 +291,22 @@ where
             users,
             revoke,
             policy: SessionPolicy::default(),
+            standing: None,
         }
     }
 
     /// Override the TTL policy.
     pub fn with_policy(mut self, policy: SessionPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Mint standing node bindings with `binder` (R732-F5). Required before
+    /// [`establish_bound`](Self::establish_bound) /
+    /// [`rotate_bound`](Self::rotate_bound) will serve a
+    /// [`DeviceBinding::LanPair`] session.
+    pub fn with_standing_binder(mut self, binder: StandingBinder) -> Self {
+        self.standing = Some(binder);
         self
     }
 
@@ -293,6 +351,13 @@ where
     /// key: like `binding`, the peer key is a fact about *this* access token,
     /// not about the chain — so [`rotate_bound`](Self::rotate_bound) takes it
     /// from the caller again.
+    ///
+    /// **LanPair (R732-F5).** For [`DeviceBinding::LanPair`] the session also
+    /// carries a [standing binding](NewSession::standing) — user to node key,
+    /// no expiry, ended only by revocation or a newer binding for `device` —
+    /// minted by the [standing binder](Self::with_standing_binder). Without
+    /// one this refuses with [`Error::NoStandingBinder`] before anything is
+    /// written.
     pub async fn establish_bound(
         &self,
         sub: UserId,
@@ -313,6 +378,9 @@ where
         peer_key: Option<PeerKey>,
         now: i64,
     ) -> Result<NewSession, Error> {
+        let standing = self
+            .mint_standing(&sub, &device, &binding, peer_key.as_ref(), now)
+            .await?;
         let claims = self.mint_access(sub.clone(), device.clone(), binding, peer_key, now)?;
         let refresh = RefreshRotator::new(&self.refresh, self.policy.refresh_ttl_seconds)
             .mint_root(sub, device, now)
@@ -321,18 +389,32 @@ where
             access_token: self.minter.mint(&claims)?,
             claims,
             refresh,
+            standing,
         })
     }
 
     /// Rotate `presented_refresh` → fresh access token + successor refresh
     /// token. Replay detection / chain revocation are the rotator's
-    /// (see [`RefreshRotator::rotate`]). The `binding` is supplied by the caller
-    /// because the refresh record doesn't carry it — guide by omission, the
-    /// refresh chain is about *which session*, not *how it authenticated*.
-    pub async fn rotate(
+    /// (see [`RefreshRotator::rotate`]).
+    ///
+    /// The binding comes from the caller's [`BindingResolver`] because the
+    /// refresh record doesn't carry it — guide by omission, the refresh chain
+    /// is about *which session*, not *how it authenticated*. A caller that
+    /// already knows the binding passes `&DeviceBinding::…` (a fixed binding is
+    /// a resolver); a generic door that only holds the refresh token passes
+    /// the product's session rows, keyed by the chain's `(user, device)`.
+    ///
+    /// **Ordering (R730).** The token is checked, *then* the binding resolved,
+    /// *then* the token spent and the access token minted. A resolver that
+    /// knows no binding yields [`RefreshError::Unbound`] with the token still
+    /// unspent and the chain untouched — never a guessed or unbound mint, and
+    /// never a half-rotated chain whose successor the client was not handed.
+    /// Replay detection still runs first, so a replayed token revokes its
+    /// chain whether or not a binding exists.
+    pub async fn rotate<B: BindingResolver + ?Sized>(
         &self,
         presented_refresh: &str,
-        binding: DeviceBinding,
+        binding: &B,
         now: i64,
     ) -> Result<NewSession, Error> {
         self.rotate_inner(presented_refresh, binding, None, now)
@@ -345,11 +427,13 @@ where
     /// the refresh record is about *which session*, not about how this
     /// particular access token is being presented. A node re-binds on every
     /// rotation, which is what keeps the binding honest if the node key
-    /// changes.
-    pub async fn rotate_bound(
+    /// changes — for a [`DeviceBinding::LanPair`] session that includes a fresh
+    /// [standing binding](NewSession::standing) whose higher sequence
+    /// supersedes the previous one (see [`establish_bound`](Self::establish_bound)).
+    pub async fn rotate_bound<B: BindingResolver + ?Sized>(
         &self,
         presented_refresh: &str,
-        binding: DeviceBinding,
+        binding: &B,
         peer_key: PeerKey,
         now: i64,
     ) -> Result<NewSession, Error> {
@@ -357,16 +441,35 @@ where
             .await
     }
 
-    async fn rotate_inner(
+    async fn rotate_inner<B: BindingResolver + ?Sized>(
         &self,
         presented_refresh: &str,
-        binding: DeviceBinding,
+        bindings: &B,
         peer_key: Option<PeerKey>,
         now: i64,
     ) -> Result<NewSession, Error> {
-        let refresh = RefreshRotator::new(&self.refresh, self.policy.refresh_ttl_seconds)
-            .rotate(presented_refresh, now)
+        let rotator = RefreshRotator::new(&self.refresh, self.policy.refresh_ttl_seconds);
+        // check → resolve → commit: see `rotate`'s ordering note. Resolving
+        // between the check and the consume is what lets a missing binding
+        // refuse without spending the token.
+        let live = rotator.check(presented_refresh, now).await?;
+        let binding = bindings
+            .resolve_binding(&live.record().user_id, &live.record().device_id, now)
+            .await?
+            .ok_or(RefreshError::Unbound)?;
+        // Before the commit, like the binding resolve: a missing binder
+        // refuses with the token unspent, and a failed mint costs only a
+        // skipped sequence number.
+        let standing = self
+            .mint_standing(
+                &live.record().user_id,
+                &live.record().device_id,
+                &binding,
+                peer_key.as_ref(),
+                now,
+            )
             .await?;
+        let refresh = rotator.commit(live, now).await?;
         let claims = self.mint_access(
             refresh.record.user_id.clone(),
             refresh.record.device_id.clone(),
@@ -378,19 +481,54 @@ where
             access_token: self.minter.mint(&claims)?,
             claims,
             refresh,
+            standing,
         })
     }
 
+    /// The standing binding a session carries: one for every peer-key-bound
+    /// [`DeviceBinding::LanPair`] access token, none otherwise (R732-F5).
+    async fn mint_standing(
+        &self,
+        sub: &UserId,
+        device: &DeviceId,
+        binding: &DeviceBinding,
+        peer_key: Option<&PeerKey>,
+        now: i64,
+    ) -> Result<Option<SignedStandingBinding>, Error> {
+        let (DeviceBinding::LanPair, Some(key)) = (binding, peer_key) else {
+            return Ok(None);
+        };
+        let binder = self.standing.as_ref().ok_or(Error::NoStandingBinder)?;
+        Ok(Some(binder.mint(sub.clone(), device.clone(), key.clone(), now).await?))
+    }
+
     /// Revoke a single access token by its `jti` — the immediate, edge-visible
-    /// kill (within the propagation window bounded by the access TTL).
-    pub async fn revoke_session(&self, jti: &str) -> Result<(), Error> {
-        self.revoke.revoke(jti).await?;
+    /// kill (within the propagation window bounded by the access TTL). `exp`
+    /// is the token's own expiry: past it the entry lapses and gc drops it.
+    pub async fn revoke_session(&self, jti: &str, exp: i64) -> Result<(), Error> {
+        self.revoke.revoke(&Revoked::jti(jti, Some(exp))).await?;
         Ok(())
     }
 
-    /// Records device-level revocation intent via the [`UserStore`]. Blocking
-    /// *new* sessions also means revoking that device's refresh chains via the
-    /// [`RefreshStore`]; killing an *in-flight* access token is
+    /// Revoke one standing node binding by its `jti`. A standing binding has
+    /// no `exp`, so the entry never lapses.
+    pub async fn revoke_standing_binding(&self, jti: &str) -> Result<(), Error> {
+        self.revoke.revoke(&Revoked::jti(jti, None)).await?;
+        Ok(())
+    }
+
+    /// Records device-level revocation intent via the [`UserStore`], and
+    /// [`Revoked::Device`] in the revocation set — the entry that ends a
+    /// standing node binding for this device at offline replicas (R732-F6).
+    ///
+    /// The entry's `at_seq` is the device's next binding sequence, consumed
+    /// from the [standing binder](Self::with_standing_binder) at `now`: every
+    /// binding minted before it is masked, and re-enrolling the device later
+    /// mints above it and is admitted (R732-T7). With no binder configured
+    /// this authority has minted no standing bindings, so there is nothing
+    /// for a device entry to end and none is recorded.
+    /// Blocking *new* sessions also means revoking that device's refresh
+    /// chains via the [`RefreshStore`]; killing an *in-flight* access token is
     /// [`revoke_session`](Self::revoke_session). The product owns the
     /// device→chain index that drives the first, so this facade exposes the
     /// store call and the per-jti kill, not a magic "log out everywhere".
@@ -398,8 +536,13 @@ where
         &self,
         user_id: &UserId,
         device_id: &DeviceId,
+        now: i64,
     ) -> Result<(), Error> {
         self.users.revoke_device(user_id, device_id).await?;
+        if let Some(binder) = &self.standing {
+            let at_seq = binder.revocation_seq(device_id, now).await?;
+            self.revoke.revoke(&Revoked::device(device_id.clone(), at_seq)).await?;
+        }
         Ok(())
     }
 
@@ -425,13 +568,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheers_core::LeaseState;
     use crate::codec::PasetoV4SecretMinter;
+    use crate::revocation::{MemoryRevocationStore, RevocationPublisher};
+    use crate::standing::MemoryBindingSequenceStore;
     use crate::store::{NewUser, ProviderKey, RefreshTokenRecord};
     use cheers_core::{DeviceBinding, StoreError, User};
     use cheers_verify::{EdgeVerifier, PasetoV4PublicVerifier, RevocationReader};
     use async_trait::async_trait;
-    use std::collections::{HashMap, HashSet};
-    use std::sync::{Arc, Mutex};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     // ---- minimal in-memory capability impls --------------------------------
 
@@ -517,44 +663,35 @@ mod tests {
         }
     }
 
-    /// Process-local revocation set; clone shares the backing store so an
-    /// authority-side writer and an edge-side reader see the same set.
-    #[derive(Clone, Default)]
-    struct MemRevocations(Arc<Mutex<HashSet<String>>>);
-
-    #[async_trait]
-    impl RevocationReader for MemRevocations {
-        async fn is_revoked(&self, jti: &str) -> Result<bool, StoreError> {
-            Ok(self.0.lock().unwrap().contains(jti))
-        }
-    }
-
-    #[async_trait]
-    impl RevocationWriter for MemRevocations {
-        async fn revoke(&self, jti: &str) -> Result<(), StoreError> {
-            self.0.lock().unwrap().insert(jti.to_owned());
-            Ok(())
-        }
-    }
-
     /// Assemble an authority + an edge verifier sharing one revocation set and
     /// one Ed25519 keypair (origin holds the secret minter, edge the public
     /// verifier — the asymmetric, edge-safe shape).
     fn rig() -> (
-        SessionAuthority<PasetoV4SecretMinter, MemRefreshStore, StubUsers, MemRevocations>,
-        EdgeVerifier<PasetoV4PublicVerifier, MemRevocations>,
-        MemRevocations,
+        SessionAuthority<PasetoV4SecretMinter, MemRefreshStore, StubUsers, MemoryRevocationStore>,
+        EdgeVerifier<PasetoV4PublicVerifier, MemoryRevocationStore>,
+        MemoryRevocationStore,
     ) {
         let (minter, verifier) = PasetoV4SecretMinter::generate().unwrap();
-        let revocations = MemRevocations::default();
+        let revocations = MemoryRevocationStore::default();
+        let binder = StandingBinder::new(MemoryBindingSequenceStore::new(), same_key(&minter), ISS, KID);
         let authority = SessionAuthority::new(
             minter,
             MemRefreshStore::default(),
             StubUsers::default(),
             revocations.clone(),
-        );
+        )
+        .with_standing_binder(binder);
         let edge = EdgeVerifier::new(verifier, revocations.clone());
         (authority, edge, revocations)
+    }
+
+    const ISS: &str = "https://cheers.test";
+    const KID: &str = "iss-1";
+
+    /// A second handle on the issuer key: the binder and the revocation
+    /// publisher sign with the same key as the access-token minter.
+    fn same_key(minter: &PasetoV4SecretMinter) -> PasetoV4SecretMinter {
+        PasetoV4SecretMinter::from_secret_key(minter.secret_key_bytes().try_into().unwrap()).unwrap()
     }
 
     #[test]
@@ -619,7 +756,7 @@ mod tests {
 
             // Origin revokes the jti; the edge (sharing the set) now rejects it
             // even though the signature is still valid and it hasn't expired.
-            authority.revoke_session(&s.claims.jti).await.unwrap();
+            authority.revoke_session(&s.claims.jti, s.claims.expires_at).await.unwrap();
             let err = edge.verify_at(&s.access_token, 1_100).await.unwrap_err();
             assert!(matches!(err, Error::Revoked), "got {err:?}");
         });
@@ -660,7 +797,7 @@ mod tests {
                 .unwrap();
 
             let rotated = authority
-                .rotate(first.refresh.token.as_str(), DeviceBinding::Passkey, 1_050)
+                .rotate(first.refresh.token.as_str(), &DeviceBinding::Passkey, 1_050)
                 .await
                 .unwrap();
 
@@ -682,22 +819,27 @@ mod tests {
     }
 
     #[test]
-    fn revoke_device_records_intent_through_user_store() {
+    fn revoke_device_without_a_binder_records_intent_but_no_set_entry() {
         let (minter, _verifier) = PasetoV4SecretMinter::generate().unwrap();
         let users = StubUsers::default();
+        let revocations = MemoryRevocationStore::default();
         let authority = SessionAuthority::new(
             minter,
             MemRefreshStore::default(),
             users,
-            MemRevocations::default(),
+            revocations.clone(),
         );
         pollster::block_on(async {
             authority
-                .revoke_device(&UserId::new("u1"), &DeviceId::new("d1"))
+                .revoke_device(&UserId::new("u1"), &DeviceId::new("d1"), 1_000)
                 .await
                 .unwrap();
             let recorded = authority.users().revoked.lock().unwrap().clone();
             assert_eq!(recorded, vec![("u1".to_string(), "d1".to_string())]);
+            // R732-T7: no binder, so no standing binding was ever minted and
+            // there is nothing for a device entry to end.
+            assert!(!revocations.is_device_revoked(&DeviceId::new("d1"), 0).await.unwrap());
+            assert_eq!(revocations.snapshot().await.unwrap().epoch, 0);
         });
     }
 
@@ -744,7 +886,7 @@ mod tests {
 
             // Binding is layer 2, not a second admission door: revocation still
             // kills a correctly-bound token.
-            authority.revoke_session(&s.claims.jti).await.unwrap();
+            authority.revoke_session(&s.claims.jti, s.claims.expires_at).await.unwrap();
             let err = edge
                 .verify_bound_at(&s.access_token, &node_key(0x11), 1_100)
                 .await
@@ -798,7 +940,7 @@ mod tests {
             // carried it, so an unaware caller gets an unbound token rather
             // than a silently stale binding.
             let plain = authority
-                .rotate(first.refresh.token.as_str(), DeviceBinding::LanPair, 1_050)
+                .rotate(first.refresh.token.as_str(), &DeviceBinding::LanPair, 1_050)
                 .await
                 .unwrap();
             assert_eq!(plain.claims.peer_key, None);
@@ -808,7 +950,7 @@ mod tests {
             let rebound = authority
                 .rotate_bound(
                     plain.refresh.token.as_str(),
-                    DeviceBinding::LanPair,
+                    &DeviceBinding::LanPair,
                     node_key(0x22),
                     1_100,
                 )
@@ -826,6 +968,419 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(err, Error::PeerKeyMismatch), "got {err:?}");
+        });
+    }
+
+    // ---- R730: binding resolved from the chain's (user, device) ------------
+
+    /// A product-shaped resolver: per-device rows, plus a log of what it was
+    /// asked so tests can prove it was keyed off the refresh chain.
+    #[derive(Default)]
+    struct RowResolver {
+        rows: Mutex<HashMap<(String, String), DeviceBinding>>,
+        asked: Mutex<Vec<(String, String)>>,
+        fail: bool,
+    }
+
+    impl RowResolver {
+        fn with(user: &str, device: &str, binding: DeviceBinding) -> Self {
+            let r = Self::default();
+            r.rows
+                .lock()
+                .unwrap()
+                .insert((user.into(), device.into()), binding);
+            r
+        }
+    }
+
+    #[async_trait]
+    impl BindingResolver for RowResolver {
+        async fn resolve_binding(
+            &self,
+            user_id: &UserId,
+            device_id: &DeviceId,
+            _now: i64,
+        ) -> Result<Option<DeviceBinding>, StoreError> {
+            let key = (user_id.as_str().to_owned(), device_id.as_str().to_owned());
+            self.asked.lock().unwrap().push(key.clone());
+            if self.fail {
+                return Err(StoreError::Backend("directory down".into()));
+            }
+            Ok(self.rows.lock().unwrap().get(&key).cloned())
+        }
+    }
+
+    #[test]
+    fn rotate_mints_with_the_binding_resolved_for_the_chains_device() {
+        let (authority, edge, _) = rig();
+        pollster::block_on(async {
+            let first = authority
+                .establish(
+                    UserId::new("u1"),
+                    DeviceId::new("d1"),
+                    DeviceBinding::EmailMagicLink,
+                    1_000,
+                )
+                .await
+                .unwrap();
+            let resolver = RowResolver::with("u1", "d1", DeviceBinding::EmailMagicLink);
+
+            let rotated = authority
+                .rotate(first.refresh.token.as_str(), &resolver, 1_050)
+                .await
+                .unwrap();
+
+            assert_eq!(rotated.claims.binding, DeviceBinding::EmailMagicLink);
+            assert_eq!(rotated.claims.device, DeviceId::new("d1"));
+            assert_eq!(
+                *resolver.asked.lock().unwrap(),
+                vec![("u1".to_string(), "d1".to_string())]
+            );
+            let back = edge.verify_at(&rotated.access_token, 1_100).await.unwrap();
+            assert_eq!(back.binding, DeviceBinding::EmailMagicLink);
+        });
+    }
+
+    #[test]
+    fn rotate_refuses_an_unbound_device_without_spending_the_token() {
+        let (authority, _edge, _) = rig();
+        pollster::block_on(async {
+            let first = authority
+                .establish(
+                    UserId::new("u1"),
+                    DeviceId::new("d1"),
+                    DeviceBinding::Passkey,
+                    1_000,
+                )
+                .await
+                .unwrap();
+            // Rows exist, but not for this device.
+            let resolver = RowResolver::with("u1", "other", DeviceBinding::Passkey);
+
+            let err = authority
+                .rotate(first.refresh.token.as_str(), &resolver, 1_050)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Refresh(RefreshError::Unbound)),
+                "got {err:?}"
+            );
+
+            // Not spent, chain untouched: once a binding is known, the very
+            // same token still rotates (no Replay, no ChainRevoked).
+            let ok = authority
+                .rotate(first.refresh.token.as_str(), &DeviceBinding::Passkey, 1_060)
+                .await
+                .unwrap();
+            assert_eq!(ok.refresh.record.chain_id, first.refresh.record.chain_id);
+        });
+    }
+
+    #[test]
+    fn rotate_resolver_failure_is_a_store_error_and_spends_nothing() {
+        let (authority, _edge, _) = rig();
+        pollster::block_on(async {
+            let first = authority
+                .establish(
+                    UserId::new("u1"),
+                    DeviceId::new("d1"),
+                    DeviceBinding::Passkey,
+                    1_000,
+                )
+                .await
+                .unwrap();
+            let resolver = RowResolver {
+                fail: true,
+                ..RowResolver::default()
+            };
+            let err = authority
+                .rotate(first.refresh.token.as_str(), &resolver, 1_050)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Store(_)), "got {err:?}");
+            assert!(
+                authority
+                    .rotate(first.refresh.token.as_str(), &DeviceBinding::Passkey, 1_060)
+                    .await
+                    .is_ok()
+            );
+        });
+    }
+
+    #[test]
+    fn replay_revokes_the_chain_before_the_resolver_is_consulted() {
+        let (authority, _edge, _) = rig();
+        pollster::block_on(async {
+            let first = authority
+                .establish(
+                    UserId::new("u1"),
+                    DeviceId::new("d1"),
+                    DeviceBinding::Passkey,
+                    1_000,
+                )
+                .await
+                .unwrap();
+            let resolver = RowResolver::with("u1", "d1", DeviceBinding::Passkey);
+            let second = authority
+                .rotate(first.refresh.token.as_str(), &resolver, 1_050)
+                .await
+                .unwrap();
+
+            // Replay with a resolver that knows NO binding: still Replay, not
+            // Unbound — reuse detection outranks the binding lookup.
+            let empty = RowResolver::default();
+            let err = authority
+                .rotate(first.refresh.token.as_str(), &empty, 1_060)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Refresh(RefreshError::Replay)),
+                "got {err:?}"
+            );
+            assert!(empty.asked.lock().unwrap().is_empty());
+
+            // The whole chain is dead, including the legitimate successor.
+            let err = authority
+                .rotate(second.refresh.token.as_str(), &resolver, 1_070)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Refresh(RefreshError::ChainRevoked)),
+                "got {err:?}"
+            );
+        });
+    }
+
+    // ---- R732-F5: standing node binding, mint → offline edge ---------------
+
+    use cheers_verify::{IssuerTrust, ReplicatedRevocations, StandingError, StandingVerifier};
+    use std::sync::Arc;
+
+    /// Ten years on: far past any access-token window.
+    const YEARS_LATER: i64 = 1_000 + 10 * 365 * 24 * 60 * 60;
+
+    type Authority = SessionAuthority<PasetoV4SecretMinter, MemRefreshStore, StubUsers, MemoryRevocationStore>;
+
+    /// An authority with a standing binder, an online access-token edge, and
+    /// an offline edge that knows the issuer key and learns revocations only
+    /// from signed sets it is handed.
+    struct Standing {
+        authority: Authority,
+        access_edge: EdgeVerifier<PasetoV4PublicVerifier, MemoryRevocationStore>,
+        publisher: RevocationPublisher<MemoryRevocationStore>,
+        replica: Arc<ReplicatedRevocations>,
+        edge: StandingVerifier<Arc<ReplicatedRevocations>>,
+    }
+
+    impl Standing {
+        /// Gossip the issuer's current revocation set to the offline edge.
+        async fn sync_revocations(&self) {
+            let set = self.publisher.current(0).await.unwrap();
+            self.replica.adopt(&set.token).await.unwrap();
+        }
+
+        async fn bind(&self, device: &str, key: PeerKey, now: i64) -> NewSession {
+            self.authority
+                .establish_bound(UserId::new("u1"), DeviceId::new(device), DeviceBinding::LanPair, key, now)
+                .await
+                .unwrap()
+        }
+    }
+
+    fn standing_rig() -> Standing {
+        let (minter, verifier) = PasetoV4SecretMinter::generate().unwrap();
+        let trust = IssuerTrust::pinned(ISS, minter.verifier().unwrap());
+        let revocations = MemoryRevocationStore::default();
+        let ownership: Arc<dyn crate::OwnershipStore> = Arc::new(crate::MemoryOwnershipStore::new());
+        let publisher = RevocationPublisher::new(revocations.clone(), ownership, same_key(&minter), ISS, KID);
+        let binder = StandingBinder::new(MemoryBindingSequenceStore::new(), same_key(&minter), ISS, KID);
+        let authority = SessionAuthority::new(minter, MemRefreshStore::default(), StubUsers::default(), revocations.clone())
+            .with_standing_binder(binder);
+        let replica = Arc::new(ReplicatedRevocations::new(trust.clone()));
+        Standing {
+            authority,
+            access_edge: EdgeVerifier::new(verifier, revocations),
+            publisher,
+            edge: StandingVerifier::new(trust, replica.clone()),
+            replica,
+        }
+    }
+
+    #[test]
+    fn a_lan_pair_session_carries_a_standing_binding_that_outlives_its_access_token() {
+        let r = standing_rig();
+        pollster::block_on(async {
+            let s = r.bind("node:a", node_key(0x11), 1_000).await;
+            let standing = s.standing.expect("LanPair + peer key mints a binding");
+            let b = &standing.binding;
+            assert_eq!((b.issuer.as_str(), b.sub.as_str(), b.device.as_str()), (ISS, "u1", "node:a"));
+            assert_eq!(b.peer_key, node_key(0x11));
+            assert_eq!(b.seq, 1_000, "first binding: the clock floor");
+            assert_eq!(b.iat, 1_000);
+            assert_eq!(b.lease.refresh_after(), 1_000 + StandingBinder::DEFAULT_REFRESH_AFTER_SECONDS);
+            assert_ne!(b.jti, s.claims.jti, "the binding is its own credential");
+
+            // Years later the access token is long dead...
+            let err = r
+                .access_edge
+                .verify_bound_at(&s.access_token, &node_key(0x11), YEARS_LATER)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Codec(_)), "got {err:?}");
+            // ...and the binding still admits the node, flagged for refresh.
+            let ok = r
+                .edge
+                .verify_standing_at(&standing.token, &node_key(0x11), YEARS_LATER)
+                .await
+                .unwrap();
+            assert_eq!(&ok.binding, b);
+            assert_eq!(ok.lease, LeaseState::Warning { exp: None });
+            // Still bound to the node key.
+            assert!(matches!(
+                r.edge.verify_standing_at(&standing.token, &node_key(0x22), YEARS_LATER).await,
+                Err(StandingError::PeerKeyMismatch)
+            ));
+        });
+    }
+
+    #[test]
+    fn only_peer_bound_lan_pair_sessions_carry_a_binding() {
+        let r = standing_rig();
+        pollster::block_on(async {
+            let passkey = r
+                .authority
+                .establish_bound(UserId::new("u1"), DeviceId::new("d1"), DeviceBinding::Passkey, node_key(1), 1_000)
+                .await
+                .unwrap();
+            assert!(passkey.standing.is_none());
+            let unbound = r
+                .authority
+                .establish(UserId::new("u1"), DeviceId::new("d2"), DeviceBinding::LanPair, 1_000)
+                .await
+                .unwrap();
+            assert!(unbound.standing.is_none());
+        });
+    }
+
+    #[test]
+    fn lan_pair_without_a_binder_refuses_before_anything_is_written() {
+        let (minter, _) = PasetoV4SecretMinter::generate().unwrap();
+        let authority = SessionAuthority::new(
+            minter,
+            MemRefreshStore::default(),
+            StubUsers::default(),
+            MemoryRevocationStore::default(),
+        );
+        pollster::block_on(async {
+            let err = authority
+                .establish_bound(UserId::new("u1"), DeviceId::new("d1"), DeviceBinding::LanPair, node_key(1), 1_000)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::NoStandingBinder), "got {err:?}");
+            assert!(authority.refresh.0.lock().unwrap().is_empty(), "no refresh chain started");
+
+            // rotate_bound refuses with the presented token unspent.
+            let first = authority
+                .establish(UserId::new("u1"), DeviceId::new("d1"), DeviceBinding::LanPair, 1_000)
+                .await
+                .unwrap();
+            let err = authority
+                .rotate_bound(first.refresh.token.as_str(), &DeviceBinding::LanPair, node_key(1), 1_050)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::NoStandingBinder), "got {err:?}");
+            let records = authority.refresh.0.lock().unwrap();
+            assert!(records.values().all(|r| !r.consumed));
+        });
+    }
+
+    #[test]
+    fn re_enrolling_a_device_supersedes_its_previous_binding_at_the_edge() {
+        let r = standing_rig();
+        pollster::block_on(async {
+            let first = r.bind("node:a", node_key(0x11), 1_000).await.standing.unwrap();
+            // Same second, same device, new node key: the sequence still rises.
+            let second = r.bind("node:a", node_key(0x22), 1_000).await.standing.unwrap();
+            assert_eq!(second.binding.seq, first.binding.seq + 1);
+
+            r.edge.verify_standing_at(&first.token, &node_key(0x11), 1_000).await.unwrap();
+            r.edge.verify_standing_at(&second.token, &node_key(0x22), 1_000).await.unwrap();
+            assert!(matches!(
+                r.edge.verify_standing_at(&first.token, &node_key(0x11), 1_000).await,
+                Err(StandingError::Superseded { .. })
+            ));
+            // Another device's binding is untouched.
+            let other = r.bind("node:b", node_key(0x33), 1_000).await.standing.unwrap();
+            r.edge.verify_standing_at(&other.token, &node_key(0x33), 1_000).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn rotate_bound_mints_a_successor_binding() {
+        let r = standing_rig();
+        pollster::block_on(async {
+            let first = r.bind("node:a", node_key(0x11), 1_000).await;
+            let rotated = r
+                .authority
+                .rotate_bound(first.refresh.token.as_str(), &DeviceBinding::LanPair, node_key(0x22), 1_050)
+                .await
+                .unwrap();
+            let (old, new) = (first.standing.unwrap(), rotated.standing.unwrap());
+            assert!(new.binding.seq > old.binding.seq);
+            assert_eq!(new.binding.peer_key, node_key(0x22));
+            r.edge.adopt(&new.token).await.unwrap();
+            assert!(matches!(
+                r.edge.verify_standing_at(&old.token, &node_key(0x11), 1_050).await,
+                Err(StandingError::Superseded { .. })
+            ));
+            r.edge.verify_standing_at(&new.token, &node_key(0x22), YEARS_LATER).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn revocation_is_what_ends_a_standing_binding_at_an_offline_edge() {
+        let r = standing_rig();
+        pollster::block_on(async {
+            let a = r.bind("node:a", node_key(0x11), 1_000).await.standing.unwrap();
+            let b = r.bind("node:b", node_key(0x22), 1_000).await.standing.unwrap();
+            r.sync_revocations().await;
+            r.edge.verify_standing_at(&a.token, &node_key(0x11), YEARS_LATER).await.unwrap();
+
+            // The device: SessionAuthority::revoke_device records Revoked::Device.
+            // Its bound consumes node:a's next seq, above a's.
+            r.authority
+                .revoke_device(&UserId::new("u1"), &DeviceId::new("node:a"), 1_000)
+                .await
+                .unwrap();
+            let entry = r.publisher.store().snapshot().await.unwrap().revoked;
+            assert!(matches!(
+                entry.as_slice(),
+                [Revoked::Device { at_seq, .. }] if *at_seq > a.binding.seq
+            ));
+            // Not yet heard offline: still admitted (the accepted cost).
+            r.edge.verify_standing_at(&a.token, &node_key(0x11), YEARS_LATER).await.unwrap();
+            r.sync_revocations().await;
+            assert!(matches!(
+                r.edge.verify_standing_at(&a.token, &node_key(0x11), YEARS_LATER).await,
+                Err(StandingError::DeviceRevoked { .. })
+            ));
+
+            // Re-enrolling the same machine mints above the revoke: admitted.
+            let again = r.bind("node:a", node_key(0x11), 1_000).await.standing.unwrap();
+            r.edge.adopt(&again.token).await.unwrap();
+            r.edge.verify_standing_at(&again.token, &node_key(0x11), YEARS_LATER).await.unwrap();
+            // ...and the access-token-only server reader agrees seq-for-seq.
+            let device = DeviceId::new("node:a");
+            assert!(r.publisher.store().is_device_revoked(&device, a.binding.seq).await.unwrap());
+            assert!(!r.publisher.store().is_device_revoked(&device, again.binding.seq).await.unwrap());
+
+            // The binding alone, by its jti.
+            r.authority.revoke_standing_binding(&b.binding.jti).await.unwrap();
+            r.sync_revocations().await;
+            assert!(matches!(
+                r.edge.verify_standing_at(&b.token, &node_key(0x22), YEARS_LATER).await,
+                Err(StandingError::Revoked { .. })
+            ));
         });
     }
 }

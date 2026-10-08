@@ -255,19 +255,15 @@ async fn fk_cascade_user_delete_wipes_dependent_rows() {
 async fn ownership_check_constraints_reject_bad_rows() {
     let fx = fresh_libsql().await;
 
-    // granted_by must LIKE 'svc:%'.
-    let bad_grantor = fx
-        .conn
+    // granted_by may be any kind since 0008 (D4): a user grantor is accepted.
+    fx.conn
         .execute(
             "INSERT INTO ownership (id, principal_id, resource_kind, resource_id, relationship, granted_by, granted_at) \
              VALUES ('o1', 'user:alice', 'doc', 'd1', 'owner', 'user:bob', 1000)",
             (),
         )
-        .await;
-    assert!(
-        bad_grantor.is_err(),
-        "ownership.granted_by without svc: prefix must be rejected",
-    );
+        .await
+        .expect("user-granted ownership row");
 
     // on_behalf_of must be NULL or LIKE 'user:%'.
     let bad_obo = fx
@@ -292,6 +288,35 @@ async fn ownership_check_constraints_reject_bad_rows() {
         )
         .await
         .expect("valid ownership row");
+
+    // 0009: a set subject in place of principal_id is accepted ...
+    fx.conn
+        .execute(
+            "INSERT INTO ownership (id, subject_kind, subject_id, subject_relation, resource_kind, resource_id, relationship, granted_by, granted_at) \
+             VALUES ('o4', 'namespace', 'n1', 'member', 'doc', 'd1', 'reader', 'user:bob', 1000)",
+            (),
+        )
+        .await
+        .expect("set-subject ownership row");
+    // ... but never alongside it, and never neither.
+    let both = fx
+        .conn
+        .execute(
+            "INSERT INTO ownership (id, principal_id, subject_kind, subject_id, subject_relation, resource_kind, resource_id, relationship, granted_by, granted_at) \
+             VALUES ('o5', 'user:alice', 'namespace', 'n1', 'member', 'doc', 'd1', 'reader', 'user:bob', 1000)",
+            (),
+        )
+        .await;
+    assert!(both.is_err(), "both subject forms must be rejected");
+    let neither = fx
+        .conn
+        .execute(
+            "INSERT INTO ownership (id, resource_kind, resource_id, relationship, granted_by, granted_at) \
+             VALUES ('o6', 'doc', 'd1', 'reader', 'user:bob', 1000)",
+            (),
+        )
+        .await;
+    assert!(neither.is_err(), "a row with no subject must be rejected");
 }
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@
 //! cycles by construction and keeps expansion a single lookup per entry.
 
 use std::collections::{BTreeMap, HashSet};
+use cheers_core::yah_scopes;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -140,8 +141,8 @@ pub async fn expand_scopes<S: BundleStore + ?Sized>(
     for entry in entries {
         match entry {
             ScopeOrBundle::Scope(s) => {
-                if seen.insert(*s) {
-                    out.push(*s);
+                if seen.insert(s.clone()) {
+                    out.push(s.clone());
                 }
             }
             ScopeOrBundle::Bundle(name) => {
@@ -150,7 +151,7 @@ pub async fn expand_scopes<S: BundleStore + ?Sized>(
                     .await?
                     .ok_or_else(|| BundleExpansionError::Unknown(name.clone()))?;
                 for s in scopes {
-                    if seen.insert(s) {
+                    if seen.insert(s.clone()) {
                         out.push(s);
                     }
                 }
@@ -180,16 +181,16 @@ impl MemoryBundleStore {
     pub fn with_defaults() -> Self {
         let store = Self::new();
         let camp_operator = vec![
-            Scope::CampRead,
-            Scope::CampAdmin,
-            Scope::BoardRead,
-            Scope::BoardWrite,
-            Scope::PartyRead,
-            Scope::PartyWrite,
-            Scope::SubagentSpawn,
-            Scope::SubagentControl,
+            yah_scopes::CAMP_READ,
+            yah_scopes::CAMP_ADMIN,
+            yah_scopes::BOARD_READ,
+            yah_scopes::BOARD_WRITE,
+            yah_scopes::PARTY_READ,
+            yah_scopes::PARTY_WRITE,
+            yah_scopes::SUBAGENT_SPAWN,
+            yah_scopes::SUBAGENT_CONTROL,
         ];
-        let deploy_admin = vec![Scope::CloudRead, Scope::CloudDeploy, Scope::CloudDestroy];
+        let deploy_admin = vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_DESTROY];
         {
             let mut g = store.inner.lock().expect("bundle store mutex poisoned");
             g.insert("camp-operator".to_owned(), camp_operator);
@@ -239,10 +240,10 @@ mod tests {
         let name = BundleName::new("custom");
         block_on(async {
             assert!(store.get(&name).await.unwrap().is_none());
-            store.put(&name, &[Scope::CloudRead]).await.unwrap();
+            store.put(&name, &[yah_scopes::CLOUD_READ]).await.unwrap();
             assert_eq!(
                 store.get(&name).await.unwrap(),
-                Some(vec![Scope::CloudRead])
+                Some(vec![yah_scopes::CLOUD_READ])
             );
             store.delete(&name).await.unwrap();
             assert!(store.get(&name).await.unwrap().is_none());
@@ -276,12 +277,12 @@ mod tests {
     fn expand_literal_scopes_passes_through_in_order_and_dedups() {
         let store = MemoryBundleStore::new();
         let grants = vec![
-            ScopeOrBundle::Scope(Scope::CloudRead),
-            ScopeOrBundle::Scope(Scope::CloudDeploy),
-            ScopeOrBundle::Scope(Scope::CloudRead),
+            ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
+            ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY),
+            ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
         ];
         let expanded = block_on(expand_scopes(&store, &grants)).unwrap();
-        assert_eq!(expanded, vec![Scope::CloudRead, Scope::CloudDeploy]);
+        assert_eq!(expanded, vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
     }
 
     #[test]
@@ -294,14 +295,14 @@ mod tests {
         assert_eq!(
             expanded,
             vec![
-                Scope::CampRead,
-                Scope::CampAdmin,
-                Scope::BoardRead,
-                Scope::BoardWrite,
-                Scope::PartyRead,
-                Scope::PartyWrite,
-                Scope::SubagentSpawn,
-                Scope::SubagentControl,
+                yah_scopes::CAMP_READ,
+                yah_scopes::CAMP_ADMIN,
+                yah_scopes::BOARD_READ,
+                yah_scopes::BOARD_WRITE,
+                yah_scopes::PARTY_READ,
+                yah_scopes::PARTY_WRITE,
+                yah_scopes::SUBAGENT_SPAWN,
+                yah_scopes::SUBAGENT_CONTROL,
             ]
         );
     }
@@ -314,34 +315,34 @@ mod tests {
         let grants = vec![ScopeOrBundle::Bundle(BundleName::new("deploy-admin"))];
 
         let before = block_on(expand_scopes(&store, &grants)).unwrap();
-        assert!(before.contains(&Scope::CloudDestroy));
+        assert!(before.contains(&yah_scopes::CLOUD_DESTROY));
 
         // Mutate the bundle: drop CloudDestroy. The grants vector is untouched.
         block_on(store.put(
             &BundleName::new("deploy-admin"),
-            &[Scope::CloudRead, Scope::CloudDeploy],
+            &[yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY],
         ))
         .unwrap();
 
         let after = block_on(expand_scopes(&store, &grants)).unwrap();
-        assert!(!after.contains(&Scope::CloudDestroy));
-        assert_eq!(after, vec![Scope::CloudRead, Scope::CloudDeploy]);
+        assert!(!after.contains(&yah_scopes::CLOUD_DESTROY));
+        assert_eq!(after, vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY]);
     }
 
     #[test]
     fn expand_mixed_scope_and_bundle_dedups_across_both() {
         let store = MemoryBundleStore::with_defaults();
         let grants = vec![
-            ScopeOrBundle::Scope(Scope::CloudRead),
+            ScopeOrBundle::Scope(yah_scopes::CLOUD_READ),
             ScopeOrBundle::Bundle(BundleName::new("deploy-admin")),
         ];
         let expanded = block_on(expand_scopes(&store, &grants)).unwrap();
         // CloudRead appears once, in its original position from the literal.
-        let count = expanded.iter().filter(|s| **s == Scope::CloudRead).count();
+        let count = expanded.iter().filter(|s| **s == yah_scopes::CLOUD_READ).count();
         assert_eq!(count, 1);
-        assert_eq!(expanded[0], Scope::CloudRead);
-        assert!(expanded.contains(&Scope::CloudDeploy));
-        assert!(expanded.contains(&Scope::CloudDestroy));
+        assert_eq!(expanded[0], yah_scopes::CLOUD_READ);
+        assert!(expanded.contains(&yah_scopes::CLOUD_DEPLOY));
+        assert!(expanded.contains(&yah_scopes::CLOUD_DESTROY));
     }
 
     #[test]
@@ -391,7 +392,7 @@ mod tests {
 
     #[test]
     fn scope_or_bundle_serialize_is_externally_tagged() {
-        let s = ScopeOrBundle::Scope(Scope::CloudDeploy);
+        let s = ScopeOrBundle::Scope(yah_scopes::CLOUD_DEPLOY);
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, r#"{"scope":"cloud:deploy"}"#);
         let back: ScopeOrBundle = serde_json::from_str(&json).unwrap();

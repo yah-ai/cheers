@@ -3,7 +3,7 @@
 
 #![cfg(feature = "redis-integration")]
 
-use cheers_core::{DeviceId, UserId};
+use cheers_core::{DeviceId, Revoked, UserId};
 use cheers_redis::{RedisRefreshStore, RedisRevocationStore};
 use cheers_server::store::{RefreshStore, RefreshTokenRecord};
 use cheers_server::RevocationWriter;
@@ -181,24 +181,34 @@ async fn refresh_store_prefix_isolation() {
 async fn revocation_writer_and_reader() {
     let fx = fresh_redis().await;
     let revoke = RedisRevocationStore::new(fx.conn.clone());
-
-    assert!(!revoke.is_revoked("tok-x").await.unwrap());
-    revoke.revoke("tok-x").await.unwrap();
-    assert!(revoke.is_revoked("tok-x").await.unwrap());
-    // Idempotent.
-    revoke.revoke("tok-x").await.unwrap();
-    assert!(revoke.is_revoked("tok-x").await.unwrap());
-    // Independence.
-    assert!(!revoke.is_revoked("tok-y").await.unwrap());
+    cheers_test_support::store_scenarios::revocation_writer_and_reader(&revoke).await;
 }
 
 #[tokio::test]
-async fn revocation_ttl_expires_entries() {
+async fn revocation_jtis_lapse_at_exp_and_gc_advances_the_epoch() {
     let fx = fresh_redis().await;
-    let revoke = RedisRevocationStore::new(fx.conn.clone()).with_revoke_ttl_seconds(1);
-    revoke.revoke("tok-short").await.unwrap();
+    let revoke = RedisRevocationStore::new(fx.conn.clone());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    revoke.revoke(&Revoked::jti("tok-short", Some(now + 1))).await.unwrap();
+    revoke.revoke(&Revoked::jti("tok-forever", None)).await.unwrap();
+    revoke.revoke(&Revoked::device("phone", 10)).await.unwrap();
     assert!(revoke.is_revoked("tok-short").await.unwrap());
-    // Wait past the TTL — redis returns false once the key expires.
-    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    // Wait past the exp — a lapsed jti reads unrevoked; the others never lapse.
+    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
     assert!(!revoke.is_revoked("tok-short").await.unwrap());
+    assert!(revoke.is_revoked("tok-forever").await.unwrap());
+    assert!(revoke.is_device_revoked(&cheers_core::DeviceId::new("phone"), 9).await.unwrap());
+
+    let before = revoke.snapshot().await.unwrap();
+    assert_eq!(before.revoked.len(), 3, "lapsed entries stay in the snapshot until gc");
+    assert_eq!(revoke.gc(now + 2).await.unwrap(), 1);
+    let after = revoke.snapshot().await.unwrap();
+    assert_eq!(after.revoked.len(), 2);
+    assert!(after.epoch > before.epoch);
+    // Nothing left to collect: no write, no epoch change.
+    assert_eq!(revoke.gc(now + 2).await.unwrap(), 0);
+    assert_eq!(revoke.snapshot().await.unwrap().epoch, after.epoch);
 }

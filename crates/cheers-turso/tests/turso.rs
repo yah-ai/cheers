@@ -18,6 +18,7 @@ use cheers_turso::{
     migrate, AccountStores, TursoAuditStore, TursoConn, TursoOwnershipStore,
     TursoPasskeyCredentialStore, TursoRefreshStore, TursoRevocationStore,
     TursoServicePrincipalStore, TursoUserStore, TursoUserTokenStore, MIGRATIONS,
+    TursoBindingSequenceStore,
 };
 
 /// A freshly migrated in-memory database. Each call gets its own.
@@ -76,6 +77,11 @@ async fn revocation_writer_and_reader() {
 }
 
 #[tokio::test]
+async fn binding_sequence_store() {
+    common::binding_sequence_store(&TursoBindingSequenceStore::new(fresh().await)).await;
+}
+
+#[tokio::test]
 async fn ownership_store_lifecycle() {
     let store = TursoOwnershipStore::new(fresh().await);
     common::ownership_store_lifecycle(&store).await;
@@ -85,6 +91,102 @@ async fn ownership_store_lifecycle() {
 async fn ownership_store_check_constraints_reject_bad_rows() {
     let store = TursoOwnershipStore::new(fresh().await);
     common::ownership_store_check_constraints_reject_bad_rows(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_revoke_follows_holder() {
+    let store = TursoOwnershipStore::new(fresh().await);
+    common::ownership_store_revoke_follows_holder(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_subject_sets() {
+    let store = TursoOwnershipStore::new(fresh().await);
+    common::ownership_store_subject_sets(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_list_for_kind() {
+    let store = TursoOwnershipStore::new(fresh().await);
+    common::ownership_store_list_for_kind(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_version() {
+    let store = TursoOwnershipStore::new(fresh().await);
+    common::ownership_store_version(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_revocation_key() {
+    let store = TursoOwnershipStore::new(fresh().await);
+    common::ownership_store_revocation_key(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_admission_policy() {
+    let store = TursoOwnershipStore::new(fresh().await);
+    common::ownership_store_admission_policy(&store).await;
+}
+
+#[tokio::test]
+async fn ownership_store_lease() {
+    common::ownership_store_lease(&TursoOwnershipStore::new(fresh().await)).await;
+}
+
+#[tokio::test]
+async fn knock_store_lifecycle() {
+    common::knock_store_lifecycle(&cheers_turso::TursoKnockStore::new(fresh().await)).await;
+}
+
+#[tokio::test]
+async fn ownership_subject_check_rejects_bad_forms() {
+    // Raw INSERTs: proves the engine enforces the one-form CHECK, not just
+    // that the Rust types cannot express a bad subject.
+    let conn = fresh().await;
+    common::ownership_subject_check_rejects_bad_forms(|sql| {
+        let c = conn.clone();
+        async move {
+            c.execute(&sql, vec![])
+                .await
+                .map(|_| ())
+                .map_err(|e| cheers_core::StoreError::Backend(e.to_string()))
+        }
+    })
+    .await;
+}
+
+/// 0009 rebuilds the ownership table; a row written under 0008's schema must
+/// come through it intact, as a principal-subject row.
+#[tokio::test]
+async fn ownership_0009_rebuild_preserves_existing_rows() {
+    use cheers_core::{PrincipalId, Subject};
+    use cheers_server::ownership::OwnershipStore;
+
+    let conn = Arc::new(TursoConn::open_in_memory().await.expect("open :memory:"));
+    let (before, after): (Vec<&migrate::Migration>, Vec<_>) =
+        MIGRATIONS.iter().partition(|m| m.version < 9);
+    for m in before {
+        conn.execute_batch(m.sql).await.expect("pre-0009 migration");
+    }
+    conn.execute(
+        "INSERT INTO ownership (id, principal_id, resource_kind, resource_id, relationship, \
+         granted_by, on_behalf_of, granted_at, revoked_at) \
+         VALUES ('old-1', 'user:alice', 'doc', 'd1', 'owner', 'svc:cheers', 'user:bob', 10, NULL)",
+        vec![],
+    )
+    .await
+    .expect("row under 0008");
+    for m in after {
+        conn.execute_batch(m.sql).await.expect("0009+ migration");
+    }
+
+    let store = TursoOwnershipStore::new(conn);
+    let row = store.get("old-1").await.unwrap().expect("row survives the rebuild");
+    assert_eq!(row.subject, Subject::Principal(PrincipalId::user("alice")));
+    assert_eq!(row.on_behalf_of, Some(PrincipalId::user("bob")));
+    assert_eq!(row.granted_at, 10);
+    assert_eq!(store.list_for_principal(&PrincipalId::user("alice")).await.unwrap(), vec![row]);
 }
 
 #[tokio::test]

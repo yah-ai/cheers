@@ -81,7 +81,7 @@ mod tests {
         // assert a bad row does NOT come back as Conflict.
         assert!(matches!(
             map_turso_error(turso::Error::Constraint(
-                "CHECK constraint failed: granted_by LIKE 'svc:%' (19)".into()
+                "CHECK constraint failed: on_behalf_of IS NULL OR on_behalf_of LIKE 'user:%' (19)".into()
             )),
             StoreError::Backend(_)
         ));

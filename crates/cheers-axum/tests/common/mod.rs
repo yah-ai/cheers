@@ -14,9 +14,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use cheers_core::{Credential, DeviceBinding, DeviceId, PrincipalId, StoreError, User, UserId};
 use cheers_server::{
-    EdgeVerifier, HmacBlobCodec, NewOwnership, NewUser, OwnershipRow, OwnershipStore,
-    PasskeyCredentialStore, ProviderKey, RefreshStore, RefreshTokenRecord, RevocationReader,
-    RevocationWriter, SessionAuthority, UserStore,
+    EdgeVerifier, HmacBlobCodec, Inserted, MemoryOwnershipStore, NewOwnership, NewUser, OwnershipRow, OwnershipStore,
+    PasskeyCredentialStore, ProviderKey, RefreshStore, RefreshTokenRecord, SessionAuthority,
+    UserStore,
 };
 
 use cheers_axum::me::{SessionDescriptor, SessionDirectory, SessionRecorder};
@@ -168,23 +168,9 @@ impl RefreshStore for MemRefreshStore {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct MemRevocations(std::sync::Arc<Mutex<std::collections::HashSet<String>>>);
-
-#[async_trait]
-impl RevocationReader for MemRevocations {
-    async fn is_revoked(&self, jti: &str) -> Result<bool, StoreError> {
-        Ok(self.0.lock().unwrap().contains(jti))
-    }
-}
-
-#[async_trait]
-impl RevocationWriter for MemRevocations {
-    async fn revoke(&self, jti: &str) -> Result<(), StoreError> {
-        self.0.lock().unwrap().insert(jti.to_owned());
-        Ok(())
-    }
-}
+// The epoch-carrying in-memory revocation log (R732-F6). Kept under the test
+// suite's existing name so the nine `*_basic.rs` files that share it need no edit.
+pub use cheers_server::MemoryRevocationStore as MemRevocations;
 
 // ---------------------------------------------------------------------------
 // Test minter — HmacBlobCodec is cheap and dyn-compatible with TokenMinter,
@@ -277,12 +263,18 @@ impl SessionRecorder for MemSessionDirectory {
         issued_at: i64,
         expires_at: i64,
     ) -> Result<(), StoreError> {
-        self.record(
-            user_id.clone(),
-            device_id.clone(),
-            binding.clone(),
-            issued_at,
-            expires_at,
+        // Upsert the way `SessionRecorder`'s contract asks: a refresh rotation
+        // re-records the same device, and must not move first-sign-in time.
+        let mut g = self.rows.lock().unwrap();
+        let key = (user_id.clone(), device_id.clone());
+        let issued_at = g.get(&key).map_or(issued_at, |row| row.issued_at);
+        g.insert(
+            key,
+            MemSessionRow {
+                binding: binding.clone(),
+                issued_at,
+                expires_at,
+            },
         );
         Ok(())
     }
@@ -389,14 +381,8 @@ impl PasskeyCredentialStore for MemPasskeyStore {
 
 #[derive(Default)]
 pub struct MemOwnershipStore {
-    inner: Mutex<MemOwnershipInner>,
+    inner: MemoryOwnershipStore,
     pub insert_calls: std::sync::atomic::AtomicUsize,
-}
-
-#[derive(Default)]
-struct MemOwnershipInner {
-    rows: HashMap<String, OwnershipRow>,
-    next_id: u64,
 }
 
 impl MemOwnershipStore {
@@ -407,87 +393,61 @@ impl MemOwnershipStore {
 
 #[async_trait]
 impl OwnershipStore for MemOwnershipStore {
-    async fn insert(
-        &self,
-        ownership: &NewOwnership,
-        now: i64,
-    ) -> Result<OwnershipRow, StoreError> {
+    async fn insert(&self, ownership: &NewOwnership, now: i64) -> Result<Inserted, StoreError> {
         self.insert_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let mut g = self.inner.lock().unwrap();
-        g.next_id += 1;
-        let id = format!("own-{}", g.next_id);
-        let row = OwnershipRow::new(
-            id.clone(),
-            ownership.principal_id.clone(),
-            ownership.resource_kind.clone(),
-            ownership.resource_id.clone(),
-            ownership.relationship.clone(),
-            ownership.granted_by.clone(),
-            ownership.on_behalf_of.clone(),
-            now,
-            None,
-        );
-        g.rows.insert(id, row.clone());
-        Ok(row)
+        self.inner.insert(ownership, now).await
     }
 
     async fn get(&self, id: &str) -> Result<Option<OwnershipRow>, StoreError> {
-        Ok(self.inner.lock().unwrap().rows.get(id).cloned())
+        self.inner.get(id).await
     }
 
-    async fn revoke_by_id(&self, id: &str, now: i64) -> Result<(), StoreError> {
-        let mut g = self.inner.lock().unwrap();
-        let row = g.rows.get_mut(id).ok_or(StoreError::NotFound)?;
-        if row.revoked_at.is_none() {
-            row.revoked_at = Some(now);
-        }
-        Ok(())
+    async fn revoke_by_id(&self, id: &str, now: i64) -> Result<u64, StoreError> {
+        self.inner.revoke_by_id(id, now).await
     }
 
-    async fn revoke_by_on_behalf_of(
+    async fn revoke_by_principal(&self, principal: &PrincipalId, now: i64) -> Result<u64, StoreError> {
+        self.inner.revoke_by_principal(principal, now).await
+    }
+
+    async fn list_history_for_principal(&self, principal: &PrincipalId) -> Result<Vec<OwnershipRow>, StoreError> {
+        self.inner.list_history_for_principal(principal).await
+    }
+
+    async fn current_version(&self) -> Result<u64, StoreError> {
+        self.inner.current_version().await
+    }
+
+    async fn list_for_principal(&self, principal: &PrincipalId) -> Result<Vec<OwnershipRow>, StoreError> {
+        self.inner.list_for_principal(principal).await
+    }
+
+    async fn list_for_resource(&self, kind: &str, id: &str) -> Result<Vec<OwnershipRow>, StoreError> {
+        self.inner.list_for_resource(kind, id).await
+    }
+
+    async fn list_for_subject_set(&self, kind: &str, id: &str) -> Result<Vec<OwnershipRow>, StoreError> {
+        self.inner.list_for_subject_set(kind, id).await
+    }
+
+    async fn list_for_kind(&self, kind: &str) -> Result<Vec<OwnershipRow>, StoreError> {
+        self.inner.list_for_kind(kind).await
+    }
+    async fn revocation_key(&self, kind: &str, id: &str) -> Result<cheers_core::RevocationKey, StoreError> {
+        self.inner.revocation_key(kind, id).await
+    }
+    async fn admission_policy(&self, kind: &str, id: &str) -> Result<Option<cheers_core::AdmissionPolicy>, StoreError> {
+        self.inner.admission_policy(kind, id).await
+    }
+    async fn set_admission_policy(
         &self,
-        user: &PrincipalId,
+        kind: &str,
+        id: &str,
+        policy: Option<&cheers_core::AdmissionPolicy>,
         now: i64,
     ) -> Result<u64, StoreError> {
-        let mut g = self.inner.lock().unwrap();
-        let mut swept = 0u64;
-        for row in g.rows.values_mut() {
-            if row.revoked_at.is_none() && row.on_behalf_of.as_ref() == Some(user) {
-                row.revoked_at = Some(now);
-                swept += 1;
-            }
-        }
-        Ok(swept)
-    }
-
-    async fn list_for_principal(
-        &self,
-        principal: &PrincipalId,
-    ) -> Result<Vec<OwnershipRow>, StoreError> {
-        let g = self.inner.lock().unwrap();
-        Ok(g.rows
-            .values()
-            .filter(|r| &r.principal_id == principal && r.revoked_at.is_none())
-            .cloned()
-            .collect())
-    }
-
-    async fn list_for_resource(
-        &self,
-        resource_kind: &str,
-        resource_id: &str,
-    ) -> Result<Vec<OwnershipRow>, StoreError> {
-        let g = self.inner.lock().unwrap();
-        Ok(g.rows
-            .values()
-            .filter(|r| {
-                r.resource_kind == resource_kind
-                    && r.resource_id == resource_id
-                    && r.revoked_at.is_none()
-            })
-            .cloned()
-            .collect())
+        self.inner.set_admission_policy(kind, id, policy, now).await
     }
 }
 

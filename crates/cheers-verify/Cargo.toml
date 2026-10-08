@@ -19,13 +19,29 @@ path = "src/lib.rs"
 # realized as "the edge's crate has no path to a minter." cheers-server depends on
 # THIS crate, never the reverse. See .yah/docs/working/edge-verifiable-auth.md.
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.42" }
+cheers-core = { path = "../cheers-core", version = "0.8.43" }
 pasetors = "0.7"
 serde_json = "1"
 async-trait = "0.1"
+# R731-F6 — the W159 JWKS cache + KeySetVerifier (moved from kamaji-bin).
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+# R732-T10 — membership revocation tags: HMAC-SHA256 under the resource key.
+hmac = "0.12"
+sha2 = "0.10"
+tracing = "0.1"
+# Only with `jwks-http`: the reqwest-backed JwksSource. Off by default so edge
+# consumers (passway) that hold a static KeySet link no HTTP client.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+
+[features]
+default = []
+jwks-http = ["dep:reqwest"]
 
 [dev-dependencies]
 pollster = "0.4"
+tempfile = "3"
 # R592-F3 golden-token fixtures (shared with cheers-server / cheers-mock /
 # kamaji-bin / yubaba's minter). A dev-dependency cycle back into this crate
 # is fine — Cargo explicitly supports cyclic dev-dependencies.

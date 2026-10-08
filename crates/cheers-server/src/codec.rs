@@ -63,7 +63,7 @@ use pasetors::{local, public};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-use cheers_core::{Claims, CodecError, McpClaims, TokenMinter, TokenVerifier};
+use cheers_core::{Claims, CodecError, McpClaims, SignedArtifact, TokenMinter, TokenVerifier};
 use cheers_verify::{codec_err, PasetoV4PublicVerifier};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -227,6 +227,19 @@ impl PasetoV4SecretMinter {
         let footer = serde_json::to_vec(&serde_json::json!({ "kid": kid }))?;
         PublicToken::sign(&self.secret, &payload, Some(&footer), None).map_err(codec_err)
     }
+
+    /// Sign a [`SignedArtifact`] (R732-F6) — same flat-payload + `{"kid"}`
+    /// footer envelope as [`mint_mcp`](Self::mint_mcp), plus the artifact
+    /// kind's own implicit assertion, so the result never verifies as an
+    /// access token and no access token verifies as it. Verified by
+    /// `KeySetVerifier::verify_artifact` / `PasetoV4PublicVerifier::verify_artifact`.
+    /// The key must be published with the issuer role.
+    pub fn mint_artifact<T: SignedArtifact>(&self, artifact: &T, kid: &str) -> Result<String, CodecError> {
+        let payload = serde_json::to_vec(artifact)?;
+        let footer = serde_json::to_vec(&serde_json::json!({ "kid": kid }))?;
+        PublicToken::sign(&self.secret, &payload, Some(&footer), Some(T::IMPLICIT_ASSERTION))
+            .map_err(codec_err)
+    }
 }
 
 impl TokenMinter for PasetoV4SecretMinter {
@@ -302,6 +315,7 @@ impl TokenVerifier for HmacBlobCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheers_core::yah_scopes;
     use cheers_core::{DeviceBinding, DeviceId, UserId};
 
     fn sample_claims(exp: i64) -> Claims {
@@ -489,7 +503,7 @@ mod tests {
     // required fields differ).
 
     use cheers_core::{
-        Actor, AuthStrength, McpClaims, Owns, PrincipalId, Scope,
+        Actor, AuthStrength, McpClaims, Owns, PrincipalId,
     };
 
     const TEST_KID: &str = "codec-test-kid-1";
@@ -508,7 +522,7 @@ mod tests {
             1_000,
             exp,
             "jti-mcp-1",
-            vec![Scope::CloudDeploy, Scope::CloudRead],
+            vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ],
         )
         .with_act(Actor::new(PrincipalId::service("agent-claude")))
         .with_camp_id("camp-xyz")

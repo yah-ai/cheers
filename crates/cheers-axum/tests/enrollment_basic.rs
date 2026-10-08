@@ -8,6 +8,7 @@
 //! already holds from its own login, never a service-principal secret.
 
 use std::sync::Arc;
+use cheers_core::yah_scopes;
 
 use axum::Router;
 use axum::body::Body;
@@ -152,13 +153,13 @@ async fn missing_bearer_is_401_before_any_store_call() {
 async fn an_mcp_token_is_rejected_not_a_session_bearer() {
     // The whole point of this route is that it verifies the SESSION shape
     // (Claims via the HmacBlobCodec test edge), not an MCP token — even one
-    // that (hypothetically) carried ownership:write. A v4.public MCP-shaped
+    // that (hypothetically) carried audit:write. A v4.public MCP-shaped
     // PASETO from an entirely different minter/encoding must not
     // authenticate here; this is the same "shapes can't be confused"
     // property cheers_axum::mcp pins from the other direction.
     let (app, _authority, store) = rig();
     let now = now();
-    use cheers_core::{AuthStrength, McpClaims, Scope};
+    use cheers_core::{AuthStrength, McpClaims};
     use cheers_server::PasetoV4SecretMinter;
     let (mcp_minter, _verifier) = PasetoV4SecretMinter::generate().unwrap();
     let claims = McpClaims::new(
@@ -168,7 +169,7 @@ async fn an_mcp_token_is_rejected_not_a_session_bearer() {
         now,
         now + 60,
         "jti-mcp",
-        vec![Scope::OwnershipWrite],
+        vec![yah_scopes::AUDIT_WRITE],
     )
     .with_auth_strength(AuthStrength::Bootstrap);
     let token = mcp_minter.mint_mcp(&claims, "some-kid").unwrap();
@@ -270,7 +271,7 @@ async fn repairing_under_a_different_user_evicts_the_previous_owners_row_q6() {
         .await
         .unwrap();
     assert_eq!(live.len(), 1, "one live owner per node: {live:?}");
-    assert_eq!(live[0].principal_id, PrincipalId::user("bob"));
+    assert_eq!(live[0].subject.principal(), Some(&PrincipalId::user("bob")));
 }
 
 #[tokio::test]

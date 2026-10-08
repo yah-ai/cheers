@@ -17,6 +17,8 @@
 //! - [`refresh`] — refresh-token rotation with replay detection.
 //! - [`revocation`] — [`RevocationWriter`], the cold-path write side (the edge
 //!   holds `cheers_verify::RevocationReader`).
+//! - [`standing`] — the [`StandingBinder`] that mints standing node bindings
+//!   for LanPair sessions, and its per-device [`BindingSequenceStore`].
 //! - [`session`] — the [`SessionAuthority`] facade that assembles the above.
 //!
 //! This crate depends on `cheers-verify` (and through it `cheers-core`); the
@@ -27,12 +29,15 @@ pub mod bundles;
 pub mod camp;
 pub mod codec;
 pub mod grants;
+pub mod knock;
 pub mod mcp_authority;
 pub mod ownership;
 pub mod refresh;
 pub mod revocation;
 pub mod service_principal;
 pub mod session;
+pub mod snapshot;
+pub mod standing;
 pub mod store;
 pub mod user_tokens;
 
@@ -51,17 +56,32 @@ pub use camp::{
     ProvisionedCamp, UserSigningKey, UserSigningKeyStatus, UserSigningKeyStore,
 };
 pub use codec::{HmacBlobCodec, PasetoV4Codec, PasetoV4SecretMinter};
-pub use grants::{GrantStore, MemoryGrantStore};
+pub use grants::{GrantStore, SchemaGrantStore};
+pub use knock::{
+    Admission, Admitted, KnockAuthority, KnockConfig, KnockFlowError, KnockStore, MemoryKnockStore, PendingKnock, Queued,
+    Reconciled, Redeemed, StoredOffer,
+};
 pub use mcp_authority::{McpAuthority, McpMintError, McpPolicy, MintedMcpToken};
-pub use ownership::{NewOwnership, OwnershipRow, OwnershipStore, OwnershipValidationError};
-pub use refresh::{ChainId, RefreshRotator, RefreshToken, Rotated};
-pub use revocation::RevocationWriter;
+pub use ownership::{
+    new_revocation_key, next_ownership_version, Inserted, MemoryOwnershipStore, NewOwnership, OwnershipRow, OwnershipStore,
+    OwnershipTuples, OwnershipValidationError, SeedTuple, TupleLease, seed_ownership,
+};
+pub use refresh::{ChainId, LiveRefresh, RefreshRotator, RefreshToken, Rotated};
+pub use revocation::{
+    epoch_from_sql, next_epoch, revoked_columns, revoked_from_columns, MemoryRevocationStore, RevokedColumns,
+    RevocationPublisher, RevocationSnapshot, RevocationWriter, SignedRevocationSet,
+};
 pub use service_principal::{
     MemoryServicePrincipalStore, NewServicePrincipal, OverlapPolicy, ProvisionedKey,
     ServicePrincipalAuthority, ServicePrincipalError, ServicePrincipalStore, SigningKey,
     SigningKeyStatus,
 };
-pub use session::{NewSession, SessionAuthority, SessionPolicy};
+pub use session::{BindingResolver, NewSession, SessionAuthority, SessionPolicy};
+pub use snapshot::{revoke_ownership, revoke_principal_ownership, SignedSetSnapshot, SnapshotIssuer};
+pub use standing::{
+    next_binding_seq, BindingSequenceStore, MemoryBindingSequenceStore, SignedStandingBinding,
+    StandingBinder,
+};
 pub use user_tokens::{
     decode_scopes, encode_scopes, MemoryUserTokenStore, UserTokenRecord, UserTokenStore,
 };
@@ -71,4 +91,7 @@ pub use store::{
 
 // Re-exported for convenience so an origin consumer can assemble the verify-side
 // pieces (the public verifier + the EdgeVerifier facade) from one crate.
-pub use cheers_verify::{EdgeVerifier, PasetoV4PublicVerifier, RevocationReader};
+pub use cheers_verify::{
+    EdgeVerifier, IssuerTrust, PasetoV4PublicVerifier, ReplicatedRevocations, RevocationReader,
+    SnapshotVerifier, StandingVerifier,
+};

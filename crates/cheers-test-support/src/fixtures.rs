@@ -238,6 +238,8 @@ pub fn build_jwks_json() -> String {
             "kid": FIXTURE_KID,
             "use": "sig",
             "alg": "EdDSA",
+            "principal": FIXTURE_ISS,
+            "role": "issuer",
         }]
     });
     serde_json::to_string_pretty(&doc).expect("jwks doc serializes")

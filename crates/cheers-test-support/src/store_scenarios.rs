@@ -23,17 +23,18 @@
 //! its `sqlite.rs` / `pg.rs` call sites are unchanged.
 
 use cheers_core::{
-    Credential, DeviceBinding, DeviceId, Principal, PrincipalId, PrincipalStatus, Scope,
-    StoreError, UserId,
+    Credential, DeviceBinding, DeviceId, Principal, PrincipalId, PrincipalStatus, Revoked, Scope,
+    StoreError, Subject, UserId,
 };
 use cheers_server::audit::{AuditQuery, AuditRecord, AuditStore};
+use cheers_core::yah_scopes;
 use cheers_server::ownership::{NewOwnership, OwnershipStore};
 use cheers_server::store::{
     NewUser, PasskeyCredentialStore, ProviderKey, RefreshStore, RefreshTokenRecord, UserStore,
 };
 use cheers_server::{ServicePrincipalStore, SigningKey, SigningKeyStatus};
 use cheers_server::user_tokens::{UserTokenRecord, UserTokenStore};
-use cheers_server::RevocationWriter;
+use cheers_server::{BindingSequenceStore, RevocationWriter};
 use cheers_verify::RevocationReader;
 
 // ---------------------------------------------------------------------------
@@ -364,18 +365,123 @@ pub async fn passkey_store_round_trip<P: PasskeyCredentialStore + ?Sized>(
 // Revocation
 // ---------------------------------------------------------------------------
 
+/// One row per identity, one bound (R732-T7): a re-revoke keeps the larger
+/// bound and advances the epoch only when the bound rose; a device masks
+/// bindings below its `at_seq`, a membership snapshots below its `at_epoch`.
 pub async fn revocation_writer_and_reader<W>(revoke: &W)
 where
     W: RevocationWriter + RevocationReader + ?Sized,
 {
+    let alice = UserId::new("alice");
+    let empty = revoke.snapshot().await.unwrap();
+    assert!(empty.revoked.is_empty());
+    let epoch = || async { revoke.snapshot().await.unwrap().epoch };
+
+    // jti: exp far in the future so no store reads it as lapsed.
+    let far = 4_000_000_000_i64;
     assert!(!revoke.is_revoked("tok-x").await.unwrap());
-    revoke.revoke("tok-x").await.unwrap();
+    revoke.revoke(&Revoked::jti("tok-x", Some(far))).await.unwrap();
     assert!(revoke.is_revoked("tok-x").await.unwrap());
-    // Idempotent.
-    revoke.revoke("tok-x").await.unwrap();
-    assert!(revoke.is_revoked("tok-x").await.unwrap());
+    let e1 = epoch().await;
+    assert!(e1 > empty.epoch, "a revoke advances the epoch");
+    // An equal or lower bound is a no-op that leaves the epoch alone.
+    revoke.revoke(&Revoked::jti("tok-x", Some(far))).await.unwrap();
+    revoke.revoke(&Revoked::jti("tok-x", Some(far - 1))).await.unwrap();
+    assert_eq!(epoch().await, e1);
+    // A raise advances it; None (never lapses) is the top bound.
+    revoke.revoke(&Revoked::jti("tok-x", None)).await.unwrap();
+    let e2 = epoch().await;
+    assert!(e2 > e1);
+    revoke.revoke(&Revoked::jti("tok-x", Some(far + 1))).await.unwrap();
+    assert_eq!(epoch().await, e2);
     // Independence.
     assert!(!revoke.is_revoked("tok-y").await.unwrap());
+
+    // Devices: mask seq < at_seq only, so a re-enrolled binding is admitted.
+    let phone = DeviceId::new("phone");
+    assert!(!revoke.is_device_revoked(&phone, 0).await.unwrap());
+    revoke.revoke(&Revoked::device("phone", 100)).await.unwrap();
+    assert!(revoke.is_device_revoked(&phone, 99).await.unwrap());
+    assert!(!revoke.is_device_revoked(&phone, 100).await.unwrap());
+    assert!(!revoke.is_device_revoked(&phone, 101).await.unwrap());
+    assert!(!revoke.is_device_revoked(&DeviceId::new("laptop"), 0).await.unwrap());
+    let e3 = epoch().await;
+    assert!(e3 > e2);
+    revoke.revoke(&Revoked::device("phone", 50)).await.unwrap();
+    assert_eq!(epoch().await, e3, "a lower device bound is a no-op");
+    revoke.revoke(&Revoked::device("phone", 200)).await.unwrap();
+    let e4 = epoch().await;
+    assert!(e4 > e3, "a raised device bound advances the epoch");
+    assert!(revoke.is_device_revoked(&phone, 150).await.unwrap());
+
+    // Memberships: mask snapshot_epoch < at_epoch only.
+    let alice = PrincipalId::from(&alice);
+    revoke
+        .revoke(&Revoked::membership("namespace", "ns-1", alice.clone(), 7))
+        .await
+        .unwrap();
+    // Origin stores hold plaintext rows; the resource key is not consulted.
+    let k = cheers_verify::test_revocation_key("namespace", "ns-1");
+    assert!(revoke.is_membership_revoked(&k, "namespace", "ns-1", &alice, 6).await.unwrap());
+    assert!(!revoke.is_membership_revoked(&k, "namespace", "ns-1", &alice, 7).await.unwrap());
+    assert!(!revoke.is_membership_revoked(&k, "namespace", "ns-2", &alice, 0).await.unwrap());
+    assert!(!revoke.is_membership_revoked(&k, "room", "ns-1", &alice, 0).await.unwrap());
+    assert!(!revoke
+        .is_membership_revoked(&k, "namespace", "ns-1", &PrincipalId::user("bob"), 0)
+        .await
+        .unwrap());
+    // A Key principal (knock.md) is a membership subject like any user, and
+    // a user spelled with the key's id string is a different subject.
+    let key = PrincipalId::from_public_key(&[0x4b; 32]);
+    let e_key = epoch().await;
+    revoke.revoke(&Revoked::membership("namespace", "ns-1", key.clone(), 9)).await.unwrap();
+    assert!(epoch().await > e_key);
+    assert!(revoke.is_membership_revoked(&k, "namespace", "ns-1", &key, 8).await.unwrap());
+    assert!(!revoke.is_membership_revoked(&k, "namespace", "ns-1", &key, 9).await.unwrap());
+    assert!(!revoke
+        .is_membership_revoked(&k, "namespace", "ns-1", &PrincipalId::user(key.id.clone()), 0)
+        .await
+        .unwrap());
+    // Kinds don't bleed: a jti spelled like a device is not that device.
+    assert!(!revoke.is_device_revoked(&DeviceId::new("tok-x"), 0).await.unwrap());
+
+    let snap = revoke.snapshot().await.unwrap();
+    assert!(snap.epoch > e4);
+    let mut got = snap.revoked;
+    got.sort_by(|a, b| a.identity().cmp(&b.identity()));
+    assert_eq!(
+        got,
+        vec![
+            Revoked::jti("tok-x", None),
+            Revoked::device("phone", 200),
+            // Identity order: `key:..` sorts before `user:alice`.
+            Revoked::membership("namespace", "ns-1", key, 9),
+            Revoked::membership("namespace", "ns-1", alice, 7),
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BindingSequenceStore (R732-F5)
+// ---------------------------------------------------------------------------
+
+/// Every backend advances a device's sequence by
+/// [`next_binding_seq`](cheers_server::next_binding_seq): clock-floored on
+/// first use, `+1` when the clock has not moved past it, never backwards, and
+/// independently per device.
+pub async fn binding_sequence_store<S: BindingSequenceStore + ?Sized>(store: &S) {
+    let (a, b) = (DeviceId::new("node:a"), DeviceId::new("node:b"));
+    assert_eq!(store.next_binding_seq(&a, 1_000).await.unwrap(), 1_000);
+    assert_eq!(store.next_binding_seq(&a, 1_000).await.unwrap(), 1_001);
+    // The issuer clock went backwards: still above what was issued.
+    assert_eq!(store.next_binding_seq(&a, 10).await.unwrap(), 1_002);
+    // The clock moved well past it: the floor wins.
+    assert_eq!(store.next_binding_seq(&a, 5_000).await.unwrap(), 5_000);
+    // Another device starts from its own floor.
+    assert_eq!(store.next_binding_seq(&b, 10).await.unwrap(), 10);
+    // A pre-epoch clock still yields a positive first sequence.
+    assert_eq!(store.next_binding_seq(&DeviceId::new("node:c"), -5).await.unwrap(), 1);
+    assert_eq!(store.next_binding_seq(&a, 0).await.unwrap(), 5_001);
 }
 
 // ---------------------------------------------------------------------------
@@ -399,8 +505,8 @@ pub async fn ownership_store_lifecycle<O: OwnershipStore + ?Sized>(store: &O) {
         Some(alice.clone()),
     )
     .expect("validate new1");
-    let row1 = store.insert(&new1, 100).await.expect("insert 1");
-    assert_eq!(row1.principal_id, camp_a);
+    let row1 = store.insert(&new1, 100).await.expect("insert 1").row;
+    assert_eq!(row1.subject, Subject::Principal(camp_a.clone()));
     assert_eq!(row1.granted_by, yubaba);
     assert_eq!(row1.on_behalf_of, Some(alice.clone()));
     assert_eq!(row1.granted_at, 100);
@@ -422,7 +528,8 @@ pub async fn ownership_store_lifecycle<O: OwnershipStore + ?Sized>(store: &O) {
             101,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .row;
     let row3 = store
         .insert(
             &NewOwnership::new(
@@ -437,7 +544,8 @@ pub async fn ownership_store_lifecycle<O: OwnershipStore + ?Sized>(store: &O) {
             102,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .row;
 
     // get() roundtrip preserves every column.
     let back = store.get(&row1.id).await.unwrap().unwrap();
@@ -474,23 +582,459 @@ pub async fn ownership_store_lifecycle<O: OwnershipStore + ?Sized>(store: &O) {
         other => panic!("expected NotFound, got {other:?}"),
     }
 
-    // Cascading revoke for alice sweeps row1 (her last live row); bob's row3 untouched.
-    let swept = store.revoke_by_on_behalf_of(&alice, 300).await.unwrap();
-    assert_eq!(swept, 1, "exactly row1 should be swept");
-    let live_for_alice = store.list_for_principal(&camp_a).await.unwrap();
-    assert!(live_for_alice.is_empty());
-    let live_for_bob = store.list_for_principal(&camp_b).await.unwrap();
-    assert_eq!(live_for_bob.len(), 1);
+    // Holder cascade for camp-a sweeps row1 (its last live row); camp-b's row3
+    // untouched.
+    let before = store.current_version().await.unwrap();
+    let swept = store.revoke_by_principal(&camp_a, 300).await.unwrap();
+    assert!(swept > before, "the sweep advances the ownership version");
+    assert!(store.list_for_principal(&camp_a).await.unwrap().is_empty());
+    assert_eq!(store.list_for_principal(&camp_b).await.unwrap().len(), 1);
+    // The history still names every row camp-a held, each revoked when it was:
+    // row1 by the sweep, row2 by the earlier revoke_by_id.
+    let mut history = store.list_history_for_principal(&camp_a).await.unwrap();
+    history.sort_by_key(|r| r.granted_at);
+    let revoked: Vec<_> = history.iter().map(|r| (r.id.clone(), r.revoked_at)).collect();
+    assert_eq!(revoked, vec![(row1.id.clone(), Some(300)), (row2.id.clone(), Some(200))]);
 
-    // Cascading revoke is idempotent — second call returns 0.
-    let swept_again = store.revoke_by_on_behalf_of(&alice, 400).await.unwrap();
-    assert_eq!(swept_again, 0);
+    // Cascading revoke is idempotent — the second call sweeps nothing and
+    // reports the version unchanged.
+    let swept_again = store.revoke_by_principal(&camp_a, 400).await.unwrap();
+    assert_eq!(swept_again, swept);
+    assert_eq!(store.list_history_for_principal(&camp_a).await.unwrap().len(), 2);
+}
+
+/// D4: `granted_by` may be any kind, and lifecycle follows the holder — the
+/// row dies with its `principal_id`, never with its granter or its
+/// `on_behalf_of` user.
+pub async fn ownership_store_revoke_follows_holder<O: OwnershipStore + ?Sized>(store: &O) {
+    let operator = PrincipalId::user("operator");
+    let alice = PrincipalId::user("alice");
+    let bob = PrincipalId::user("bob");
+
+    // A user-granted row inserts and lists.
+    let granted = store
+        .insert(
+            &NewOwnership::new(
+                alice.clone(),
+                "project",
+                "p-1",
+                "admin",
+                operator.clone(),
+                Some(operator.clone()),
+            )
+            .unwrap(),
+            100,
+        )
+        .await
+        .expect("user-granted insert")
+        .row;
+    assert_eq!(granted.granted_by, operator);
+    let alice_rows = store.list_for_principal(&alice).await.unwrap();
+    assert_eq!(alice_rows.len(), 1);
+    assert_eq!(alice_rows[0], granted);
+
+    let bob_row = store
+        .insert(
+            &NewOwnership::new(
+                bob.clone(),
+                "project",
+                "p-1",
+                "reader",
+                operator.clone(),
+                Some(operator.clone()),
+            )
+            .unwrap(),
+            101,
+        )
+        .await
+        .unwrap()
+        .row;
+    // The operator also holds a row of their own.
+    store
+        .insert(
+            &NewOwnership::new(
+                operator.clone(),
+                "project",
+                "p-1",
+                "owner",
+                PrincipalId::service("cheers"),
+                None,
+            )
+            .unwrap(),
+            102,
+        )
+        .await
+        .unwrap()
+        .row;
+
+    // Deleting the operator sweeps only the row they HOLD. Rows they granted,
+    // and rows attributed to them via on_behalf_of, survive.
+    store.revoke_by_principal(&operator, 200).await.unwrap();
+    assert!(store.list_for_principal(&operator).await.unwrap().is_empty());
+    assert_eq!(store.list_for_principal(&alice).await.unwrap().len(), 1);
+    assert_eq!(store.list_for_principal(&bob).await.unwrap().len(), 1);
+
+    // Deleting a holder cascades that holder's rows and nobody else's.
+    store.revoke_by_principal(&alice, 300).await.unwrap();
+    assert_eq!(
+        store.get(&granted.id).await.unwrap().unwrap().revoked_at,
+        Some(300)
+    );
+    assert!(store.get(&bob_row.id).await.unwrap().unwrap().revoked_at.is_none());
+}
+
+/// R732-F1: a tuple's subject may be a set (`namespace/n1#member`). Set rows
+/// round-trip, list by the set's resource, show up per resource, and never
+/// leak into a principal's own rows or its holder cascade.
+pub async fn ownership_store_subject_sets<O: OwnershipStore + ?Sized>(store: &O) {
+    let operator = PrincipalId::user("operator");
+    let alice = PrincipalId::user("alice");
+    let members = Subject::set("namespace", "n1", "member");
+    let admins = Subject::set("namespace", "n1", "admin");
+
+    let set_row = store
+        .insert(
+            &NewOwnership::new(members.clone(), "room", "r1", "owner", operator.clone(), None)
+                .unwrap(),
+            100,
+        )
+        .await
+        .expect("set-subject insert")
+        .row;
+    assert_eq!(set_row.subject, members);
+    assert_eq!(store.get(&set_row.id).await.unwrap().unwrap(), set_row);
+
+    let admin_row = store
+        .insert(
+            &NewOwnership::new(admins.clone(), "room", "r2", "owner", operator.clone(), None)
+                .unwrap(),
+            101,
+        )
+        .await
+        .unwrap()
+        .row;
+    // Other resources' sets and principal rows on the same resource stay out.
+    store
+        .insert(
+            &NewOwnership::new(
+                Subject::set("namespace", "n2", "member"),
+                "room",
+                "r1",
+                "reader",
+                operator.clone(),
+                None,
+            )
+            .unwrap(),
+            102,
+        )
+        .await
+        .unwrap()
+        .row;
+    let alice_row = store
+        .insert(
+            &NewOwnership::new(alice.clone(), "room", "r1", "reader", operator.clone(), None)
+                .unwrap(),
+            103,
+        )
+        .await
+        .unwrap()
+        .row;
+
+    // Every relation's set on (namespace, n1), and nothing else.
+    let mut on_n1 = store.list_for_subject_set("namespace", "n1").await.unwrap();
+    on_n1.sort_by_key(|r| r.granted_at);
+    assert_eq!(on_n1, vec![set_row.clone(), admin_row.clone()]);
+    assert!(store.list_for_subject_set("namespace", "ghost").await.unwrap().is_empty());
+    assert!(
+        store.list_for_subject_set("user", "alice").await.unwrap().is_empty(),
+        "a principal subject is never a set"
+    );
+
+    // Per resource, both subject forms are listed.
+    let mut on_r1 = store.list_for_resource("room", "r1").await.unwrap();
+    on_r1.sort_by_key(|r| r.granted_at);
+    assert_eq!(on_r1.len(), 3);
+    assert_eq!(on_r1[0], set_row);
+    assert_eq!(on_r1[2], alice_row);
+
+    // A principal's own rows never include a set row.
+    assert_eq!(store.list_for_principal(&alice).await.unwrap(), vec![alice_row]);
+    assert!(store.list_for_principal(&operator).await.unwrap().is_empty());
+
+    // The holder cascade sweeps principal rows only; set rows survive it.
+    store.revoke_by_principal(&alice, 200).await.unwrap();
+    assert!(store.list_for_principal(&alice).await.unwrap().is_empty());
+    assert_eq!(store.list_for_subject_set("namespace", "n1").await.unwrap().len(), 2);
+
+    // A revoked set row drops out of the set listing.
+    store.revoke_by_id(&set_row.id, 300).await.unwrap();
+    assert_eq!(store.list_for_subject_set("namespace", "n1").await.unwrap(), vec![admin_row]);
+}
+
+/// R732-T9: `list_for_kind` returns every live row of one `resource_kind`
+/// across resources and subject forms, nothing of any other kind, nothing
+/// revoked, and nothing for a kind with no rows.
+pub async fn ownership_store_list_for_kind<O: OwnershipStore + ?Sized>(store: &O) {
+    let operator = PrincipalId::user("operator");
+    let alice = PrincipalId::user("alice");
+    let mut ins = Vec::new();
+    for (i, (subject, kind, id)) in [
+        (Subject::from(alice.clone()), "publish-scope", "s1"),
+        (Subject::set("namespace", "n1", "member"), "publish-scope", "s2"),
+        (Subject::from(alice.clone()), "namespace", "n1"),
+        (Subject::from(alice.clone()), "publish-scope", "s3"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = store
+            .insert(
+                &NewOwnership::new(subject, kind, id, "owns", operator.clone(), None).unwrap(),
+                100 + i as i64,
+            )
+            .await
+            .unwrap()
+            .row;
+        ins.push(row);
+    }
+    store.revoke_by_id(&ins[3].id, 200).await.unwrap();
+
+    let mut scopes = store.list_for_kind("publish-scope").await.unwrap();
+    scopes.sort_by_key(|r| r.granted_at);
+    assert_eq!(scopes, vec![ins[0].clone(), ins[1].clone()], "live rows of the kind only");
+    assert_eq!(store.list_for_kind("namespace").await.unwrap(), vec![ins[2].clone()]);
+    assert!(store.list_for_kind("ghost").await.unwrap().is_empty());
+}
+
+/// R732-F4: the store-wide ownership version. Every write that changes a row
+/// advances it to `max(v + 1, now)` and reports the version it produced; a
+/// no-op write and every read advance nothing. Run against a fresh store.
+/// R732-T10: a resource's membership-revocation key is created on first use
+/// and never changes afterwards; distinct resources get distinct keys.
+pub async fn ownership_store_revocation_key<O: OwnershipStore + ?Sized>(store: &O) {
+    let a = store.revocation_key("namespace", "rk-1").await.unwrap();
+    assert_eq!(store.revocation_key("namespace", "rk-1").await.unwrap(), a, "a key is immutable once created");
+    assert_ne!(store.revocation_key("namespace", "rk-2").await.unwrap(), a);
+    // Kind and id are both part of the resource.
+    assert_ne!(store.revocation_key("room", "rk-1").await.unwrap(), a);
+    // Keys do not move the ownership version: they are not tuples.
+    let v = store.current_version().await.unwrap();
+    store.revocation_key("namespace", "rk-3").await.unwrap();
+    assert_eq!(store.current_version().await.unwrap(), v);
+}
+
+/// R734-F3: an admission policy row round-trips per resource, its write and
+/// its delete each advance the ownership version, and a resource with no row
+/// reads `None` (closed).
+pub async fn ownership_store_admission_policy<O: OwnershipStore + ?Sized>(store: &O) {
+    use cheers_core::{AdmissionMode, AdmissionPolicy, Confirmation};
+    assert_eq!(store.admission_policy("namespace", "ap-1").await.unwrap(), None);
+    let v0 = store.current_version().await.unwrap();
+    let knock = AdmissionPolicy::new(AdmissionMode::Knock, "guest").with_min_confirmation("member", Confirmation::Scan);
+    let v1 = store.set_admission_policy("namespace", "ap-1", Some(&knock), 10).await.unwrap();
+    assert!(v1 > v0);
+    assert_eq!(store.current_version().await.unwrap(), v1);
+    assert_eq!(store.admission_policy("namespace", "ap-1").await.unwrap(), Some(knock.clone()));
+    // Kind and id are both part of the resource.
+    assert_eq!(store.admission_policy("room", "ap-1").await.unwrap(), None);
+    assert_eq!(store.admission_policy("namespace", "ap-2").await.unwrap(), None);
+    // Tightening overwrites in place and advances again.
+    let closed = AdmissionPolicy { mode: AdmissionMode::Closed, ..knock };
+    let v2 = store.set_admission_policy("namespace", "ap-1", Some(&closed), 10).await.unwrap();
+    assert!(v2 > v1);
+    assert_eq!(store.admission_policy("namespace", "ap-1").await.unwrap(), Some(closed));
+    let v3 = store.set_admission_policy("namespace", "ap-1", None, 10).await.unwrap();
+    assert!(v3 > v2);
+    assert_eq!(store.admission_policy("namespace", "ap-1").await.unwrap(), None);
+}
+
+/// R734-F4: a tuple's lease round-trips through insert, get and the list
+/// reads; a standing tuple reads `None`; `is_live_at` turns false at exp.
+pub async fn ownership_store_lease<O: OwnershipStore + ?Sized>(store: &O) {
+    use cheers_server::ownership::TupleLease;
+    let seed = PrincipalId::service("seed");
+    let key = PrincipalId::from_public_key(&[7; 32]);
+    let lease = TupleLease { iat: 100, lease: cheers_core::Lease::new(100, 200, Some(1_000)).unwrap() };
+    let leased = NewOwnership::new(key.clone(), "namespace", "ls-1", "guest", seed.clone(), None).unwrap().with_lease(Some(lease));
+    let row = store.insert(&leased, 150).await.unwrap().row;
+    assert_eq!(row.lease, Some(lease));
+    assert_eq!(store.get(&row.id).await.unwrap().unwrap().lease, Some(lease));
+    let listed = store.list_for_resource("namespace", "ls-1").await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].lease, Some(lease));
+    assert!(listed[0].is_live_at(999));
+    assert!(!listed[0].is_live_at(1_000));
+    let standing = NewOwnership::new(PrincipalId::user("ls-u"), "namespace", "ls-1", "member", seed, None).unwrap();
+    let row = store.insert(&standing, 150).await.unwrap().row;
+    assert_eq!(store.get(&row.id).await.unwrap().unwrap().lease, None);
+}
+
+/// R734-F4: pending knocks (replace per requester, the cap, lapse), offers
+/// (distinct-key max_uses, idempotent redeem, expiry) and admissions (first
+/// outcome stands).
+pub async fn knock_store_lifecycle<K: cheers_server::KnockStore + ?Sized>(store: &K) {
+    use cheers_server::{Admission, PendingKnock, Queued, Redeemed, StoredOffer};
+    let k = |id: &str, who: u8, created_at: i64| PendingKnock {
+        id: id.into(),
+        resource_kind: "namespace".into(),
+        resource_id: "kn-1".into(),
+        requester: PrincipalId::from_public_key(&[who; 32]),
+        relation: "guest".into(),
+        label: format!("phone {who}"),
+        requester_user: (who == 1).then(|| cheers_core::UserId::new("kn-user")),
+        renews: (who == 2).then(|| "admit-0".to_owned()),
+        token: format!("token-{id}"),
+        created_at,
+        expires_at: created_at + 100,
+    };
+    assert_eq!(store.queue_knock(&k("a", 1, 10), 2, 10).await.unwrap(), Queued::Queued);
+    assert_eq!(store.queue_knock(&k("b", 2, 11), 2, 11).await.unwrap(), Queued::Queued);
+    // The cap counts others: a third key is refused, the first key replaces itself.
+    assert_eq!(store.queue_knock(&k("c", 3, 12), 2, 12).await.unwrap(), Queued::Full);
+    assert_eq!(store.queue_knock(&k("a2", 1, 13), 2, 13).await.unwrap(), Queued::Replaced);
+    let pending = store.pending_knocks("namespace", "kn-1", 13).await.unwrap();
+    assert_eq!(pending.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["b", "a2"]);
+    assert_eq!(pending[1], k("a2", 1, 13));
+    assert_eq!(pending[0].renews.as_deref(), Some("admit-0"));
+    assert_eq!(store.pending_knock("a", 13).await.unwrap(), None);
+    assert_eq!(store.pending_knock("b", 13).await.unwrap(), Some(k("b", 2, 11)));
+    // Lapsed knocks neither list nor count against the cap.
+    assert_eq!(store.pending_knock("b", 111).await.unwrap(), None);
+    assert_eq!(store.queue_knock(&k("c", 3, 112), 2, 112).await.unwrap(), Queued::Queued);
+    store.drop_knock("a2").await.unwrap();
+    store.drop_knock("a2").await.unwrap();
+    assert_eq!(store.pending_knocks("namespace", "kn-1", 112).await.unwrap().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["c"]);
+
+    let offer = StoredOffer {
+        jti: "of-1".into(),
+        resource_kind: "namespace".into(),
+        resource_id: "kn-1".into(),
+        relation: "guest".into(),
+        created_by: PrincipalId::user("kn-owner"),
+        max_uses: 2,
+        created_at: 10,
+        exp: 100,
+    };
+    store.put_offer(&offer).await.unwrap();
+    let key = |b: u8| PrincipalId::from_public_key(&[b; 32]);
+    assert_eq!(store.redeem_offer("nope", &key(1), 20).await.unwrap(), Redeemed::Unknown);
+    assert_eq!(store.redeem_offer("of-1", &key(1), 20).await.unwrap(), Redeemed::Fresh(offer.clone()));
+    assert_eq!(store.redeem_offer("of-1", &key(1), 21).await.unwrap(), Redeemed::Again(offer.clone()));
+    assert_eq!(store.redeem_offer("of-1", &key(2), 22).await.unwrap(), Redeemed::Fresh(offer.clone()));
+    assert_eq!(store.redeem_offer("of-1", &key(3), 23).await.unwrap(), Redeemed::Exhausted);
+    let late = StoredOffer { jti: "of-2".into(), ..offer.clone() };
+    store.put_offer(&late).await.unwrap();
+    assert_eq!(store.redeem_offer("of-2", &key(1), 100).await.unwrap(), Redeemed::Expired);
+
+    assert_eq!(store.admission("j-1").await.unwrap(), None);
+    let ok = Admission::Accepted { ownership_id: "own-1".into() };
+    assert_eq!(store.record_admission("j-1", &ok, 5).await.unwrap(), ok);
+    let no = Admission::Refused { refusal: "late".into() };
+    assert_eq!(store.record_admission("j-1", &no, 6).await.unwrap(), ok, "the first outcome stands");
+    assert_eq!(store.record_admission("j-2", &no, 6).await.unwrap(), no);
+    assert_eq!(store.admission("j-2").await.unwrap(), Some(no));
+}
+
+pub async fn ownership_store_version<O: OwnershipStore + ?Sized>(store: &O) {
+    let seed = PrincipalId::service("seed");
+    let tuple = |who: Subject, rel: &str| NewOwnership::new(who, "namespace", "n1", rel, seed.clone(), None).unwrap();
+    let alice = PrincipalId::user("alice");
+    let carol = PrincipalId::user("carol");
+    assert_eq!(store.current_version().await.unwrap(), 0, "a fresh store is at 0");
+
+    // The clock floor: the first write lands on now; the same second is +1.
+    let a = store.insert(&tuple(alice.clone().into(), "member"), 1_000).await.unwrap();
+    assert_eq!(a.version, 1_000);
+    let b = store.insert(&tuple(PrincipalId::user("bob").into(), "member"), 1_000).await.unwrap();
+    assert_eq!(b.version, 1_001);
+    assert_eq!(store.current_version().await.unwrap(), 1_001);
+
+    // A clock behind the version still advances strictly.
+    assert_eq!(store.revoke_by_id(&a.row.id, 900).await.unwrap(), 1_002);
+    // Already revoked: a no-op that reports the current version, moves nothing,
+    // and keeps the original revoked_at.
+    assert_eq!(store.revoke_by_id(&a.row.id, 5_000).await.unwrap(), 1_002);
+    assert_eq!(store.get(&a.row.id).await.unwrap().unwrap().revoked_at, Some(900));
+    assert!(matches!(store.revoke_by_id("ghost-id", 5_000).await, Err(StoreError::NotFound)));
+    assert_eq!(store.current_version().await.unwrap(), 1_002);
+
+    // Reads advance nothing.
+    store.list_for_resource("namespace", "n1").await.unwrap();
+    store.list_for_principal(&alice).await.unwrap();
+    store.list_for_subject_set("namespace", "parent").await.unwrap();
+    store.list_for_kind("namespace").await.unwrap();
+    assert_eq!(store.current_version().await.unwrap(), 1_002);
+
+    // A subject-set tuple is a row like any other.
+    let set = store.insert(&tuple(Subject::set("namespace", "parent", "member"), "guest"), 2_000).await.unwrap();
+    assert_eq!(set.version, 2_000);
+
+    // The holder cascade advances once when it sweeps, never when it sweeps nothing.
+    store.insert(&tuple(carol.clone().into(), "admin"), 2_000).await.unwrap();
+    store.insert(&tuple(carol.clone().into(), "member"), 2_000).await.unwrap();
+    assert_eq!(store.current_version().await.unwrap(), 2_002);
+    assert_eq!(store.revoke_by_principal(&carol, 2_000).await.unwrap(), 2_003);
+    assert_eq!(store.current_version().await.unwrap(), 2_003);
+    assert_eq!(store.list_history_for_principal(&carol).await.unwrap().len(), 2, "both, now revoked");
+    assert!(store.list_for_principal(&carol).await.unwrap().is_empty());
+    assert_eq!(store.revoke_by_principal(&carol, 9_000).await.unwrap(), 2_003, "nothing live: current version");
+    assert_eq!(store.current_version().await.unwrap(), 2_003);
+
+    // Equal versions read equal rows: the live rows now are exactly bob's
+    // member tuple and the set tuple.
+    let mut live: Vec<_> = store.list_for_resource("namespace", "n1").await.unwrap();
+    live.sort_by(|x, y| x.relationship.cmp(&y.relationship));
+    assert_eq!(live, vec![set.row, b.row]);
+}
+
+/// The schema's one-form subject CHECK, exercised under the trait with raw
+/// SQL. `exec` runs one statement on the backend under test and maps any
+/// failure to `StoreError::Backend`. Literal values only, so one statement
+/// text serves every dialect.
+pub async fn ownership_subject_check_rejects_bad_forms<F, Fut>(exec: F)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), StoreError>>,
+{
+    let insert = |id: &str, cols: &str, vals: &str| {
+        format!(
+            "INSERT INTO ownership \
+             (id, {cols}, resource_kind, resource_id, relationship, granted_by, granted_at) \
+             VALUES ('{id}', {vals}, 'doc', 'd1', 'reader', 'svc:cheers', 1000)"
+        )
+    };
+    exec(insert("ok-principal", "principal_id", "'user:alice'"))
+        .await
+        .expect("a principal subject is accepted");
+    exec(insert(
+        "ok-set",
+        "subject_kind, subject_id, subject_relation",
+        "'namespace', 'n1', 'member'",
+    ))
+    .await
+    .expect("a complete set subject is accepted");
+
+    for (id, cols, vals) in [
+        (
+            "both",
+            "principal_id, subject_kind, subject_id, subject_relation",
+            "'user:alice', 'namespace', 'n1', 'member'",
+        ),
+        ("neither", "principal_id", "NULL"),
+        ("partial-set", "subject_kind, subject_id", "'namespace', 'n1'"),
+        ("principal-plus-kind", "principal_id, subject_kind", "'user:alice', 'namespace'"),
+    ] {
+        match exec(insert(id, cols, vals)).await {
+            Err(StoreError::Backend(_)) => {}
+            other => panic!("subject form {id:?} must fail the CHECK, got {other:?}"),
+        }
+    }
 }
 
 pub async fn ownership_store_check_constraints_reject_bad_rows<O: OwnershipStore + ?Sized>(
     store: &O,
 ) {
-    // The Rust-side NewOwnership::new validator already blocks these. To
+    // The Rust-side NewOwnership::new validator already blocks this. To
     // exercise the SQL-level CHECK we'd need to bypass NewOwnership::new and
     // emit raw SQL — out of the trait's reach. Cover the Rust-side belt here
     // and trust the schema CHECK as the suspenders documented in the doc.
@@ -500,20 +1044,6 @@ pub async fn ownership_store_check_constraints_reject_bad_rows<O: OwnershipStore
 
     let yubaba = PrincipalId::service("yubaba");
     let alice = PrincipalId::user("alice");
-
-    let err = NewOwnership::new(
-        PrincipalId::camp("c"),
-        "service",
-        "s",
-        "owns",
-        alice.clone(),
-        Some(alice.clone()),
-    )
-    .unwrap_err();
-    assert_eq!(
-        err,
-        OwnershipValidationError::GrantedByNotService(PrincipalKind::User)
-    );
 
     let err = NewOwnership::new(
         PrincipalId::camp("c"),
@@ -544,7 +1074,8 @@ pub async fn ownership_store_check_constraints_reject_bad_rows<O: OwnershipStore
             500,
         )
         .await
-        .expect("well-formed insert succeeds");
+        .expect("well-formed insert succeeds")
+        .row;
     assert!(!row.id.is_empty());
 }
 
@@ -711,7 +1242,6 @@ pub async fn service_principal_check_constraint_rejects_bad_status_directly<F>(
 // ---------------------------------------------------------------------------
 
 fn fixture_audit(at: i64, sub: PrincipalId, method: &str, request_id: &str) -> AuditRecord {
-    use cheers_core::Scope;
     AuditRecord::new(
         at,
         sub,
@@ -719,7 +1249,7 @@ fn fixture_audit(at: i64, sub: PrincipalId, method: &str, request_id: &str) -> A
         Some("camp-a".into()),
         "https://kamaji.example",
         method,
-        vec![Scope::CloudDeploy, Scope::CloudRead],
+        vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ],
         "allow",
         request_id,
     )
@@ -748,7 +1278,7 @@ pub async fn audit_store_batch_insert_round_trip<A: AuditStore + ?Sized>(store: 
         assert_eq!(row.ingested_at, 1_800_000_000);
         assert_eq!(row.record.request_id, format!("rid-{i}"));
         assert_eq!(row.record.sub, alice);
-        assert_eq!(row.record.scope, vec![Scope::CloudDeploy, Scope::CloudRead]);
+        assert_eq!(row.record.scope, vec![yah_scopes::CLOUD_DEPLOY, yah_scopes::CLOUD_READ]);
         assert_eq!(row.record.camp_id.as_deref(), Some("camp-a"));
     }
 
@@ -785,7 +1315,7 @@ pub async fn audit_store_batch_insert_round_trip<A: AuditStore + ?Sized>(store: 
 /// filters, the keyset cursor, and the `sub`-scoping that keeps one user's
 /// audit out of another's page.
 pub async fn audit_store_query_by_on_behalf_of<A: AuditStore + ?Sized>(store: &A) {
-    use cheers_core::{Actor, Scope};
+    use cheers_core::Actor;
 
     let alice = PrincipalId::user("alice");
     let bob = PrincipalId::user("bob");
@@ -824,7 +1354,7 @@ pub async fn audit_store_query_by_on_behalf_of<A: AuditStore + ?Sized>(store: &A
             Some("camp-a".into()),
             "https://kamaji.example",
             "cloud.deploy.finish",
-            vec![Scope::CloudDeploy],
+            vec![yah_scopes::CLOUD_DEPLOY],
             "allow",
             "alice-agent-deploy",
         )
@@ -855,7 +1385,7 @@ pub async fn audit_store_query_by_on_behalf_of<A: AuditStore + ?Sized>(store: &A
         .find(|r| r.record.request_id == "alice-agent-deploy")
         .expect("agent-mediated row present");
     assert_eq!(agent_row.record.act.as_ref().map(|a| &a.sub), Some(&agent));
-    assert_eq!(agent_row.record.scope, vec![Scope::CloudDeploy]);
+    assert_eq!(agent_row.record.scope, vec![yah_scopes::CLOUD_DEPLOY]);
     assert_eq!(agent_row.record.camp_id.as_deref(), Some("camp-a"));
 
     // since= is an inclusive lower bound on record.at.
@@ -964,7 +1494,7 @@ pub async fn user_token_store_insert_and_scoped_list<T: UserTokenStore + ?Sized>
     user: &UserId,
     other: &UserId,
 ) {
-    let scopes = vec![Scope::CloudRead, Scope::CloudDeploy, Scope::BoardWrite];
+    let scopes = vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY, yah_scopes::BOARD_WRITE];
     tokens
         .insert(&fixture_user_token(
             "j-mine-1",
@@ -981,7 +1511,7 @@ pub async fn user_token_store_insert_and_scoped_list<T: UserTokenStore + ?Sized>
             "j-mine-2",
             user,
             "laptop",
-            vec![Scope::CloudRead],
+            vec![yah_scopes::CLOUD_READ],
             1_100,
             9_000,
         ))
@@ -992,7 +1522,7 @@ pub async fn user_token_store_insert_and_scoped_list<T: UserTokenStore + ?Sized>
             "j-theirs",
             other,
             "not-yours",
-            vec![Scope::CampAdmin],
+            vec![yah_scopes::CAMP_ADMIN],
             1_050,
             9_000,
         ))
@@ -1049,7 +1579,7 @@ where
             "live",
             user,
             "live",
-            vec![Scope::CloudRead],
+            vec![yah_scopes::CLOUD_READ],
             1_000,
             9_000,
         ))
@@ -1060,7 +1590,7 @@ where
             "expired",
             user,
             "expired",
-            vec![Scope::CloudRead],
+            vec![yah_scopes::CLOUD_READ],
             1_000,
             1_500,
         ))
@@ -1071,7 +1601,7 @@ where
             "revoked",
             user,
             "revoked",
-            vec![Scope::CloudRead],
+            vec![yah_scopes::CLOUD_READ],
             1_000,
             9_000,
         ))
@@ -1112,7 +1642,7 @@ where
             "j1",
             user,
             "ci",
-            vec![Scope::CloudRead],
+            vec![yah_scopes::CLOUD_READ],
             1_000,
             9_000,
         ))

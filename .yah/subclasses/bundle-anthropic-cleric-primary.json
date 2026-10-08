@@ -7,17 +7,5 @@
   "auth": "subscription",
   "model": "claude-sonnet-4-6",
   "thinkingBudget": "medium",
-  "fallbacks": [
-    {
-      "when": {
-        "metric": {
-          "kind": "session_usage_pct"
-        },
-        "op": "gt",
-        "threshold": 50.0
-      },
-      "useSubclass": "bundle-anthropic-cleric-golden-cloak"
-    }
-  ],
   "source": "preroll"
 }

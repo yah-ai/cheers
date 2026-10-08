@@ -505,6 +505,7 @@ impl AuditStore for MemoryAuditStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheers_core::yah_scopes;
     use cheers_core::PrincipalId;
     use pollster::block_on;
 
@@ -516,7 +517,7 @@ mod tests {
             Some("camp-a".into()),
             "https://kamaji.example",
             method,
-            vec![Scope::CloudDeploy],
+            vec![yah_scopes::CLOUD_DEPLOY],
             "allow",
             request_id,
         )
@@ -529,7 +530,7 @@ mod tests {
         assert_eq!(r.sub, PrincipalId::user("alice"));
         assert_eq!(r.method, "POST /cloud/deploy");
         assert_eq!(r.result, "allow");
-        assert_eq!(r.scope, vec![Scope::CloudDeploy]);
+        assert_eq!(r.scope, vec![yah_scopes::CLOUD_DEPLOY]);
     }
 
     #[test]
@@ -642,7 +643,7 @@ mod tests {
             None,
             "https://kamaji.example",
             method,
-            vec![Scope::CloudDeploy],
+            vec![yah_scopes::CLOUD_DEPLOY],
             "allow",
             request_id,
         )

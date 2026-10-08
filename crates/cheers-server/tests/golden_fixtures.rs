@@ -11,7 +11,8 @@
 //! now it asserts the opposite — byte-for-byte interop with the golden
 //! fixtures pinned in `cheers_test_support::fixtures`.
 
-use cheers_core::{Actor, AuthStrength, CodecError, McpClaims, Owns, PrincipalId, Scope};
+use cheers_core::{Actor, AuthStrength, CodecError, McpClaims, Owns, PrincipalId};
+use cheers_core::yah_scopes;
 use cheers_server::PasetoV4SecretMinter;
 use cheers_test_support::fixtures;
 use cheers_verify::PasetoV4PublicVerifier;
@@ -30,7 +31,7 @@ fn golden_user_mcp_claims() -> McpClaims {
         1_700_000_000,
         1_700_000_900,
         "fixture-user-1",
-        vec![Scope::CloudRead, Scope::CloudDeploy],
+        vec![yah_scopes::CLOUD_READ, yah_scopes::CLOUD_DEPLOY],
     )
     .with_act(Actor::new(PrincipalId::service("agent-claude-fixture")))
     .with_camp_id("camp-fixture-1")
