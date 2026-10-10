@@ -14,8 +14,8 @@ name = "cheers_vend"
 path = "src/lib.rs"
 
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.43" }
-cheers-verify = { path = "../cheers-verify", version = "0.8.43" }
+cheers-core = { path = "../cheers-core", version = "0.8.45" }
+cheers-verify = { path = "../cheers-verify", version = "0.8.45" }
 # Same pin as cheers-turso: the listener runs over the SERVICE'S OWN
 # `turso::Database` (W195 one-writer rule) — it never opens the file itself.
 turso = { workspace = true }
@@ -30,7 +30,7 @@ tracing = "0.1"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net", "time"] }
 tempfile = "3"
-cheers-server = { path = "../cheers-server", version = "0.8.43" }
+cheers-server = { path = "../cheers-server", version = "0.8.45" }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # The client the workbench actually runs (yah data-source's libsql adapter, same
 # features). tests/libsql_client.rs drives the listener with it, because the
