@@ -16,7 +16,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use cheers::email::magic_link::{
-    MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryUsedJtiStore,
+    MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryMagicLinkCodeStore,
+    MemoryUsedJtiStore, s256,
 };
 use cheers::email::{CapturingMailer, MagicLinkEmail};
 use cheers_axum::magic_link::{MagicLinkAuthState, router};
@@ -32,10 +33,15 @@ type RouterState = MagicLinkAuthState<
     common::MemUserStore,
     common::MemRevocations,
     MemoryUsedJtiStore,
+    MemoryMagicLinkCodeStore,
     CapturingMailer,
 >;
 
 const VERIFY_BASE: &str = "/auth/magic-link/verify";
+const REDEEM: &str = "/auth/magic-link/redeem";
+const APP_BASE: &str = "https://link.app.example/sign-in";
+/// RFC 7636 Appendix B's verifier.
+const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
 /// Wall-clock seconds, matching the `now_unix()` the route handlers use.
 fn now() -> i64 {
@@ -54,7 +60,15 @@ fn build_app() -> (
 ) {
     let codec = MagicLinkCodec::new(&[7u8; 32], 900).unwrap();
     let urls = MagicLinkUrlBuilder::new(format!("https://app.example{VERIFY_BASE}"));
-    let provider = Arc::new(MagicLinkProvider::new(codec, urls, MemoryUsedJtiStore::new()));
+    let provider = Arc::new(
+        MagicLinkProvider::new(
+            codec,
+            urls,
+            MemoryUsedJtiStore::new(),
+            MemoryMagicLinkCodeStore::new(),
+        )
+        .with_app_urls(MagicLinkUrlBuilder::new(APP_BASE).in_fragment()),
+    );
     let mailer = Arc::new(CapturingMailer::new());
     let authority = Arc::new(test_authority());
     let template = MagicLinkEmail::new("Acme", "Acme <noreply@acme.example>");
@@ -272,4 +286,157 @@ async fn verify_returns_same_user_on_repeated_logins() {
     assert!(recorded
         .iter()
         .all(|r| r.binding == DeviceBinding::EmailMagicLink));
+}
+
+// -- POST /magic-link/redeem (CHE-R961, W275 §5) ------------------------------
+
+/// The first whitespace-delimited word in `text` starting with `prefix`.
+fn word_with<'a>(text: &'a str, prefix: &str) -> &'a str {
+    let at = text.find(prefix).unwrap_or_else(|| panic!("{prefix} missing in {text}"));
+    text[at..].split_whitespace().next().unwrap()
+}
+
+/// The 6-digit line of the last captured email, if it has one.
+fn code_in(text: &str) -> Option<String> {
+    text.lines()
+        .find(|l| l.len() == 6 && l.bytes().all(|b| b.is_ascii_digit()))
+        .map(str::to_owned)
+}
+
+struct Mailed {
+    browser_token: String,
+    app_token: Option<String>,
+    code: Option<String>,
+}
+
+async fn request_grant(app: &Router, state: &RouterState, body: Value) -> Mailed {
+    let (status, ack) = json_post(app, "/auth/magic-link/request", body).await;
+    assert_eq!(status, StatusCode::OK, "got {ack}");
+    let text = state.mailer.last().unwrap().text;
+    let browser = word_with(&text, "https://app.example/auth/magic-link/verify?token=");
+    let code = code_in(&text);
+    // The app link is `#token=<T_app>&code=<C>` (W275 §3): both in the
+    // fragment, and the code is the same one the code line shows.
+    let app_token = text
+        .contains(APP_BASE)
+        .then(|| word_with(&text, &format!("{APP_BASE}#token=")))
+        .map(|u| {
+            let (token, link_code) = u.split_once("#token=").unwrap().1.split_once("&code=").unwrap();
+            assert_eq!(Some(link_code), code.as_deref(), "app link carries the mailed code");
+            token.to_owned()
+        });
+    Mailed {
+        browser_token: extract_token(browser),
+        app_token,
+        code,
+    }
+}
+
+#[tokio::test]
+async fn redeem_unbound_token_with_post_body() {
+    let (app, state, _authority, _sessions) = build_app();
+    let m = request_grant(&app, &state, json!({ "email": "carol@example.com" })).await;
+    assert!(m.app_token.is_none(), "unbound mail carries the browser action only");
+    assert!(m.code.is_none());
+
+    let (status, body) = json_post(&app, REDEEM, json!({ "token": m.browser_token })).await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(body["token_type"], "Bearer");
+
+    let (status, body) = json_post(&app, REDEEM, json!({ "token": m.browser_token })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "already_used");
+}
+
+#[tokio::test]
+async fn redeem_bound_grant_bound_elsewhere_then_code_burns_both_links() {
+    let (app, state, _authority, _sessions) = build_app();
+    let m = request_grant(
+        &app,
+        &state,
+        json!({ "email": "dave@example.com", "challenge": s256(VERIFIER) }),
+    )
+    .await;
+    let app_token = m.app_token.expect("bound mail carries the app action");
+    let code = m.code.expect("bound mail carries the code");
+    assert_ne!(app_token, m.browser_token);
+
+    // Another device's verifier: the one uncollapsed refusal, nothing burned.
+    let (status, body) = json_post(
+        &app,
+        REDEEM,
+        json!({ "token": app_token, "verifier": "another-devices-verifier" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "bound_elsewhere");
+
+    // No verifier at all: collapsed.
+    let (_, body) = json_post(&app, REDEEM, json!({ "token": app_token })).await;
+    assert_eq!(body["error"], "magic_link_token");
+
+    // A wrong code: collapsed, and the right one still works afterwards.
+    let wrong = if code == "000000" { "000001" } else { "000000" };
+    let (_, body) = json_post(&app, REDEEM, json!({ "code": wrong, "verifier": VERIFIER })).await;
+    assert_eq!(body["error"], "magic_link_token");
+
+    let (status, body) = json_post(&app, REDEEM, json!({ "code": code, "verifier": VERIFIER })).await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+
+    // The code redemption burned both links.
+    let (_, body) = json_post(
+        &app,
+        REDEEM,
+        json!({ "token": app_token, "verifier": VERIFIER }),
+    )
+    .await;
+    assert_eq!(body["error"], "already_used");
+    let (_, body) = json_post(&app, REDEEM, json!({ "token": m.browser_token })).await;
+    assert_eq!(body["error"], "already_used");
+    let (_, body) = json_post(&app, REDEEM, json!({ "code": code, "verifier": VERIFIER })).await;
+    assert_eq!(body["error"], "magic_link_token");
+}
+
+#[tokio::test]
+async fn redeem_bound_app_token_with_matching_verifier() {
+    let (app, state, _authority, _sessions) = build_app();
+    let m = request_grant(
+        &app,
+        &state,
+        json!({ "email": "erin@example.com", "challenge": s256(VERIFIER) }),
+    )
+    .await;
+    let (status, body) = json_post(
+        &app,
+        REDEEM,
+        json!({ "token": m.app_token.unwrap(), "verifier": VERIFIER }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+}
+
+#[tokio::test]
+async fn request_rejects_malformed_challenge() {
+    let (app, _state, _authority, _sessions) = build_app();
+    let (status, body) = json_post(
+        &app,
+        "/auth/magic-link/request",
+        json!({ "email": "a@b.co", "challenge": "plain-not-s256" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_challenge");
+}
+
+#[tokio::test]
+async fn redeem_rejects_a_body_naming_both_token_and_code() {
+    let (app, _state, _authority, _sessions) = build_app();
+    let (status, body) = json_post(
+        &app,
+        REDEEM,
+        json!({ "token": "t", "code": "123456", "verifier": VERIFIER }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "magic_link_token");
 }

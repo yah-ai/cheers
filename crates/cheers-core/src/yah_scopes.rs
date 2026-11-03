@@ -27,6 +27,12 @@ crate::scopes! {
     SUBAGENT_CONTROL = "subagent:control" { description: "Control running subagents" };
     SQL_READ = "sql:read" { description: "Read a database yah vends (the camp-token default)" };
     SQL_WRITE = "sql:write" { description: "Write a database yah vends (minted only when policy and action both allow it)" };
+    GIT_READ = "git:read" { description: "Fetch from the fleet git remote (fleet-git/<repo>)" };
+    GIT_WRITE = "git:write" { description: "Push to the fleet git remote (fleet-git/<repo>)" };
+    GIT_WRITE_QED = "git:write-qed" { description: "Push refs/qed/** on the fleet git remote (R978-F4)" };
+    GIT_WRITE_RELAYS = "git:write-relays" { description: "Push refs/relays/** on the fleet git remote (R978-F4)" };
+    GIT_WRITE_HEADS = "git:write-heads" { description: "Push refs/heads/* and refs/tags/* on the fleet git remote (the lander, R978-F4)" };
+    GIT_WRITE_CAMP_HOST = "git:write-camp-host" { description: "Push refs/camp-host/<camp_id>/** on the fleet git remote: a planned host move's park (R975-F22); fleet-git requires a git_ref claim naming the camp" };
     AUDIT_READ = "audit:read" { description: "Read the audit log" };
     AUDIT_WRITE = "audit:write" {
         description: "Ingest audit events (service principals only)",
@@ -36,7 +42,7 @@ crate::scopes! {
 
 /// Every namespace [`DEFS`] declares; each must be bound at startup.
 pub const NAMESPACES: &[&str] = &[
-    "arch", "board", "camp", "cloud", "party", "subagent", "sql", "audit",
+    "arch", "board", "camp", "cloud", "party", "subagent", "sql", "git", "audit",
 ];
 
 /// A builder holding [`DEFS`]; bind each of [`NAMESPACES`] from deployment
@@ -70,7 +76,8 @@ mod tests {
                 "arch:read", "arch:write", "board:read", "board:write", "camp:read",
                 "camp:admin", "cloud:read", "cloud:deploy", "cloud:destroy", "cloud:admin",
                 "party:read", "party:write", "subagent:spawn", "subagent:control",
-                "sql:read", "sql:write", "audit:read", "audit:write",
+                "sql:read", "sql:write", "git:read", "git:write", "git:write-qed", "git:write-relays",
+                "git:write-heads", "git:write-camp-host", "audit:read", "audit:write",
             ]
         );
     }
@@ -81,7 +88,7 @@ mod tests {
             DEFS.iter().filter(|d| d.service_only).map(|d| d.scope.as_wire()).collect();
         assert_eq!(so, ["audit:write"]);
         assert!(DEFS.iter().all(|d| d.audiences == crate::Audiences::BoundAtStartup));
-        assert_eq!(registry_at(["https://a"]).unwrap().len(), 18);
+        assert_eq!(registry_at(["https://a"]).unwrap().len(), 24);
     }
 
     #[test]
@@ -108,6 +115,7 @@ mod tests {
             .bind_audiences("party", ["k".to_owned()])
             .bind_audiences("subagent", ["k".to_owned()])
             .bind_audiences("sql",["k".to_owned()])
+            .bind_audiences("git", ["k".to_owned()])
             .bind_audiences("audit", ["yubaba:control-plane".to_owned()])
             .build()
             .unwrap();

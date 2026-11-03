@@ -4,6 +4,7 @@
 //! server-side-state requirement, and the `UserId` ↔ `Uuid` handle contract.
 
 use cheers_core::{Credential, DeviceBinding, DeviceId, UserId};
+use webauthn_rs_proto::ResidentKeyRequirement;
 
 use super::{
     CreationChallengeResponse, Passkey, PasskeyError, PasskeyRegistration, PasskeyRelyingParty,
@@ -60,14 +61,26 @@ impl PasskeyRelyingParty {
         } else {
             Some(exclude.iter().map(|p| p.cred_id().clone()).collect())
         };
-        self.webauthn
+        let (mut challenge, state) = self
+            .webauthn
             .start_passkey_registration(
                 user_handle,
                 user_name,
                 user_display_name,
                 exclude_credentials,
             )
-            .map_err(PasskeyError::Ceremony)
+            .map_err(PasskeyError::Ceremony)?;
+        // R962: ask for a discoverable (resident) credential so the account
+        // can later sign in username-less. webauthn-rs's passkey profile sends
+        // `residentKey: "discouraged"`; "preferred" keeps `requireResidentKey`
+        // false, so an authenticator out of resident slots still registers a
+        // (non-discoverable) credential rather than failing. Platform passkeys
+        // are discoverable either way. Only the outgoing options change — the
+        // finish ceremony does not check resident-key state.
+        if let Some(selection) = challenge.public_key.authenticator_selection.as_mut() {
+            selection.resident_key = Some(ResidentKeyRequirement::Preferred);
+        }
+        Ok((challenge, state))
     }
 
     /// Complete a registration begun by [`start_registration`].
@@ -182,7 +195,10 @@ mod tests {
         assert!(!pk["challenge"].as_str().unwrap().is_empty());
         assert!(!pk["pubKeyCredParams"].as_array().unwrap().is_empty());
         assert_eq!(pk["attestation"], "none");
-        // Non-discoverable by design ("discoverable off"): no resident key.
+        // Discoverable preferred, not required (R962): username-less sign-in
+        // works where the authenticator can store the credential, and a full
+        // security key still registers.
+        assert_eq!(pk["authenticatorSelection"]["residentKey"], "preferred");
         assert_eq!(pk["authenticatorSelection"]["requireResidentKey"], false);
         // Passkeys are self-contained MFA — user verification is required.
         assert_eq!(pk["authenticatorSelection"]["userVerification"], "required");

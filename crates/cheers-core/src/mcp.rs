@@ -220,6 +220,11 @@ pub struct McpClaims {
     /// tokens; required by verifiers when the signing key is a self-signer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ceiling: Option<String>,
+    /// fleet-git push tokens only (R969-T12): the one ref this token may
+    /// update, create or delete — an exact refname, or a prefix when it ends
+    /// in `/`. Narrows the `git:write-*` family grant; `None` leaves it as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
 }
 
 impl McpClaims {
@@ -246,7 +251,13 @@ impl McpClaims {
             owns: Owns::default(),
             auth_strength: None,
             ceiling: None,
+            git_ref: None,
         }
+    }
+
+    pub fn with_git_ref(mut self, git_ref: impl Into<String>) -> Self {
+        self.git_ref = Some(git_ref.into());
+        self
     }
 
     pub fn with_act(mut self, act: Actor) -> Self {

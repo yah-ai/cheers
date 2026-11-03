@@ -120,4 +120,7 @@ pub use scope::{
 pub use principal::{
     Principal, PrincipalError, PrincipalId, PrincipalIdParseError, PrincipalKind, PrincipalStatus,
 };
-pub use store::{CredentialStore, MemoryUsedJtiStore, StoreError, UsedJtiStore};
+pub use store::{
+    CredentialStore, MagicLinkCode, MagicLinkCodeStore, MemoryMagicLinkCodeStore,
+    MemoryUsedJtiStore, StoreError, UsedJtiStore,
+};

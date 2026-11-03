@@ -329,6 +329,12 @@ impl PasskeyCredentialStore for StubPasskeyStore {
     async fn update(&self, _cred: &Credential) -> Result<(), StoreError> {
         Ok(())
     }
+    async fn find_by_credential_id(
+        &self,
+        _credential_id: &[u8],
+    ) -> Result<Option<Credential>, StoreError> {
+        Ok(None)
+    }
 }
 
 /// Real in-memory PasskeyCredentialStore for the passkey route tests — same
@@ -370,6 +376,19 @@ impl PasskeyCredentialStore for MemPasskeyStore {
         }
         g.insert(key, cred.clone());
         Ok(())
+    }
+    async fn find_by_credential_id(
+        &self,
+        credential_id: &[u8],
+    ) -> Result<Option<Credential>, StoreError> {
+        let want = cheers_server::passkey_credential_id_key(credential_id);
+        let g = self.0.lock().unwrap();
+        Ok(g.values()
+            .find(|c| {
+                cheers_server::passkey_material_credential_id(&c.material).ok().as_ref()
+                    == Some(&want)
+            })
+            .cloned())
     }
 }
 

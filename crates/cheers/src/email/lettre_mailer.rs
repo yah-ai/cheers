@@ -61,7 +61,8 @@
 //! @yah:cleanup("`.yah/qed/oss-binaries.toml:67-73` carries a commented-out `target = { peer = { camp = \"cheers\", pipeline = \"release-build\" } }` sub-pipeline step. It is dead because `oss/cheers` has no `.yah/qed/` directory, so the peer registration at peers.toml:24 resolves to a camp with no recipes. Uncommenting it requires standing up `oss/cheers/.yah/qed/release-build.toml` first — the cross-camp interface name is fixed and documented at yah-install.toml:87. Out of scope here; this ticket needed a test gate, not a release lane.")
 
 use async_trait::async_trait;
-use lettre::message::{Mailbox, MultiPart, SinglePart, header::ContentType};
+use lettre::message::header::{ContentType, HeaderName, HeaderValue};
+use lettre::message::{Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::AsyncSmtpTransport;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncTransport, Message, Tokio1Executor};
@@ -150,38 +151,73 @@ fn parse_mailbox(role: &str, raw: &str) -> Result<Mailbox, MailerError> {
         .map_err(|e| MailerError::Build(format!("{role}: {e} ({raw:?})")))
 }
 
+/// Header fields [`EmailMessage::headers`] may not set: the ones the message
+/// already models, the ones that add recipients, and the ones lettre writes
+/// to frame the body. lettre's raw insert replaces a same-named field, so
+/// letting one through would silently override a checked value.
+const RESERVED_HEADERS: &[&str] = &[
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "reply-to",
+    "subject",
+    "content-type",
+    "content-transfer-encoding",
+    "mime-version",
+];
+
+fn extra_header(name: &str, value: &str) -> Result<HeaderValue, MailerError> {
+    if RESERVED_HEADERS.iter().any(|r| r.eq_ignore_ascii_case(name)) {
+        return Err(MailerError::Build(format!("header {name:?} is set by the message itself")));
+    }
+    // A line break in a value would start a header of the caller's choosing.
+    if value.contains(['\r', '\n']) {
+        return Err(MailerError::Build(format!("header {name:?}: value contains a line break")));
+    }
+    let header_name = HeaderName::new_from_ascii(name.to_owned())
+        .map_err(|e| MailerError::Build(format!("header {name:?}: {e}")))?;
+    Ok(HeaderValue::new(header_name, value.to_owned()))
+}
+
+fn build_message(msg: &EmailMessage) -> Result<Message, MailerError> {
+    let from = parse_mailbox("from", &msg.from)?;
+    let to = parse_mailbox("to", &msg.to)?;
+
+    let mut builder = Message::builder().from(from).to(to).subject(&msg.subject);
+    if let Some(reply) = &msg.reply_to {
+        builder = builder.reply_to(parse_mailbox("reply_to", reply)?);
+    }
+    for (name, value) in &msg.headers {
+        builder = builder.raw_header(extra_header(name, value)?);
+    }
+
+    match &msg.html {
+        None => builder
+            .header(ContentType::TEXT_PLAIN)
+            .body(msg.text.clone()),
+        Some(html) => {
+            let multipart = MultiPart::alternative()
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_PLAIN)
+                        .body(msg.text.clone()),
+                )
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_HTML)
+                        .body(html.clone()),
+                );
+            builder.multipart(multipart)
+        }
+    }
+    .map_err(|e| MailerError::Build(format!("message: {e}")))
+}
+
 #[async_trait]
 impl Mailer for LettreMailer {
     async fn send(&self, msg: &EmailMessage) -> Result<(), MailerError> {
-        let from = parse_mailbox("from", &msg.from)?;
-        let to = parse_mailbox("to", &msg.to)?;
-
-        let mut builder = Message::builder().from(from).to(to).subject(&msg.subject);
-        if let Some(reply) = &msg.reply_to {
-            builder = builder.reply_to(parse_mailbox("reply_to", reply)?);
-        }
-
-        let email = match &msg.html {
-            None => builder
-                .header(ContentType::TEXT_PLAIN)
-                .body(msg.text.clone()),
-            Some(html) => {
-                let multipart = MultiPart::alternative()
-                    .singlepart(
-                        SinglePart::builder()
-                            .header(ContentType::TEXT_PLAIN)
-                            .body(msg.text.clone()),
-                    )
-                    .singlepart(
-                        SinglePart::builder()
-                            .header(ContentType::TEXT_HTML)
-                            .body(html.clone()),
-                    );
-                builder.multipart(multipart)
-            }
-        }
-        .map_err(|e| MailerError::Build(format!("message: {e}")))?;
-
+        let email = build_message(msg)?;
         self.transport
             .send(email)
             .await
@@ -221,5 +257,47 @@ mod tests {
         let bad = EmailMessage::new("not-a-mailbox", "from@x", "s", "t");
         let err = m.send(&bad).await.unwrap_err();
         assert!(matches!(err, MailerError::Build(_)));
+    }
+
+    fn formatted(msg: &EmailMessage) -> String {
+        String::from_utf8(build_message(msg).unwrap().formatted()).unwrap()
+    }
+
+    #[test]
+    fn extra_headers_reach_the_wire() {
+        let msg = EmailMessage::new("to@example.com", "from@example.com", "s", "t")
+            .with_header("X-Mailgun-Track-Clicks", "no")
+            .with_header("X-Mailgun-Track-Opens", "no");
+        let wire = formatted(&msg);
+        assert!(wire.contains("X-Mailgun-Track-Clicks: no\r\n"), "{wire}");
+        assert!(wire.contains("X-Mailgun-Track-Opens: no\r\n"), "{wire}");
+
+        // Multipart bodies carry them at the message level too.
+        let wire = formatted(&msg.with_html("<p>t</p>"));
+        let head = wire.split("\r\n\r\n").next().unwrap();
+        assert!(head.contains("X-Mailgun-Track-Clicks: no"), "{head}");
+    }
+
+    #[test]
+    fn extra_headers_cannot_override_modelled_fields() {
+        for name in ["Subject", "from", "BCC", "Content-Type"] {
+            let msg = EmailMessage::new("to@example.com", "from@example.com", "s", "t")
+                .with_header(name, "x");
+            assert!(matches!(build_message(&msg), Err(MailerError::Build(_))), "{name}");
+        }
+    }
+
+    #[test]
+    fn extra_headers_refuse_bad_names_and_line_breaks() {
+        for (name, value) in [
+            ("X-Bad Name", "v"),
+            ("X-Colon:", "v"),
+            ("X-Inject", "no\r\nBcc: victim@example.com"),
+            ("X-Inject", "no\nBcc: victim@example.com"),
+        ] {
+            let msg = EmailMessage::new("to@example.com", "from@example.com", "s", "t")
+                .with_header(name, value);
+            assert!(matches!(build_message(&msg), Err(MailerError::Build(_))), "{name:?}");
+        }
     }
 }

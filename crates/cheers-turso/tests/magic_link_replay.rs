@@ -18,13 +18,21 @@
 use std::sync::Arc;
 
 use cheers::email::magic_link::{
-    MagicLinkCodec, MagicLinkError, MagicLinkProvider, MagicLinkUrlBuilder, MemoryUsedJtiStore,
+    MagicLinkCodec, MagicLinkError, MagicLinkProvider, MagicLinkRedemption, MagicLinkUrlBuilder,
+    MemoryMagicLinkCodeStore, MemoryUsedJtiStore,
 };
-use cheers_turso::{migrate, TursoConn, TursoUsedJtiStore};
+use cheers_turso::{migrate, TursoConn, TursoMagicLinkCodeStore, TursoUsedJtiStore};
 
 const KEY: [u8; 32] = [9u8; 32];
 const TTL_SECONDS: i64 = 3600;
 const BASE_URL: &str = "https://app.example/auth/verify";
+
+fn open(token: &str) -> MagicLinkRedemption<'_> {
+    MagicLinkRedemption::Token {
+        token,
+        verifier: None,
+    }
+}
 
 /// The fix: replaying a magic link after the store handle is dropped and
 /// reopened against the same on-disk database is refused, not honored.
@@ -41,10 +49,11 @@ async fn magic_link_replay_is_refused_after_reopening_turso_store() {
             MagicLinkCodec::new(&KEY, TTL_SECONDS).unwrap(),
             MagicLinkUrlBuilder::new(BASE_URL),
             TursoUsedJtiStore::new(conn.clone()),
+            TursoMagicLinkCodeStore::new(conn.clone()),
         );
-        let req = provider.request("alice@example.com", now).await.unwrap();
+        let req = provider.request("alice@example.com", None, now).await.unwrap();
         provider
-            .consume(&req.token, now + 1)
+            .redeem(open(&req.token), now + 1)
             .await
             .expect("first consume must succeed");
         req.token
@@ -56,10 +65,11 @@ async fn magic_link_replay_is_refused_after_reopening_turso_store() {
     let provider = MagicLinkProvider::new(
         MagicLinkCodec::new(&KEY, TTL_SECONDS).unwrap(),
         MagicLinkUrlBuilder::new(BASE_URL),
-        TursoUsedJtiStore::new(conn),
+        TursoUsedJtiStore::new(conn.clone()),
+        TursoMagicLinkCodeStore::new(conn),
     );
     let err = provider
-        .consume(&token, now + 2)
+        .redeem(open(&token), now + 2)
         .await
         .expect_err("a replay after reopening the store must be refused");
     assert!(
@@ -85,9 +95,10 @@ async fn magic_link_replay_succeeds_across_restart_with_memory_store() {
             MagicLinkCodec::new(&KEY, TTL_SECONDS).unwrap(),
             MagicLinkUrlBuilder::new(BASE_URL),
             MemoryUsedJtiStore::new(),
+            MemoryMagicLinkCodeStore::new(),
         );
-        let req = provider.request("alice@example.com", now).await.unwrap();
-        provider.consume(&req.token, now + 1).await.unwrap();
+        let req = provider.request("alice@example.com", None, now).await.unwrap();
+        provider.redeem(open(&req.token), now + 1).await.unwrap();
         req.token
         // `provider` (and its MemoryUsedJtiStore) drops here, forgetting the
         // burned jti — exactly what a process restart does in production.
@@ -97,10 +108,99 @@ async fn magic_link_replay_succeeds_across_restart_with_memory_store() {
         MagicLinkCodec::new(&KEY, TTL_SECONDS).unwrap(),
         MagicLinkUrlBuilder::new(BASE_URL),
         MemoryUsedJtiStore::new(),
+        MemoryMagicLinkCodeStore::new(),
     );
     let claims = provider
-        .consume(&token, now + 2)
+        .redeem(open(&token), now + 2)
         .await
         .expect("MemoryUsedJtiStore has no memory of the prior process, so the replay succeeds");
     assert_eq!(claims.email, "alice@example.com");
+}
+
+/// CHE-R961: a sign-in code and its spent attempts survive a reopen, and a
+/// code redemption burns the grant's links in the persistent stores.
+#[tokio::test]
+async fn bound_grant_code_state_survives_reopening_turso_stores() {
+    use cheers::email::magic_link::{s256, CODE_MAX_ATTEMPTS};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("codes.db");
+    let now = 1_700_000_000;
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+    let provider_over = |conn: Arc<TursoConn>| {
+        MagicLinkProvider::new(
+            MagicLinkCodec::new(&KEY, TTL_SECONDS).unwrap(),
+            MagicLinkUrlBuilder::new(BASE_URL),
+            TursoUsedJtiStore::new(conn.clone()),
+            TursoMagicLinkCodeStore::new(conn),
+        )
+    };
+
+    let (req, wrong) = {
+        let conn = Arc::new(TursoConn::open(&path).await.unwrap());
+        migrate::run(&conn).await.unwrap();
+        let provider = provider_over(conn);
+        let req = provider
+            .request("alice@example.com", Some(&s256(verifier)), now)
+            .await
+            .unwrap();
+        let code = req.code.clone().unwrap();
+        let wrong = if code == "000000" { "000001" } else { "000000" };
+        // Spend all but one attempt before the "restart".
+        for _ in 0..CODE_MAX_ATTEMPTS - 1 {
+            let guess = MagicLinkRedemption::Code { code: wrong, verifier };
+            assert!(matches!(
+                provider.redeem(guess, now + 1).await.unwrap_err(),
+                MagicLinkError::Refused(_)
+            ));
+        }
+        (req, wrong.to_owned())
+    };
+
+    let conn = Arc::new(TursoConn::open(&path).await.unwrap());
+    let provider = provider_over(conn.clone());
+    // The last attempt is wrong too: it kills the code across the restart...
+    let guess = MagicLinkRedemption::Code { code: &wrong, verifier };
+    provider.redeem(guess, now + 2).await.unwrap_err();
+    let right = MagicLinkRedemption::Code {
+        code: req.code.as_deref().unwrap(),
+        verifier,
+    };
+    assert!(matches!(
+        provider.redeem(right, now + 3).await.unwrap_err(),
+        MagicLinkError::Refused(_)
+    ));
+    // ...while the links still work, and redeeming one burns the other.
+    let app = MagicLinkRedemption::Token {
+        token: &req.app_token,
+        verifier: Some(verifier),
+    };
+    provider.redeem(app, now + 4).await.unwrap();
+    assert!(matches!(
+        provider.redeem(open(&req.token), now + 5).await.unwrap_err(),
+        MagicLinkError::AlreadyUsed
+    ));
+
+    // A fresh grant's code redeems once and burns both of its links.
+    let req = provider
+        .request("alice@example.com", Some(&s256(verifier)), now + 10)
+        .await
+        .unwrap();
+    let by_code = MagicLinkRedemption::Code {
+        code: req.code.as_deref().unwrap(),
+        verifier,
+    };
+    let claims = provider.redeem(by_code, now + 11).await.unwrap();
+    assert_eq!(claims.email, "alice@example.com");
+    assert!(provider.redeem(by_code, now + 12).await.is_err());
+    assert!(matches!(
+        provider.redeem(open(&req.token), now + 12).await.unwrap_err(),
+        MagicLinkError::AlreadyUsed
+    ));
+    let rows = conn
+        .query("SELECT COUNT(*) FROM magic_link_codes", vec![])
+        .await
+        .unwrap();
+    assert_eq!(rows[0].get::<i64>(0).unwrap(), 0);
 }

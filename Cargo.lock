@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-axum"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "async-trait",
  "axum",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-core"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1077,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-providers"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1099,6 +1099,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.10.6",
+ "sha2 0.10.9",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "webauthn-authenticator-rs",
@@ -1109,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-redis"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "async-trait",
  "cheers-core",
@@ -1127,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-server"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1150,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-sqlx"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1174,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-store"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "age",
  "async-trait",
@@ -1191,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-test-identity"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "axum",
  "cheers-axum",
@@ -1211,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-test-support"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -1228,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-turso"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "async-trait",
  "cheers-core",
@@ -1251,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-vend"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1271,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "cheers-verify"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4250,7 +4252,7 @@ dependencies = [
 
 [[package]]
 name = "mshr"
-version = "0.8.46"
+version = "0.8.51"
 dependencies = [
  "anyhow",
  "bytes",

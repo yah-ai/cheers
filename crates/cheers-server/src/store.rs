@@ -289,11 +289,22 @@ pub trait RefreshStore: Send + Sync {
 /// `cheers::passkey::passkey_from_credential`.
 ///
 /// A user holds zero-or-more passkey credentials (phone, laptop, security key);
-/// `(user_id, device_id)` is the unique key. Non-discoverable WebAuthn flow:
-/// products call [`list_for_user`](Self::list_for_user) to assemble the
-/// `allow_credentials` set before `start_authentication`, and
-/// [`update`](Self::update) after a successful ceremony if the signature
-/// counter advanced (see `cheers::passkey::apply_authentication_result`).
+/// `(user_id, device_id)` is the unique key. Two authentication flows read it:
+///
+/// - **Typed-username (non-discoverable)**: products call
+///   [`list_for_user`](Self::list_for_user) to assemble the `allow_credentials`
+///   set before `start_authentication`.
+/// - **Username-less (discoverable, R962)**: the authenticator picks the
+///   credential, so the relying party learns *which* one only from the
+///   assertion. [`find_by_credential_id`](Self::find_by_credential_id) maps the
+///   asserted credential id back to its row — and so to its account.
+///
+/// Either way, [`update`](Self::update) after a successful ceremony if the
+/// signature counter advanced (see `cheers::passkey::apply_authentication_result`).
+///
+/// The WebAuthn credential id is also unique across the table: impls index it
+/// by [`passkey_material_credential_id`] of the stored material, and a `put`
+/// whose credential id is already present is a [`StoreError::Conflict`].
 ///
 /// Long-lived credential material, indexed by user — belongs in the relational
 /// SQL store (see `cheers-sqlx`), never in redis.
@@ -317,6 +328,66 @@ pub trait PasskeyCredentialStore: Send + Sync {
     /// `apply_authentication_result` to persist an advanced counter / updated
     /// backup flags. [`StoreError::NotFound`] if the pair was never `put`.
     async fn update(&self, cred: &Credential) -> Result<(), StoreError>;
+
+    /// The passkey credential whose WebAuthn credential id is `credential_id`
+    /// (raw bytes, as `AuthenticationResult::cred_id` / the assertion's
+    /// `rawId` carry it), whoever owns it. `Ok(None)` if no row matches.
+    async fn find_by_credential_id(
+        &self,
+        credential_id: &[u8],
+    ) -> Result<Option<Credential>, StoreError>;
+}
+
+/// The lookup key [`PasskeyCredentialStore`] impls index a passkey row under:
+/// the WebAuthn credential id, base64url without padding.
+///
+/// Pair with [`passkey_material_credential_id`], which yields the same string
+/// from a stored row's material — the two must agree for
+/// [`find_by_credential_id`](PasskeyCredentialStore::find_by_credential_id) to
+/// find anything.
+pub fn passkey_credential_id_key(credential_id: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id)
+}
+
+/// Read the WebAuthn credential id out of a passkey credential's `material` —
+/// the `serde_json`'d `webauthn-rs` `Passkey` that
+/// `cheers::passkey::passkey_to_credential` writes — as its
+/// [`passkey_credential_id_key`].
+///
+/// This crate stays free of webauthn-rs, so it reads the JSON by shape: the
+/// `Passkey` serialises as `{"cred": {"cred_id": "<base64url>", ..}, ..}`,
+/// the id base64url-unpadded (webauthn-rs's human-readable encoding). The
+/// value is decoded and re-encoded rather than passed through, so a
+/// differently padded encoding still lands on the canonical key; the
+/// `cheers-axum` passkey tests pin the shape against a real `Passkey`.
+/// [`StoreError::Backend`] if the material isn't that shape.
+pub fn passkey_material_credential_id(material: &[u8]) -> Result<String, StoreError> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+
+    let value: serde_json::Value = serde_json::from_slice(material).map_err(|e| {
+        StoreError::Backend(format!(
+            "passkey material is not valid JSON (expected a serde_json'd webauthn-rs Passkey): {e}"
+        ))
+    })?;
+    let encoded = value
+        .pointer("/cred/cred_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            StoreError::Backend(
+                "passkey material has no string at /cred/cred_id (expected a serde_json'd \
+                 webauthn-rs Passkey)"
+                    .to_owned(),
+            )
+        })?;
+    let raw = [URL_SAFE_NO_PAD, URL_SAFE, STANDARD, STANDARD_NO_PAD]
+        .iter()
+        .find_map(|engine| engine.decode(encoded).ok())
+        .ok_or_else(|| {
+            StoreError::Backend(format!("passkey cred_id {encoded:?} is not base64"))
+        })?;
+    Ok(passkey_credential_id_key(&raw))
 }
 
 #[cfg(test)]
@@ -571,6 +642,32 @@ mod tests {
             g.insert(key, cred.clone());
             Ok(())
         }
+
+        async fn find_by_credential_id(
+            &self,
+            credential_id: &[u8],
+        ) -> Result<Option<Credential>, StoreError> {
+            let want = passkey_credential_id_key(credential_id);
+            let g = self.0.lock().unwrap();
+            Ok(g.values()
+                .find(|c| passkey_material_credential_id(&c.material).ok().as_ref() == Some(&want))
+                .cloned())
+        }
+    }
+
+    #[test]
+    fn material_credential_id_is_canonical_base64url() {
+        // Padded and standard-alphabet encodings of the same bytes land on the
+        // same key the lookup side computes from raw bytes.
+        let raw = [0xfbu8, 0xff, 0x01];
+        let key = passkey_credential_id_key(&raw);
+        assert_eq!(key, "-_8B");
+        for enc in ["-_8B", "+/8B"] {
+            let material = format!(r#"{{"cred":{{"cred_id":"{enc}"}}}}"#);
+            assert_eq!(passkey_material_credential_id(material.as_bytes()).unwrap(), key);
+        }
+        assert!(passkey_material_credential_id(b"v1").is_err());
+        assert!(passkey_material_credential_id(br#"{"cred":{}}"#).is_err());
     }
 
     fn passkey_cred(user: &str, device: &str, material: &[u8]) -> Credential {

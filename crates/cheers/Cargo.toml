@@ -40,7 +40,7 @@ name = "native_passkey"
 required-features = ["macos", "passkey"]
 
 [dependencies]
-cheers-core = { path = "../cheers-core", version = "0.8.46" }
+cheers-core = { path = "../cheers-core", version = "0.8.51" }
 
 # email (P3) — magic-link codec, mailer trait. PASETO v4.local for token shape.
 pasetors = { version = "0.7", optional = true }
@@ -50,6 +50,10 @@ thiserror = { version = "2", optional = true }
 async-trait = { version = "0.1", optional = true }
 getrandom = { version = "0.3", optional = true }
 base64 = { version = "0.22", optional = true }
+# S256 (RFC 7636) challenge check + sign-in code hashing and its constant-time
+# compare (CHE-R961, bound two-track magic links).
+sha2 = { version = "0.10", optional = true }
+subtle = { version = "2", optional = true }
 
 # email-lettre (P3) — concrete SMTP transport. Sub-feature of `email` so the
 # trait-only consumer doesn't pull lettre + tokio + rustls.
@@ -91,15 +95,19 @@ jsonwebtoken = { version = "9", optional = true }
 # Path dep during development; will become a versioned dep once mshr
 # cuts a stable tag. Kept optional so most cheers consumers don't pull
 # in the iroh/QUIC dependency graph.
-mshr = { path = "../../../mshr/crates/mshr", version = "0.8.46", optional = true }
+mshr = { path = "../../../mshr/crates/mshr", version = "0.8.51", optional = true }
 
 # passkey (P7) — WebAuthn server-side registration + authentication ceremonies.
 # webauthn-rs is MPL-2.0 (allowed in deny.toml). `danger-allow-state-
 # serialisation` makes the in-flight registration/authentication state serde-
 # encodable so it can be stashed server-side between the start and finish HTTP
 # requests — single-use + confidential, the same contract as the OIDC flow store.
+# `conditional-ui` gates webauthn-rs's discoverable-credential authentication
+# (start / identify / finish_discoverable_authentication) — the username-less
+# sign-in R962 ships. It is a cfg gate on stable API, not a preview feature.
 webauthn-rs = { version = "0.5", default-features = false, features = [
     "danger-allow-state-serialisation",
+    "conditional-ui",
 ], optional = true }
 # webauthn-rs-proto — protocol types only (RegisterPublicKeyCredential, etc.).
 # No openssl dep. Used standalone by the `ios` feature so iOS cross-compile
@@ -135,7 +143,7 @@ pollster = "0.4"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 # mshr (dev) — drives two in-process Endpoints for the lan-pair integration
 # test. Mirrors the path dep in [dependencies] so versions stay in sync.
-mshr = { path = "../../../mshr/crates/mshr", version = "0.8.46" }
+mshr = { path = "../../../mshr/crates/mshr", version = "0.8.51" }
 serde_json = "1"
 # wiremock + chrono drive the google.rs (P5 R012-T2) round-trip tests — stand up
 # a fake OIDC IdP serving discovery/JWKS/token and mint RS256 id_tokens via
@@ -175,6 +183,8 @@ email = [
     "dep:async-trait",
     "dep:getrandom",
     "dep:base64",
+    "dep:sha2",
+    "dep:subtle",
 ]
 email-lettre = ["email", "dep:lettre", "dep:tokio"]
 password = ["email", "dep:argon2"]
@@ -192,7 +202,10 @@ apple = [
     "dep:serde_json",
     "dep:thiserror",
 ]
-passkey = ["dep:webauthn-rs", "dep:thiserror", "dep:serde_json"]
+# `webauthn-rs-proto` names `ResidentKeyRequirement`, which the webauthn-rs
+# prelude does not re-export (register.rs asks for a discoverable credential,
+# R962). It is already in the graph via webauthn-rs-core's `=` pin.
+passkey = ["dep:webauthn-rs", "dep:webauthn-rs-proto", "dep:thiserror", "dep:serde_json"]
 keyring = ["dep:async-trait"]
 headless = ["dep:async-trait"]
 # macos / ios (P9) — pull in passkey (server-side) + the objc2 stack for

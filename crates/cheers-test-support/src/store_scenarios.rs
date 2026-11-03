@@ -312,8 +312,12 @@ pub async fn passkey_store_round_trip<P: PasskeyCredentialStore + ?Sized>(
 ) {
     assert!(passkeys.list_for_user(user).await.unwrap().is_empty());
 
-    let phone = fixture_passkey_cred(user, "phone", r#"{"v":1,"id":"phone"}"#);
-    let laptop = fixture_passkey_cred(user, "laptop", r#"{"v":1,"id":"laptop"}"#);
+    // Materials carry `cred.cred_id` the way a serde_json'd webauthn-rs
+    // Passkey does (base64url, unpadded) — the store indexes it (R962).
+    // "AQID" = [1,2,3], "BAUG" = [4,5,6], "BwgJ" = [7,8,9].
+    let phone = fixture_passkey_cred(user, "phone", r#"{"v":1,"id":"phone","cred":{"cred_id":"AQID"}}"#);
+    let laptop =
+        fixture_passkey_cred(user, "laptop", r#"{"v":1,"id":"laptop","cred":{"cred_id":"BAUG"}}"#);
     passkeys.put(&phone).await.expect("put phone");
     passkeys.put(&laptop).await.expect("put laptop");
 
@@ -322,6 +326,28 @@ pub async fn passkey_store_round_trip<P: PasskeyCredentialStore + ?Sized>(
         Err(StoreError::Conflict) => {}
         other => panic!("expected Conflict, got {other:?}"),
     }
+    // Same credential id under a fresh (user, device) -> Conflict: a WebAuthn
+    // credential id names exactly one row, or the username-less lookup could
+    // hand one assertion two accounts.
+    let clone = fixture_passkey_cred(user, "clone", r#"{"v":1,"cred":{"cred_id":"AQID"}}"#);
+    match passkeys.put(&clone).await {
+        Err(StoreError::Conflict) => {}
+        other => panic!("expected Conflict on duplicate credential id, got {other:?}"),
+    }
+    // Material with no credential id is refused at the write, not at a later
+    // lookup that silently can't find it.
+    let idless = fixture_passkey_cred(user, "idless", r#"{"v":1}"#);
+    assert!(passkeys.put(&idless).await.is_err(), "put without cred.cred_id must fail");
+
+    // Lookup by credential id (raw bytes) finds the owning row.
+    let found = passkeys
+        .find_by_credential_id(&[1, 2, 3])
+        .await
+        .unwrap()
+        .expect("phone found by credential id");
+    assert_eq!(found.user_id, *user);
+    assert_eq!(found.device_id.as_str(), "phone");
+    assert!(passkeys.find_by_credential_id(&[7, 8, 9]).await.unwrap().is_none());
 
     let mut list = passkeys.list_for_user(user).await.unwrap();
     list.sort_by(|a, b| a.device_id.as_str().cmp(b.device_id.as_str()));
@@ -336,15 +362,20 @@ pub async fn passkey_store_round_trip<P: PasskeyCredentialStore + ?Sized>(
     assert_eq!(parse(&list[1]), "phone");
 
     // Update rewrites the material (counter advance simulated by bumping v).
-    let phone_v2 = fixture_passkey_cred(user, "phone", r#"{"v":2,"id":"phone"}"#);
+    let phone_v2 =
+        fixture_passkey_cred(user, "phone", r#"{"v":2,"id":"phone","cred":{"cred_id":"AQID"}}"#);
     passkeys.update(&phone_v2).await.expect("update phone");
     let list = passkeys.list_for_user(user).await.unwrap();
     let phone_row = list.iter().find(|c| c.device_id.as_str() == "phone").unwrap();
     let v: serde_json::Value = serde_json::from_slice(&phone_row.material).unwrap();
     assert_eq!(v["v"].as_i64(), Some(2));
+    // The lookup returns the updated material too.
+    let found = passkeys.find_by_credential_id(&[1, 2, 3]).await.unwrap().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&found.material).unwrap();
+    assert_eq!(v["v"].as_i64(), Some(2));
 
     // Update on missing -> NotFound.
-    let ghost = fixture_passkey_cred(user, "ghost", r#"{"v":1}"#);
+    let ghost = fixture_passkey_cred(user, "ghost", r#"{"v":1,"cred":{"cred_id":"BwgJ"}}"#);
     match passkeys.update(&ghost).await {
         Err(StoreError::NotFound) => {}
         other => panic!("expected NotFound, got {other:?}"),
@@ -359,6 +390,10 @@ pub async fn passkey_store_round_trip<P: PasskeyCredentialStore + ?Sized>(
         Err(StoreError::NotFound) => {}
         other => panic!("expected NotFound, got {other:?}"),
     }
+    assert!(
+        passkeys.find_by_credential_id(&[1, 2, 3]).await.unwrap().is_none(),
+        "a deleted credential is no longer found by id"
+    );
 }
 
 // ---------------------------------------------------------------------------

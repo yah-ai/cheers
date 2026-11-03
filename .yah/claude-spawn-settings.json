@@ -40,6 +40,7 @@
           {
             "input": {
               "command": "${tool_input.command}",
+              "cwd": "${cwd}",
               "description": "${tool_input.description}",
               "hook_event_name": "${hook_event_name}",
               "run_in_background": "${tool_input.run_in_background}",
@@ -105,6 +106,22 @@
           }
         ],
         "matcher": "Read|Grep|Glob|Edit|Write|MultiEdit|NotebookEdit|Bash"
+      },
+      {
+        "hooks": [
+          {
+            "input": {
+              "cwd": "${cwd}",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}"
+            },
+            "server": "yah",
+            "timeout": 5,
+            "tool": "session.cwd",
+            "type": "mcp_tool"
+          }
+        ],
+        "matcher": "mcp__yah__board_.*"
       }
     ]
   },
@@ -112,7 +129,7 @@
     "yah": {
       "args": [
         "mcp",
-        "/Users/leif/ss/yah/oss/cheers"
+        "/Users/user/ss/yah/oss/cheers"
       ],
       "command": "/Applications/yah.app/Contents/MacOS/yah",
       "timeout": 3900000

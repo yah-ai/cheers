@@ -89,8 +89,22 @@ pub enum RouteError {
     WrongPurpose(String),
 
     /// Magic-link token failed PASETO decryption / signature / expiry checks.
+    /// Also the collapsed answer for every other refused redemption (a bound
+    /// token without a verifier; a wrong, expired, exhausted or unknown
+    /// code), so a guesser learns nothing from which one it was.
     #[error("magic-link token invalid: {0}")]
     MagicLinkToken(String),
+
+    /// Magic-link request carried a `challenge` that is not an S256 digest.
+    #[error("invalid challenge")]
+    InvalidChallenge,
+
+    /// The presented token is bound to a challenge the presented `verifier`
+    /// does not match (CHE-R961, W275 §5) — the one redemption refusal kept
+    /// distinct, so the app can point the person at the code on the device
+    /// that asked.
+    #[error("magic-link token is bound to another device")]
+    BoundElsewhere,
 
     /// Mailer rejected the message (bad address shape, body encoding, …) —
     /// typically a deploy-time bug.
@@ -260,6 +274,8 @@ impl RouteError {
             RouteError::InvalidEmail => (StatusCode::BAD_REQUEST, "invalid_email"),
             RouteError::WrongPurpose(_) => (StatusCode::BAD_REQUEST, "wrong_purpose"),
             RouteError::MagicLinkToken(_) => (StatusCode::BAD_REQUEST, "magic_link_token"),
+            RouteError::InvalidChallenge => (StatusCode::BAD_REQUEST, "invalid_challenge"),
+            RouteError::BoundElsewhere => (StatusCode::BAD_REQUEST, "bound_elsewhere"),
             RouteError::MailerBuild(_) => (StatusCode::INTERNAL_SERVER_ERROR, "mailer_build"),
             RouteError::MailerTransport(_) => (StatusCode::BAD_GATEWAY, "mailer_transport"),
             RouteError::MissingBearer => (StatusCode::UNAUTHORIZED, "missing_bearer"),
@@ -423,6 +439,9 @@ impl From<cheers::email::magic_link::MagicLinkError> for RouteError {
             MagicLinkError::WrongPurpose { got } => RouteError::WrongPurpose(got),
             MagicLinkError::AlreadyUsed => RouteError::AlreadyUsed,
             MagicLinkError::InvalidEmail => RouteError::InvalidEmail,
+            MagicLinkError::InvalidChallenge => RouteError::InvalidChallenge,
+            MagicLinkError::BoundElsewhere => RouteError::BoundElsewhere,
+            MagicLinkError::Refused(why) => RouteError::MagicLinkToken(why.to_owned()),
             MagicLinkError::Store(msg) => RouteError::Store(msg),
             other => RouteError::Config(other.to_string()),
         }

@@ -6,14 +6,17 @@
 //! into a row.
 //!
 //! Schema layout: `(user_id, device_id)` PK, with `material` holding the
-//! serde_json'd `Passkey` blob (`JSONB` on pg, `TEXT` on sqlite). Decoded
+//! serde_json'd `Passkey` blob (`JSONB` on pg, `TEXT` on sqlite) and a unique
+//! `credential_id` (migration 0018) for the username-less lookup. Decoded
 //! back into [`Credential::material`] as bytes — the original byte sequence
 //! is preserved (it's the JSON encoding of the Passkey, so the JSON column
 //! stores it natively + retrievable as a UTF-8 byte string).
 
 use async_trait::async_trait;
 use cheers_core::{Credential, DeviceBinding, DeviceId, StoreError, UserId};
-use cheers_server::store::PasskeyCredentialStore;
+use cheers_server::store::{
+    passkey_credential_id_key, passkey_material_credential_id, PasskeyCredentialStore,
+};
 
 use crate::error::map_sqlx_error;
 
@@ -86,14 +89,16 @@ mod pg {
         async fn put(&self, cred: &Credential) -> Result<(), StoreError> {
             require_passkey_binding(&cred.binding)?;
             let material = decode_material(&cred.material)?;
+            let credential_id = passkey_material_credential_id(&cred.material)?;
             sqlx::query(
-                "INSERT INTO passkey_credentials (user_id, device_id, material, created_at)
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO passkey_credentials (user_id, device_id, material, created_at, credential_id)
+                 VALUES ($1, $2, $3, $4, $5)",
             )
             .bind(cred.user_id.as_str())
             .bind(cred.device_id.as_str())
             .bind(sqlx::types::Json(material))
             .bind(now())
+            .bind(credential_id)
             .execute(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
@@ -163,6 +168,33 @@ mod pg {
             }
             Ok(())
         }
+
+        async fn find_by_credential_id(
+            &self,
+            credential_id: &[u8],
+        ) -> Result<Option<Credential>, StoreError> {
+            let row = sqlx::query(
+                "SELECT user_id, device_id, material FROM passkey_credentials
+                 WHERE credential_id = $1",
+            )
+            .bind(passkey_credential_id_key(credential_id))
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            let Some(row) = row else { return Ok(None) };
+            let user_id: String = row.get("user_id");
+            let device_id: String = row.get("device_id");
+            let material: sqlx::types::Json<serde_json::Value> = row.get("material");
+            let bytes = serde_json::to_vec(&material.0).map_err(|e| {
+                StoreError::Backend(format!("re-encoding stored passkey material: {e}"))
+            })?;
+            Ok(Some(Credential::new(
+                UserId::new(user_id),
+                DeviceId::new(device_id),
+                DeviceBinding::Passkey,
+                bytes,
+            )))
+        }
     }
 }
 
@@ -202,14 +234,16 @@ mod sqlite {
             let serialized = serde_json::to_string(&material).map_err(|e| {
                 StoreError::Backend(format!("re-encoding passkey material: {e}"))
             })?;
+            let credential_id = passkey_material_credential_id(&cred.material)?;
             sqlx::query(
-                "INSERT INTO passkey_credentials (user_id, device_id, material, created_at)
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO passkey_credentials (user_id, device_id, material, created_at, credential_id)
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(cred.user_id.as_str())
             .bind(cred.device_id.as_str())
             .bind(serialized)
             .bind(now())
+            .bind(credential_id)
             .execute(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
@@ -278,6 +312,30 @@ mod sqlite {
                 return Err(StoreError::NotFound);
             }
             Ok(())
+        }
+
+        async fn find_by_credential_id(
+            &self,
+            credential_id: &[u8],
+        ) -> Result<Option<Credential>, StoreError> {
+            let row = sqlx::query(
+                "SELECT user_id, device_id, material FROM passkey_credentials
+                 WHERE credential_id = ?",
+            )
+            .bind(passkey_credential_id_key(credential_id))
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            let Some(row) = row else { return Ok(None) };
+            let user_id: String = row.get("user_id");
+            let device_id: String = row.get("device_id");
+            let material: String = row.get("material");
+            Ok(Some(Credential::new(
+                UserId::new(user_id),
+                DeviceId::new(device_id),
+                DeviceBinding::Passkey,
+                material.into_bytes(),
+            )))
         }
     }
 }

@@ -50,7 +50,8 @@ use std::sync::Arc;
 use axum::routing::get;
 use axum::{Json, Router};
 use cheers::email::magic_link::{
-    MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryUsedJtiStore,
+    MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryMagicLinkCodeStore,
+    MemoryUsedJtiStore,
 };
 use cheers::email::{CapturingMailer, MagicLinkEmail};
 use cheers_axum::magic_link::{router as magic_link_router, MagicLinkAuthState};
@@ -188,6 +189,7 @@ pub async fn build_router(config: &TestIdentityConfig) -> Result<Router, TestIde
         codec,
         MagicLinkUrlBuilder::new(format!("{}/auth/magic-link/verify", config.base_url)),
         MemoryUsedJtiStore::new(),
+        MemoryMagicLinkCodeStore::new(),
     ));
     let mailer = Arc::new(CapturingMailer::new());
     let template = MagicLinkEmail::new("yah dev", "yah dev <noreply@yah.invalid>");

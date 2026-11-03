@@ -86,7 +86,8 @@ pub use user_tokens::{
     decode_scopes, encode_scopes, MemoryUserTokenStore, UserTokenRecord, UserTokenStore,
 };
 pub use store::{
-    NewUser, PasskeyCredentialStore, ProviderKey, RefreshStore, RefreshTokenRecord, UserStore,
+    passkey_credential_id_key, passkey_material_credential_id, NewUser, PasskeyCredentialStore,
+    ProviderKey, RefreshStore, RefreshTokenRecord, UserStore,
 };
 
 // Re-exported for convenience so an origin consumer can assemble the verify-side

@@ -9,8 +9,9 @@
 //! the server verifies the signature against the stored public key.
 
 use super::{
-    AuthenticationResult, Passkey, PasskeyAuthentication, PasskeyError, PasskeyRelyingParty,
-    PublicKeyCredential, RequestChallengeResponse,
+    AuthenticationResult, DiscoverableAuthentication, DiscoverableKey, Passkey,
+    PasskeyAuthentication, PasskeyError, PasskeyRelyingParty, PublicKeyCredential,
+    RequestChallengeResponse, Uuid,
 };
 
 impl PasskeyRelyingParty {
@@ -18,11 +19,12 @@ impl PasskeyRelyingParty {
     ///
     /// `allow_credentials` is the candidate set — the user's stored
     /// [`Passkey`]s (recover them from a `CredentialStore` via
-    /// [`passkey_from_credential`](super::passkey_from_credential)). Because
-    /// cheers ships the **non-discoverable** profile (see the [module
-    /// docs](super)), the relying party already knows who is authenticating and
-    /// supplies their credentials here; an empty slice produces a challenge no
-    /// authenticator can answer.
+    /// [`passkey_from_credential`](super::passkey_from_credential)). This is the
+    /// typed-username flow: the relying party already knows who is
+    /// authenticating and supplies their credentials here; an empty slice
+    /// produces a challenge no authenticator can answer. For username-less
+    /// sign-in use
+    /// [`start_discoverable_authentication`](PasskeyRelyingParty::start_discoverable_authentication).
     ///
     /// Returns the [`RequestChallengeResponse`] to serialise to the client and
     /// the [`PasskeyAuthentication`] state that **must be stored server-side**
@@ -77,6 +79,79 @@ impl PasskeyRelyingParty {
     ) -> Result<AuthenticationResult, PasskeyError> {
         self.webauthn
             .finish_passkey_authentication(credential, state)
+            .map_err(PasskeyError::Ceremony)
+    }
+
+    /// Begin a **username-less** (discoverable-credential) authentication.
+    ///
+    /// No account is named: the challenge carries an empty `allowCredentials`,
+    /// so the authenticator offers whichever of its discoverable credentials
+    /// belong to this relying party and the user picks one. The assertion
+    /// then says who they are — its `userHandle` and credential id, read with
+    /// [`identify_discoverable_authentication`].
+    ///
+    /// `webauthn-rs` stamps `mediation: "conditional"` on this challenge
+    /// (form-autofill UI). cheers clears it: the same challenge serves a modal
+    /// "Sign in with a passkey" button and a native client, and a browser
+    /// handed `mediation: "conditional"` with no autofill field waits forever.
+    /// A client that wants autofill passes `mediation` itself.
+    ///
+    /// Returns the [`RequestChallengeResponse`] for the client and the
+    /// [`DiscoverableAuthentication`] state, which **must be stored
+    /// server-side** (single-use, confidential) until
+    /// [`finish_discoverable_authentication`].
+    ///
+    /// [`identify_discoverable_authentication`]: PasskeyRelyingParty::identify_discoverable_authentication
+    /// [`finish_discoverable_authentication`]: PasskeyRelyingParty::finish_discoverable_authentication
+    pub fn start_discoverable_authentication(
+        &self,
+    ) -> Result<(RequestChallengeResponse, DiscoverableAuthentication), PasskeyError> {
+        let (mut challenge, state) = self
+            .webauthn
+            .start_discoverable_authentication()
+            .map_err(PasskeyError::Ceremony)?;
+        challenge.mediation = None;
+        Ok((challenge, state))
+    }
+
+    /// Read who a username-less assertion claims to be, before verifying it:
+    /// the WebAuthn user handle (the [`Uuid`] passed to
+    /// [`start_registration`](PasskeyRelyingParty::start_registration)) and the
+    /// raw credential id.
+    ///
+    /// **Nothing here is verified yet.** Use the credential id to load the
+    /// stored passkey, check the handle names that passkey's owner, then call
+    /// [`finish_discoverable_authentication`](PasskeyRelyingParty::finish_discoverable_authentication)
+    /// with it. [`PasskeyError::Ceremony`] if the assertion carries no
+    /// `userHandle` or one that is not a 16-byte UUID.
+    pub fn identify_discoverable_authentication(
+        &self,
+        credential: &PublicKeyCredential,
+    ) -> Result<(Uuid, Vec<u8>), PasskeyError> {
+        self.webauthn
+            .identify_discoverable_authentication(credential)
+            .map(|(handle, cred_id)| (handle, cred_id.to_vec()))
+            .map_err(PasskeyError::Ceremony)
+    }
+
+    /// Complete a username-less authentication begun by
+    /// [`start_discoverable_authentication`](PasskeyRelyingParty::start_discoverable_authentication).
+    ///
+    /// `candidates` is the stored passkey the assertion's credential id
+    /// resolved to (see
+    /// [`identify_discoverable_authentication`](PasskeyRelyingParty::identify_discoverable_authentication));
+    /// verification fails unless the assertion was signed by one of them.
+    /// Fold the result back with [`apply_authentication_result`] exactly as
+    /// for the typed-username flow.
+    pub fn finish_discoverable_authentication(
+        &self,
+        credential: &PublicKeyCredential,
+        state: DiscoverableAuthentication,
+        candidates: &[Passkey],
+    ) -> Result<AuthenticationResult, PasskeyError> {
+        let keys: Vec<DiscoverableKey> = candidates.iter().map(DiscoverableKey::from).collect();
+        self.webauthn
+            .finish_discoverable_authentication(credential, state, &keys)
             .map_err(PasskeyError::Ceremony)
     }
 }

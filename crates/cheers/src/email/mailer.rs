@@ -15,6 +15,16 @@
 //!
 //! Callers who want a different transport (SES, Postmark, sendmail, an
 //! internal RPC, …) implement [`Mailer`] directly.
+//!
+//! @yah:ticket(R961-F2, "EmailMessage grows a headers field that LettreMailer sends, so callers can set X-Mailgun-Track-Clicks: no (W275 s7)")
+//! @yah:status(review)
+//! @yah:at(2026-10-16T23:31:25Z)
+//! @yah:assignee(agent:bundle-anthropic-glimmerstone)
+//! @yah:parent(R961)
+//! @yah:next("EmailMessage has to/from/reply_to/subject/text/html and no headers; LettreMailer sets none. Add a headers field and have LettreMailer emit it so the account service can attach X-Mailgun-Track-Clicks: no per message. Filed from noisetable R983-F3 (GAP 2); spec W275 s7 in the noisetable repo.")
+//! @yah:handoff("Landed (uncommitted, git-policy=defer). EmailMessage gains pub headers: Vec<(String,String)> (ordered) plus with_header(name, value); new() starts it empty. EmailMessage is #[non_exhaustive], so no external struct literal breaks. LettreMailer::send now calls a free build_message(msg) that adds each header through MessageBuilder::raw_header(HeaderValue::new(..)). Three kinds of entry are refused with MailerError::Build. (a) Names the message already owns: from, to, cc, bcc, reply-to, subject, content-type, content-transfer-encoding, mime-version, matched case-insensitively. lettre's insert_raw replaces a same-named field, so letting one through would silently override a checked value. (b) Values containing CR or LF, which would allow header injection. (c) Names lettre rejects (spaces, colon, longer than 76 characters). Caller usage: MagicLinkEmail::render(..).with_header(\"X-Mailgun-Track-Clicks\", \"no\").")
+//! @yah:verify("cargo test -p cheers-providers --all-features: 190 lib passed (log /tmp/glim-r961-providers-a2.log). New: lettre_mailer extra_headers_reach_the_wire (header present in Message::formatted() for both plain and multipart), extra_headers_cannot_override_modelled_fields, extra_headers_refuse_bad_names_and_line_breaks (CRLF/LF Bcc-injection attempts refused); mailer email_message_builder_sets_optional_fields asserts header order.")
+//! @yah:gotcha("noisetable web/services/account/src/mailer.rs has its own Mailer impl (a file-dropping dev mailer, deliver() near line 214). It ignores EmailMessage.headers unless it is taught to write them out. That is harmless for Mailgun, which only reads the header over SMTP via LettreMailer.")
 
 use async_trait::async_trait;
 use std::sync::Mutex;
@@ -34,6 +44,11 @@ pub struct EmailMessage {
     pub subject: String,
     pub text: String,
     pub html: Option<String>,
+    /// Extra header fields, sent in order — e.g. a provider directive such as
+    /// `X-Mailgun-Track-Clicks: no`, which keeps a relay from rewriting the
+    /// links a magic-link email carries (W275 §7). Fields this struct already
+    /// models (`From`, `Subject`, …) are not settable here; mailers refuse them.
+    pub headers: Vec<(String, String)>,
 }
 
 impl EmailMessage {
@@ -53,6 +68,7 @@ impl EmailMessage {
             subject: subject.into(),
             text: text.into(),
             html: None,
+            headers: Vec::new(),
         }
     }
 
@@ -63,6 +79,12 @@ impl EmailMessage {
 
     pub fn with_reply_to(mut self, reply_to: impl Into<String>) -> Self {
         self.reply_to = Some(reply_to.into());
+        self
+    }
+
+    /// Append one header field. See [`EmailMessage::headers`].
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
         self
     }
 }
@@ -140,9 +162,18 @@ mod tests {
     fn email_message_builder_sets_optional_fields() {
         let m = EmailMessage::new("to@x", "from@x", "Hi", "plain")
             .with_html("<p>html</p>")
-            .with_reply_to("reply@x");
+            .with_reply_to("reply@x")
+            .with_header("X-Mailgun-Track-Clicks", "no")
+            .with_header("X-Mailgun-Track-Opens", "no");
         assert_eq!(m.html.as_deref(), Some("<p>html</p>"));
         assert_eq!(m.reply_to.as_deref(), Some("reply@x"));
+        assert_eq!(
+            m.headers,
+            [
+                ("X-Mailgun-Track-Clicks".to_owned(), "no".to_owned()),
+                ("X-Mailgun-Track-Opens".to_owned(), "no".to_owned()),
+            ]
+        );
     }
 
     #[test]

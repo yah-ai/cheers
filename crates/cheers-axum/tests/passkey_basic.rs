@@ -354,3 +354,251 @@ async fn registering_two_credentials_reports_widths_and_a_running_account_count(
     observed_widths.sort_unstable();
     assert_eq!(observed_widths, stored_widths);
 }
+
+// ---------------------------------------------------------------------------
+// Username-less (discoverable) sign-in — R962.
+//
+// SoftPasskey cannot answer an empty `allowCredentials` and never returns a
+// `userHandle`, so these tests hand it the discoverable challenge with the
+// registered credential id filled in, then attach the `userHandle` a
+// discoverable authenticator would have returned. Neither field is covered by
+// the assertion signature (that covers authenticatorData + the clientData
+// hash, which carries the challenge), so the server sees exactly what a real
+// discoverable assertion would carry.
+// ---------------------------------------------------------------------------
+
+/// The WebAuthn user handle `register_start` has always used: a v5 UUID of
+/// the `UserId`. Spelled out here rather than imported so a change to the
+/// derivation — which would strand every credential already on a device —
+/// fails these tests.
+fn legacy_handle(user_id: &str) -> uuid::Uuid {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, user_id.as_bytes())
+}
+
+/// Register one credential through the routes; returns its raw credential id.
+async fn register_via_routes(
+    app: &Router,
+    state: &RouterState,
+    authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<u8> {
+    let (status, start_body) = json_post(
+        app,
+        "/auth/passkey/register/start",
+        json!({
+            "user_id": user_id,
+            "device_id": device_id,
+            "user_name": format!("{user_id}@example.com"),
+            "user_display_name": user_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {start_body}");
+    // Registration asks for a discoverable credential (R962).
+    assert_eq!(
+        start_body["challenge"]["publicKey"]["authenticatorSelection"]["residentKey"],
+        "preferred"
+    );
+    let ccr: cheers::passkey::CreationChallengeResponse =
+        serde_json::from_value(start_body["challenge"].clone()).unwrap();
+    let credential = authenticator
+        .do_registration(Url::parse(ORIGIN).unwrap(), ccr)
+        .expect("software authenticator registers");
+    let (status, body) = json_post(
+        app,
+        "/auth/passkey/register/finish",
+        json!({ "flow_id": start_body["flow_id"], "credential": credential }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+
+    let stored = state
+        .credentials
+        .list_for_user(&UserId::new(user_id))
+        .await
+        .unwrap();
+    let row = stored
+        .iter()
+        .find(|c| c.device_id.as_str() == device_id)
+        .expect("registered row");
+    let passkey = cheers::passkey::passkey_from_credential(row).unwrap();
+    // Pin the material shape cheers-server indexes by: the store-side reader
+    // must land on the same key as the raw credential id.
+    assert_eq!(
+        cheers_server::passkey_material_credential_id(&row.material).unwrap(),
+        cheers_server::passkey_credential_id_key(passkey.cred_id().as_ref()),
+    );
+    passkey.cred_id().as_ref().to_vec()
+}
+
+/// `discoverable/start`, then have SoftPasskey answer it for `cred_id` and
+/// attach `user_handle` (or none). Returns `(flow_id, assertion JSON)`.
+async fn discoverable_assertion(
+    app: &Router,
+    authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
+    cred_id: &[u8],
+    user_handle: Option<uuid::Uuid>,
+) -> (String, Value) {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let (status, start) =
+        json_post(app, "/auth/passkey/authenticate/discoverable/start", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "got {start}");
+    let flow_id = start["flow_id"].as_str().unwrap().to_owned();
+    let mut challenge = start["challenge"].clone();
+    let allow = &challenge["publicKey"]["allowCredentials"];
+    assert!(
+        allow.is_null() || allow.as_array().is_some_and(|a| a.is_empty()),
+        "username-less start names no credential: {allow}"
+    );
+    assert!(
+        challenge["mediation"].is_null(),
+        "cheers clears webauthn-rs's conditional mediation: {}",
+        challenge["mediation"]
+    );
+
+    challenge["publicKey"]["allowCredentials"] =
+        json!([{ "type": "public-key", "id": URL_SAFE_NO_PAD.encode(cred_id) }]);
+    let rcr: cheers::passkey::RequestChallengeResponse =
+        serde_json::from_value(challenge).unwrap();
+    let assertion: PublicKeyCredential = authenticator
+        .do_authentication(Url::parse(ORIGIN).unwrap(), rcr)
+        .expect("software authenticator authenticates");
+    let mut assertion = serde_json::to_value(&assertion).unwrap();
+    assertion["response"]["userHandle"] = match user_handle {
+        Some(h) => json!(URL_SAFE_NO_PAD.encode(h.as_bytes())),
+        None => Value::Null,
+    };
+    (flow_id, assertion)
+}
+
+#[tokio::test]
+async fn discoverable_start_touches_no_account() {
+    // Empty credential store: a typed-username start would refuse, the
+    // username-less start still issues a challenge.
+    let (app, _state, _authority, _sessions) = build_app();
+    let (status, body) =
+        json_post(&app, "/auth/passkey/authenticate/discoverable/start", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert!(!body["flow_id"].as_str().unwrap().is_empty());
+    assert!(!body["challenge"]["publicKey"]["challenge"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn discoverable_sign_in_resolves_the_account_from_the_credential() {
+    let (app, state, _authority, sessions) = build_app();
+    let mut alice_key = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let mut bob_key = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let alice_cred = register_via_routes(&app, &state, &mut alice_key, "u-alice", "phone").await;
+    let _bob_cred = register_via_routes(&app, &state, &mut bob_key, "u-bob", "laptop").await;
+
+    // The store finds the row by credential id alone.
+    let row = state
+        .credentials
+        .find_by_credential_id(&alice_cred)
+        .await
+        .unwrap()
+        .expect("found by credential id");
+    assert_eq!(row.user_id.as_str(), "u-alice");
+
+    let (flow_id, assertion) = discoverable_assertion(
+        &app,
+        &mut alice_key,
+        &alice_cred,
+        Some(legacy_handle("u-alice")),
+    )
+    .await;
+    let (status, body) = json_post(
+        &app,
+        "/auth/passkey/authenticate/discoverable/finish",
+        json!({ "flow_id": flow_id, "credential": assertion }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(body["user_id"], "u-alice");
+    assert_eq!(body["device_id"], "phone");
+    assert_eq!(body["token_type"], "Bearer");
+    let recorded = sessions
+        .list_sessions(&UserId::new("u-alice"), now())
+        .await
+        .unwrap();
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+
+    // The flow is single-use.
+    let (status, body) = json_post(
+        &app,
+        "/auth/passkey/authenticate/discoverable/finish",
+        json!({ "flow_id": flow_id, "credential": assertion }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
+    assert_eq!(body["error"], "unknown_flow");
+}
+
+#[tokio::test]
+async fn discoverable_finish_refuses_a_handle_that_is_not_the_owners() {
+    let (app, state, _authority, _sessions) = build_app();
+    let mut alice_key = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let alice_cred = register_via_routes(&app, &state, &mut alice_key, "u-alice", "phone").await;
+
+    // Alice's credential presented under Bob's handle.
+    let (flow_id, assertion) =
+        discoverable_assertion(&app, &mut alice_key, &alice_cred, Some(legacy_handle("u-bob")))
+            .await;
+    let (status, body) = json_post(
+        &app,
+        "/auth/passkey/authenticate/discoverable/finish",
+        json!({ "flow_id": flow_id, "credential": assertion }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "got {body}");
+    assert_eq!(body["error"], "unknown_credential");
+}
+
+#[tokio::test]
+async fn discoverable_finish_refuses_an_unknown_credential_id() {
+    let (app, state, _authority, _sessions) = build_app();
+    let mut alice_key = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let alice_cred = register_via_routes(&app, &state, &mut alice_key, "u-alice", "phone").await;
+    state
+        .credentials
+        .delete(&UserId::new("u-alice"), &cheers_core::DeviceId::new("phone"))
+        .await
+        .unwrap();
+
+    let (flow_id, assertion) = discoverable_assertion(
+        &app,
+        &mut alice_key,
+        &alice_cred,
+        Some(legacy_handle("u-alice")),
+    )
+    .await;
+    let (status, body) = json_post(
+        &app,
+        "/auth/passkey/authenticate/discoverable/finish",
+        json!({ "flow_id": flow_id, "credential": assertion }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "got {body}");
+    assert_eq!(body["error"], "unknown_credential");
+}
+
+#[tokio::test]
+async fn discoverable_finish_refuses_an_assertion_without_a_user_handle() {
+    let (app, state, _authority, _sessions) = build_app();
+    let mut alice_key = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let alice_cred = register_via_routes(&app, &state, &mut alice_key, "u-alice", "phone").await;
+
+    let (flow_id, assertion) =
+        discoverable_assertion(&app, &mut alice_key, &alice_cred, None).await;
+    let (status, body) = json_post(
+        &app,
+        "/auth/passkey/authenticate/discoverable/finish",
+        json!({ "flow_id": flow_id, "credential": assertion }),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "got {body}");
+    assert!(body["access_token"].is_null(), "no session minted: {body}");
+}

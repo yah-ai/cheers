@@ -70,7 +70,7 @@
 //! @yah:verify("After, with --no-fail-fast: 407 passed, 0 failed, 3 ignored (doctests), exit 0. ownership_store_revoke_follows_holder ran OK on sqlx-sqlite and turso. The doctest error had cleared by then (R731-B1's fix landed in between).")
 //! @yah:verify("NOT run: pg.rs (feature pg-integration) and libsql.rs (container-gated); the pg migration's constraint name is unverified against a live Postgres.")
 //! @yah:verify("Leader re-verify 2026-10-06: cargo test --workspace (oss/cheers) 640 pass / 0 fail / 3 ignored. cargo test -p cheers-sqlx --features pg-integration,libsql-integration --test pg --test libsql: pg 17/17, libsql 7/7, so the Postgres 0008 DROP CONSTRAINT ownership_granted_by_check applies cleanly and the guessed constraint name is confirmed.")
-//! @yah:gotcha("The container-gated suites DO run on this machine. Docker is OrbStack, and its socket is not /var/run/docker.sock, so testcontainers fails with SocketNotFoundError unless you prefix DOCKER_HOST=unix:///Users/leif/.orbstack/run/docker.sock TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/Users/leif/.orbstack/run/docker.sock. \"Container-gated, didn't run\" is not a valid skip here.")
+//! @yah:gotcha("The container-gated suites DO run on this machine. Docker is OrbStack, and its socket is not /var/run/docker.sock, so testcontainers fails with SocketNotFoundError unless you prefix DOCKER_HOST=unix://~/.orbstack/run/docker.sock TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=~/.orbstack/run/docker.sock. \"Container-gated, didn't run\" is not a valid skip here.")
 //!
 //! @yah:ticket(R732-T9, "OwnershipStore::list_for_kind(kind): enumerate every grant row of one resource_kind (needed by noisetable R803-T1 ledger migration)")
 //! @yah:status(review)

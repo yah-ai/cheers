@@ -124,6 +124,139 @@ impl UsedJtiStore for MemoryUsedJtiStore {
     }
 }
 
+/// One pending sign-in code — the third track of a bound magic-link grant
+/// (noisetable W275 §4). Minted only for a request that carried an S256
+/// `challenge`, and redeemable only alongside the matching `verifier`.
+///
+/// `email` and `grant_expires_at` are carried beside W275's
+/// `{jti, hash(C), challenge, attempts, expires_at}` because a code
+/// redemption has no token to read them from: `email` is who signs in, and
+/// `grant_expires_at` is how long the used-`jti` mark must outlive the two
+/// links the same grant minted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MagicLinkCode {
+    /// `base64url(SHA-256(verifier))` — the key. One row per challenge: a
+    /// resend under the same verifier replaces the previous code.
+    pub challenge: String,
+    /// The grant's single-use id, shared with both links.
+    pub jti: String,
+    pub email: String,
+    /// Hex digest of the code; the code itself is never stored.
+    pub code_hash: String,
+    /// Attempts spent so far, including a successful one.
+    pub attempts: u32,
+    /// When the code itself stops working (`issued_at + 600`).
+    pub expires_at: i64,
+    /// When the grant's links stop working.
+    pub grant_expires_at: i64,
+}
+
+impl MagicLinkCode {
+    pub fn new(
+        challenge: impl Into<String>,
+        jti: impl Into<String>,
+        email: impl Into<String>,
+        code_hash: impl Into<String>,
+        expires_at: i64,
+        grant_expires_at: i64,
+    ) -> Self {
+        Self {
+            challenge: challenge.into(),
+            jti: jti.into(),
+            email: email.into(),
+            code_hash: code_hash.into(),
+            attempts: 0,
+            expires_at,
+            grant_expires_at,
+        }
+    }
+}
+
+/// Storage for [`MagicLinkCode`]s, keyed by challenge (CHE-R961).
+///
+/// Declared here beside [`UsedJtiStore`] for the same reason it is: so
+/// `cheers-turso` can implement it without depending on `cheers`.
+#[async_trait]
+pub trait MagicLinkCodeStore: Send + Sync {
+    /// Insert the row, replacing any existing row for `code.challenge`.
+    async fn put(&self, code: &MagicLinkCode) -> Result<(), String>;
+
+    /// Atomically spend one attempt on the live code for `challenge`. When a
+    /// row exists with `expires_at > now` and `attempts < max_attempts`,
+    /// increment `attempts` and return the row as updated; otherwise `None`.
+    ///
+    /// The attempt is charged *before* the caller compares the code, so
+    /// concurrent guesses can never exceed `max_attempts` between them.
+    async fn take_attempt(
+        &self,
+        challenge: &str,
+        max_attempts: u32,
+        now: i64,
+    ) -> Result<Option<MagicLinkCode>, String>;
+
+    /// Delete the code minted for `jti`, if there is one.
+    async fn delete_for_jti(&self, jti: &str) -> Result<(), String>;
+}
+
+/// In-process [`MagicLinkCodeStore`]. For tests, dev and single-replica
+/// deployments; `cheers_turso::TursoMagicLinkCodeStore` is the shared one.
+#[derive(Default)]
+pub struct MemoryMagicLinkCodeStore {
+    inner: Mutex<HashMap<String, MagicLinkCode>>,
+}
+
+impl MemoryMagicLinkCodeStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drop codes whose `expires_at <= now`.
+    pub fn gc(&self, now: i64) {
+        self.inner.lock().unwrap().retain(|_, c| c.expires_at > now);
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap().is_empty()
+    }
+}
+
+#[async_trait]
+impl MagicLinkCodeStore for MemoryMagicLinkCodeStore {
+    async fn put(&self, code: &MagicLinkCode) -> Result<(), String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(code.challenge.clone(), code.clone());
+        Ok(())
+    }
+
+    async fn take_attempt(
+        &self,
+        challenge: &str,
+        max_attempts: u32,
+        now: i64,
+    ) -> Result<Option<MagicLinkCode>, String> {
+        let mut g = self.inner.lock().unwrap();
+        match g.get_mut(challenge) {
+            Some(c) if c.expires_at > now && c.attempts < max_attempts => {
+                c.attempts += 1;
+                Ok(Some(c.clone()))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    async fn delete_for_jti(&self, jti: &str) -> Result<(), String> {
+        self.inner.lock().unwrap().retain(|_, c| c.jti != jti);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Trait-shape smoke test via a tiny in-memory impl. The "real" memory impls

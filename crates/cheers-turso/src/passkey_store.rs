@@ -5,13 +5,16 @@
 //! `cheers::passkey::passkey_to_credential`.
 //!
 //! Layout: `(user_id, device_id)` primary key, with `material` holding the
-//! `serde_json`'d `Passkey` blob as TEXT.
+//! `serde_json`'d `Passkey` blob as TEXT and a unique `credential_id`
+//! (migration 0018) for the username-less lookup.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use cheers_core::{Credential, DeviceBinding, DeviceId, StoreError, UserId};
-use cheers_server::store::PasskeyCredentialStore;
+use cheers_server::store::{
+    passkey_credential_id_key, passkey_material_credential_id, PasskeyCredentialStore,
+};
 
 use crate::conn::TursoConn;
 use crate::util::{col, now};
@@ -71,19 +74,45 @@ impl PasskeyCredentialStore for TursoPasskeyCredentialStore {
     async fn put(&self, cred: &Credential) -> Result<(), StoreError> {
         require_passkey_binding(&cred.binding)?;
         let material = canonical_material(&cred.material)?;
+        let credential_id = passkey_material_credential_id(&cred.material)?;
         self.conn
             .execute(
-                "INSERT INTO passkey_credentials (user_id, device_id, material, created_at)
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO passkey_credentials (user_id, device_id, material, created_at, credential_id)
+                 VALUES (?, ?, ?, ?, ?)",
                 vec![
                     cred.user_id.as_str().into(),
                     cred.device_id.as_str().into(),
                     material.into(),
                     now().into(),
+                    credential_id.into(),
                 ],
             )
             .await?;
         Ok(())
+    }
+
+    async fn find_by_credential_id(
+        &self,
+        credential_id: &[u8],
+    ) -> Result<Option<Credential>, StoreError> {
+        let rows = self
+            .conn
+            .query(
+                "SELECT user_id, device_id, material FROM passkey_credentials
+                 WHERE credential_id = ?",
+                vec![passkey_credential_id_key(credential_id).into()],
+            )
+            .await?;
+        rows.first()
+            .map(|row| {
+                Ok(Credential::new(
+                    UserId::new(col::<String>(row, 0, "user_id")?),
+                    DeviceId::new(col::<String>(row, 1, "device_id")?),
+                    DeviceBinding::Passkey,
+                    col::<String>(row, 2, "material")?.into_bytes(),
+                ))
+            })
+            .transpose()
     }
 
     async fn list_for_user(&self, user_id: &UserId) -> Result<Vec<Credential>, StoreError> {

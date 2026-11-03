@@ -131,6 +131,7 @@ mod util;
 pub mod audit_store;
 pub mod binding_sequence_store;
 pub mod knock_store;
+pub mod magic_link_code_store;
 pub mod ownership_store;
 pub mod passkey_store;
 pub mod refresh_store;
@@ -147,6 +148,7 @@ pub use migrate::{MigrateError, Migration, MIGRATIONS};
 pub use audit_store::TursoAuditStore;
 pub use binding_sequence_store::TursoBindingSequenceStore;
 pub use knock_store::TursoKnockStore;
+pub use magic_link_code_store::TursoMagicLinkCodeStore;
 pub use ownership_store::TursoOwnershipStore;
 pub use passkey_store::TursoPasskeyCredentialStore;
 pub use refresh_store::TursoRefreshStore;
@@ -214,6 +216,10 @@ impl AccountStores {
 
     pub fn used_jti(&self) -> TursoUsedJtiStore {
         TursoUsedJtiStore::new(self.conn.clone())
+    }
+
+    pub fn magic_link_codes(&self) -> TursoMagicLinkCodeStore {
+        TursoMagicLinkCodeStore::new(self.conn.clone())
     }
 
     pub fn user_tokens(&self) -> TursoUserTokenStore {

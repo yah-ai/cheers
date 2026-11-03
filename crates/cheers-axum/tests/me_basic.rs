@@ -378,7 +378,8 @@ async fn revoke_unknown_device_returns_404() {
 #[tokio::test]
 async fn magic_link_sign_in_then_list_sessions_round_trip() {
     use cheers::email::magic_link::{
-        MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryUsedJtiStore,
+        MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryMagicLinkCodeStore,
+        MemoryUsedJtiStore,
     };
     use cheers::email::{CapturingMailer, MagicLinkEmail};
     use cheers_axum::magic_link::{router as magic_link_router, MagicLinkAuthState};
@@ -402,6 +403,7 @@ async fn magic_link_sign_in_then_list_sessions_round_trip() {
             MagicLinkCodec::new(&[9u8; 32], 900).unwrap(),
             MagicLinkUrlBuilder::new(format!("https://app.example{VERIFY_BASE}")),
             MemoryUsedJtiStore::new(),
+            MemoryMagicLinkCodeStore::new(),
         )),
         mailer: mailer.clone(),
         authority: authority.clone(),

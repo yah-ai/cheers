@@ -166,6 +166,18 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/sqlite/0017_knock.sql"),
         filename: "0017_knock.sql",
     },
+    Migration {
+        version: 18,
+        description: "passkey credential id",
+        sql: include_str!("../migrations/sqlite/0018_passkey_credential_id.sql"),
+        filename: "0018_passkey_credential_id.sql",
+    },
+    Migration {
+        version: 19,
+        description: "magic link codes",
+        sql: include_str!("../migrations/sqlite/0019_magic_link_codes.sql"),
+        filename: "0019_magic_link_codes.sql",
+    },
 ];
 
 /// The bookkeeping table, verbatim from `sqlx-sqlite`'s
@@ -361,6 +373,40 @@ mod tests {
         let m = &MIGRATIONS[0];
         assert_eq!(m.checksum().len(), 48, "SHA-384 digests are 48 bytes");
         assert_eq!(m.checksum(), Sha384::digest(m.sql.as_bytes()).to_vec());
+    }
+
+    /// R962: a passkey row written before 0018 (no `credential_id` column)
+    /// is backfilled from its material, so a credential already on a device
+    /// is reachable by the username-less lookup.
+    #[tokio::test]
+    async fn passkey_credential_id_backfills_existing_rows() {
+        use cheers_server::store::PasskeyCredentialStore;
+
+        let conn = TursoConn::open_in_memory().await.unwrap();
+        conn.execute_batch(ENSURE_TABLE).await.unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 18) {
+            apply(&conn, m).await.unwrap();
+        }
+        conn.execute(
+            "INSERT INTO users (user_id, created_at) VALUES ('u-old', 0)",
+            vec![],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO passkey_credentials (user_id, device_id, material, created_at)
+             VALUES ('u-old', 'phone', '{\"cred\":{\"cred_id\":\"AQID\"}}', 0)",
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        run(&conn).await.unwrap();
+
+        let store = crate::TursoPasskeyCredentialStore::new(std::sync::Arc::new(conn));
+        let found = store.find_by_credential_id(&[1, 2, 3]).await.unwrap().unwrap();
+        assert_eq!(found.user_id.as_str(), "u-old");
+        assert_eq!(found.device_id.as_str(), "phone");
     }
 
     #[tokio::test]

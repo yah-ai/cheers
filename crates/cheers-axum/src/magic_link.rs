@@ -1,12 +1,19 @@
-//! Magic-link routes — `POST /magic-link/request` + `GET /magic-link/verify`.
+//! Magic-link routes — `POST /magic-link/request`, `POST /magic-link/redeem`,
+//! and the legacy `GET /magic-link/verify`.
 //!
-//! The `request` handler mints a PASETO v4.local token bound to the supplied
-//! email, builds a click-through URL via [`MagicLinkProvider`], renders it
-//! through a [`MagicLinkEmail`] template, and hands the message to a
-//! [`Mailer`]. The `verify` handler reads the token out of the query string,
-//! atomically marks its `jti` as used (replay → [`RouteError::AlreadyUsed`]),
-//! finds-or-creates a `User` keyed on `ProviderKey::Email`, and establishes a
-//! session with `DeviceBinding::EmailMagicLink`.
+//! The `request` handler mints one grant for the supplied email (optionally
+//! bound to an S256 `challenge`, CHE-R961), builds its URLs via
+//! [`MagicLinkProvider`], renders them through a [`MagicLinkEmail`] template,
+//! and hands the message to a [`Mailer`]. `redeem` takes a JSON body —
+//! `{token}`, `{token, verifier}` or `{code, verifier}` (noisetable W275 §5) —
+//! so nothing secret rides a query string; it burns the whole grant
+//! (replay → [`RouteError::AlreadyUsed`]), finds-or-creates a `User` keyed on
+//! `ProviderKey::Email`, and establishes a session with
+//! `DeviceBinding::EmailMagicLink`. Its only uncollapsed refusal is
+//! [`RouteError::BoundElsewhere`].
+//!
+//! `verify` is `redeem`'s `{token}` row read off the query string. It stays
+//! until noisetable deletes `/account`'s `?token=` read, then goes.
 //!
 //! ## Token confidentiality vs response shape
 //!
@@ -27,7 +34,7 @@
 //! ```no_run
 //! # use std::sync::Arc;
 //! # use axum::Router;
-//! # use cheers::email::magic_link::{MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryUsedJtiStore};
+//! # use cheers::email::magic_link::{MagicLinkCodec, MagicLinkProvider, MagicLinkUrlBuilder, MemoryMagicLinkCodeStore, MemoryUsedJtiStore};
 //! # use cheers::email::{CapturingMailer, MagicLinkEmail};
 //! # use cheers_axum::magic_link::{router, MagicLinkAuthState};
 //! # use cheers_axum::me::NoSessionRecorder;
@@ -41,11 +48,15 @@
 //! #     U: cheers_server::UserStore + 'static,
 //! #     W: cheers_server::RevocationWriter + 'static,
 //! # {
-//! let provider = Arc::new(MagicLinkProvider::new(
-//!     MagicLinkCodec::new(&[7u8; 32], 900)?,
-//!     MagicLinkUrlBuilder::new("https://app.example/auth/magic-link/verify"),
-//!     MemoryUsedJtiStore::new(),
-//! ));
+//! let provider = Arc::new(
+//!     MagicLinkProvider::new(
+//!         MagicLinkCodec::new(&[7u8; 32], 900)?,
+//!         MagicLinkUrlBuilder::new("https://app.example/auth/sign-in").in_fragment(),
+//!         MemoryUsedJtiStore::new(),
+//!         MemoryMagicLinkCodeStore::new(),
+//!     )
+//!     .with_app_urls(MagicLinkUrlBuilder::new("https://link.app.example/sign-in").in_fragment()),
+//! );
 //! let mailer = Arc::new(CapturingMailer::new());
 //! let template = MagicLinkEmail::new("Acme", "Acme <noreply@acme.example>");
 //!
@@ -71,7 +82,9 @@ use axum::routing::{get, post};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-use cheers::email::magic_link::{MagicLinkProvider, UsedJtiStore};
+use cheers::email::magic_link::{
+    MagicLinkClaims, MagicLinkCodeStore, MagicLinkProvider, MagicLinkRedemption, UsedJtiStore,
+};
 use cheers::email::{MagicLinkEmail, Mailer};
 use cheers_core::{DeviceBinding, DeviceId, TokenMinter};
 use cheers_server::{
@@ -83,8 +96,8 @@ use crate::me::SessionRecorder;
 use crate::session::SessionBody;
 
 /// State bundle held by the magic-link handlers.
-pub struct MagicLinkAuthState<M, R, U, W, S, MA> {
-    pub provider: Arc<MagicLinkProvider<S>>,
+pub struct MagicLinkAuthState<M, R, U, W, S, C, MA> {
+    pub provider: Arc<MagicLinkProvider<S, C>>,
     pub mailer: Arc<MA>,
     pub authority: Arc<SessionAuthority<M, R, U, W>>,
     pub template: MagicLinkEmail,
@@ -98,7 +111,7 @@ pub struct MagicLinkAuthState<M, R, U, W, S, MA> {
     pub recorder: Arc<dyn SessionRecorder>,
 }
 
-impl<M, R, U, W, S, MA> std::fmt::Debug for MagicLinkAuthState<M, R, U, W, S, MA> {
+impl<M, R, U, W, S, C, MA> std::fmt::Debug for MagicLinkAuthState<M, R, U, W, S, C, MA> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MagicLinkAuthState")
             .field("template", &self.template)
@@ -106,25 +119,33 @@ impl<M, R, U, W, S, MA> std::fmt::Debug for MagicLinkAuthState<M, R, U, W, S, MA
     }
 }
 
-/// Build a router mounting `POST /magic-link/request` + `GET /magic-link/verify`.
-pub fn router<M, R, U, W, S, MA>(state: Arc<MagicLinkAuthState<M, R, U, W, S, MA>>) -> Router
+/// Build a router mounting `POST /magic-link/request`, `POST /magic-link/redeem`
+/// and `GET /magic-link/verify`.
+pub fn router<M, R, U, W, S, C, MA>(state: Arc<MagicLinkAuthState<M, R, U, W, S, C, MA>>) -> Router
 where
     M: TokenMinter + Send + Sync + 'static,
     R: RefreshStore + Send + Sync + 'static,
     U: UserStore + Send + Sync + 'static,
     W: RevocationWriter + Send + Sync + 'static,
     S: UsedJtiStore + 'static,
+    C: MagicLinkCodeStore + 'static,
     MA: Mailer + 'static,
 {
     Router::new()
-        .route("/magic-link/request", post(request::<M, R, U, W, S, MA>))
-        .route("/magic-link/verify", get(verify::<M, R, U, W, S, MA>))
+        .route("/magic-link/request", post(request::<M, R, U, W, S, C, MA>))
+        .route("/magic-link/redeem", post(redeem::<M, R, U, W, S, C, MA>))
+        .route("/magic-link/verify", get(verify::<M, R, U, W, S, C, MA>))
         .with_state(state)
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RequestBody {
     pub email: String,
+    /// `base64url(SHA-256(verifier))`. An app always sends one; a browser
+    /// form never does. Present, the grant's app token is bound to it and a
+    /// sign-in code is minted (W275 §4).
+    #[serde(default)]
+    pub challenge: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,8 +162,8 @@ pub struct RequestAck {
 /// addresses are well-formed; products that want to also hide that from
 /// untrusted callers should swap this handler for one that always returns
 /// `{ok: true}` and queues the actual mailer call.
-pub async fn request<M, R, U, W, S, MA>(
-    State(state): State<Arc<MagicLinkAuthState<M, R, U, W, S, MA>>>,
+pub async fn request<M, R, U, W, S, C, MA>(
+    State(state): State<Arc<MagicLinkAuthState<M, R, U, W, S, C, MA>>>,
     Json(body): Json<RequestBody>,
 ) -> Result<Json<RequestAck>, RouteError>
 where
@@ -151,10 +172,14 @@ where
     U: UserStore + Send + Sync + 'static,
     W: RevocationWriter + Send + Sync + 'static,
     S: UsedJtiStore + 'static,
+    C: MagicLinkCodeStore + 'static,
     MA: Mailer + 'static,
 {
     let now = now_unix();
-    let req = state.provider.request(&body.email, now).await?;
+    let req = state
+        .provider
+        .request(&body.email, body.challenge.as_deref(), now)
+        .await?;
     let msg = state.template.render(&body.email, &req);
     state.mailer.send(&msg).await?;
     Ok(Json(RequestAck { ok: true }))
@@ -165,10 +190,51 @@ pub struct VerifyQuery {
     pub token: String,
 }
 
-/// `GET /magic-link/verify?token=...` — consume the token, resolve / create
-/// the user, mint a session.
-pub async fn verify<M, R, U, W, S, MA>(
-    State(state): State<Arc<MagicLinkAuthState<M, R, U, W, S, MA>>>,
+/// Body of `POST /magic-link/redeem` — exactly one of `token` / `code`;
+/// `verifier` is required beside `code` and optional beside `token`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedeemBody {
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub verifier: Option<String>,
+}
+
+/// `POST /magic-link/redeem` — redeem a token or a code, burn the grant,
+/// resolve / create the user, mint a session.
+pub async fn redeem<M, R, U, W, S, C, MA>(
+    State(state): State<Arc<MagicLinkAuthState<M, R, U, W, S, C, MA>>>,
+    Json(body): Json<RedeemBody>,
+) -> Result<Json<SessionBody>, RouteError>
+where
+    M: TokenMinter + Send + Sync + 'static,
+    R: RefreshStore + Send + Sync + 'static,
+    U: UserStore + Send + Sync + 'static,
+    W: RevocationWriter + Send + Sync + 'static,
+    S: UsedJtiStore + 'static,
+    C: MagicLinkCodeStore + 'static,
+    MA: Mailer + 'static,
+{
+    let now = now_unix();
+    let redemption = match (&body.token, &body.code, &body.verifier) {
+        (Some(token), None, verifier) => MagicLinkRedemption::Token {
+            token,
+            verifier: verifier.as_deref(),
+        },
+        (None, Some(code), Some(verifier)) => MagicLinkRedemption::Code { code, verifier },
+        _ => return Err(RouteError::MagicLinkToken("malformed redeem body".into())),
+    };
+    let claims = state.provider.redeem(redemption, now).await?;
+    sign_in(&state, &claims, now).await
+}
+
+/// `GET /magic-link/verify?token=...` — `redeem`'s `{token}` row off the
+/// query string. Kept until noisetable's `/account` stops reading `?token=`.
+pub async fn verify<M, R, U, W, S, C, MA>(
+    State(state): State<Arc<MagicLinkAuthState<M, R, U, W, S, C, MA>>>,
     Query(q): Query<VerifyQuery>,
 ) -> Result<Json<SessionBody>, RouteError>
 where
@@ -177,10 +243,31 @@ where
     U: UserStore + Send + Sync + 'static,
     W: RevocationWriter + Send + Sync + 'static,
     S: UsedJtiStore + 'static,
+    C: MagicLinkCodeStore + 'static,
     MA: Mailer + 'static,
 {
     let now = now_unix();
-    let claims = state.provider.consume(&q.token, now).await?;
+    let redemption = MagicLinkRedemption::Token {
+        token: &q.token,
+        verifier: None,
+    };
+    let claims = state.provider.redeem(redemption, now).await?;
+    sign_in(&state, &claims, now).await
+}
+
+/// Find-or-create the claims' email user and establish an
+/// `EmailMagicLink` session for it.
+async fn sign_in<M, R, U, W, S, C, MA>(
+    state: &MagicLinkAuthState<M, R, U, W, S, C, MA>,
+    claims: &MagicLinkClaims,
+    now: i64,
+) -> Result<Json<SessionBody>, RouteError>
+where
+    M: TokenMinter + Send + Sync + 'static,
+    R: RefreshStore + Send + Sync + 'static,
+    U: UserStore + Send + Sync + 'static,
+    W: RevocationWriter + Send + Sync + 'static,
+{
     let users = state.authority.users();
     let provider_key = ProviderKey::Email;
 

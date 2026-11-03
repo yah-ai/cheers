@@ -6,19 +6,23 @@
 //! per-platform client UI (browser WebAuthn JS, native `AuthenticationServices`
 //! on Apple) lands in P9.
 //!
-//! ## Credential profile: non-discoverable by default
+//! ## Credential profile: discoverable preferred, two sign-in flows
 //!
-//! cheers ships the **non-discoverable** (server-side) passkey profile:
 //! [`start_registration`](PasskeyRelyingParty::start_registration) maps onto
-//! `webauthn-rs`'s `start_passkey_registration`, which sets
-//! `requireResidentKey = false`. The relying party always knows *which* user
-//! is authenticating (it supplies the candidate credential list to the
-//! authentication ceremony), so a discoverable/resident credential is not
-//! required. This matches the design doc's "discoverable-credential flag,
-//! default off." Discoverable (resident-key) registration — where the
-//! authenticator stores the user handle and a username-less login becomes
-//! possible — is a deliberate future extension; it would route through
-//! `webauthn-rs`'s resident-key entry points rather than the `Passkey` profile.
+//! `webauthn-rs`'s `start_passkey_registration` and then asks for
+//! `residentKey = "preferred"` (`requireResidentKey` stays false): the
+//! authenticator stores the credential and its user handle when it can, and a
+//! security key out of resident slots still registers (R962).
+//!
+//! Authentication runs either way:
+//!
+//! - **Typed username** — [`start_authentication`](PasskeyRelyingParty::start_authentication)
+//!   with the user's stored credentials as `allowCredentials`. Works for every
+//!   credential, discoverable or not.
+//! - **Username-less** — [`start_discoverable_authentication`](PasskeyRelyingParty::start_discoverable_authentication)
+//!   with an empty `allowCredentials`; the assertion's credential id and user
+//!   handle say who answered. Works only for discoverable credentials, which
+//!   every platform passkey (iCloud Keychain, Google Password Manager) is.
 //!
 //! ## The ceremony state MUST be stored server-side
 //!
@@ -75,9 +79,9 @@ use webauthn_rs::prelude::{Webauthn, WebauthnBuilder, WebauthnError};
 // so products depending on `cheers` (feature `passkey`) don't also have to take
 // a direct `webauthn-rs` dependency just to name them.
 pub use webauthn_rs::prelude::{
-    AuthenticationResult, CreationChallengeResponse, CredentialID, Passkey, PasskeyAuthentication,
-    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, RequestChallengeResponse,
-    Url, Uuid,
+    AuthenticationResult, CreationChallengeResponse, CredentialID, DiscoverableAuthentication,
+    DiscoverableKey, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
+    RegisterPublicKeyCredential, RequestChallengeResponse, Url, Uuid,
 };
 
 /// Errors surfaced by [`PasskeyRelyingParty`] and the credential bridge.

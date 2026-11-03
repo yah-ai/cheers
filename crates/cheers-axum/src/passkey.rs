@@ -1,7 +1,7 @@
 //! Passkey routes — registration + authentication ceremonies.
 //!
 //! Each ceremony is a two-request flow: the client POSTs `start` with the
-//! user identity, the server stashes the `PasskeyRegistration` /
+//! user identity (or, for username-less sign-in, with nothing), the server stashes the `PasskeyRegistration` /
 //! `PasskeyAuthentication` state server-side keyed on a fresh `flow_id`, and
 //! returns the WebAuthn challenge to send to the authenticator. The client
 //! posts the authenticator's response back to `finish` with the same
@@ -27,6 +27,18 @@
 //! [`DeviceBinding::Passkey`]. The same shape on `finish_authentication`:
 //! verify, fold any counter advance back into the stored credential via
 //! [`apply_authentication_result`], then mint.
+//!
+//! ## Username-less sign-in (R962)
+//!
+//! `/passkey/authenticate/discoverable/{start,finish}` sign a user in without
+//! being told who they are. `start` names no account — empty
+//! `allowCredentials`, state stashed under the `flow_id` alone. At `finish`
+//! the assertion's credential id selects the stored row through
+//! [`PasskeyCredentialStore::find_by_credential_id`], and that row's owner is
+//! the account. The assertion's `userHandle` must equal the owner's
+//! [`uuid_from_user_id`] handle — a cross-check, not the lookup key, so no
+//! `Uuid → UserId` table exists or is needed, and every credential registered
+//! through `register_start` (which always used that handle) resolves.
 //!
 //! ## Wiring
 //!
@@ -92,10 +104,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use cheers::passkey::{
-    CreationChallengeResponse, Passkey, PasskeyAuthentication, PasskeyRegistration,
-    PasskeyRelyingParty, PasskeyUpdate, PublicKeyCredential, RegisterPublicKeyCredential,
-    RequestChallengeResponse, Uuid, apply_authentication_result, passkey_from_credential,
-    passkey_to_credential,
+    CreationChallengeResponse, DiscoverableAuthentication, Passkey, PasskeyAuthentication,
+    PasskeyRegistration, PasskeyRelyingParty, PasskeyUpdate, PublicKeyCredential,
+    RegisterPublicKeyCredential, RequestChallengeResponse, Uuid, apply_authentication_result,
+    passkey_from_credential, passkey_to_credential,
 };
 use cheers_core::{DeviceBinding, DeviceId, TokenMinter, UserId};
 use cheers_server::{
@@ -130,6 +142,15 @@ pub struct StashedAuthentication {
     pub state: PasskeyAuthentication,
 }
 
+/// Server-side stash for a username-less (discoverable) authentication in
+/// flight. Carries no account: who is signing in is learned at `finish`, from
+/// the assertion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StashedDiscoverableAuthentication {
+    pub state: DiscoverableAuthentication,
+}
+
 /// Persistence for in-flight passkey ceremony state.
 ///
 /// Implementations MUST treat each entry as single-use (a successful
@@ -157,6 +178,15 @@ pub trait PasskeyFlowStore: Send + Sync {
         &self,
         flow_id: &str,
     ) -> Result<Option<StashedAuthentication>, String>;
+    async fn put_discoverable_authentication(
+        &self,
+        flow_id: &str,
+        value: StashedDiscoverableAuthentication,
+    ) -> Result<(), String>;
+    async fn take_discoverable_authentication(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<StashedDiscoverableAuthentication>, String>;
 }
 
 /// In-process [`PasskeyFlowStore`] for tests, dev, and single-replica
@@ -166,6 +196,7 @@ pub trait PasskeyFlowStore: Send + Sync {
 pub struct MemoryPasskeyFlowStore {
     reg: Mutex<HashMap<String, StashedRegistration>>,
     auth: Mutex<HashMap<String, StashedAuthentication>>,
+    discoverable: Mutex<HashMap<String, StashedDiscoverableAuthentication>>,
 }
 
 impl MemoryPasskeyFlowStore {
@@ -203,6 +234,23 @@ impl PasskeyFlowStore for MemoryPasskeyFlowStore {
         flow_id: &str,
     ) -> Result<Option<StashedAuthentication>, String> {
         Ok(self.auth.lock().unwrap().remove(flow_id))
+    }
+    async fn put_discoverable_authentication(
+        &self,
+        flow_id: &str,
+        value: StashedDiscoverableAuthentication,
+    ) -> Result<(), String> {
+        self.discoverable
+            .lock()
+            .unwrap()
+            .insert(flow_id.to_owned(), value);
+        Ok(())
+    }
+    async fn take_discoverable_authentication(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<StashedDiscoverableAuthentication>, String> {
+        Ok(self.discoverable.lock().unwrap().remove(flow_id))
     }
 }
 
@@ -267,7 +315,7 @@ impl<M, R, U, W, P, F> std::fmt::Debug for PasskeyAuthState<M, R, U, W, P, F> {
     }
 }
 
-/// Build a router mounting the four passkey routes. The product mounts it
+/// Build a router mounting the six passkey routes. The product mounts it
 /// under whatever base path it chose (`/auth`, `/api/auth`, …).
 pub fn router<M, R, U, W, P, F>(state: Arc<PasskeyAuthState<M, R, U, W, P, F>>) -> Router
 where
@@ -294,6 +342,14 @@ where
         .route(
             "/passkey/authenticate/finish",
             post(authenticate_finish::<M, R, U, W, P, F>),
+        )
+        .route(
+            "/passkey/authenticate/discoverable/start",
+            post(discoverable_authenticate_start::<M, R, U, W, P, F>),
+        )
+        .route(
+            "/passkey/authenticate/discoverable/finish",
+            post(discoverable_authenticate_finish::<M, R, U, W, P, F>),
         )
         .with_state(state)
 }
@@ -538,15 +594,140 @@ where
     Ok(Json(SessionBody::from_new_session(session)))
 }
 
+/// `POST /passkey/authenticate/discoverable/start` — begin a username-less
+/// sign-in. Takes no body and reads no account: the challenge's
+/// `allowCredentials` is empty and the stash is keyed by `flow_id` alone.
+/// Responds with the same shape as `authenticate_start`.
+pub async fn discoverable_authenticate_start<M, R, U, W, P, F>(
+    State(state): State<Arc<PasskeyAuthState<M, R, U, W, P, F>>>,
+) -> Result<Json<AuthenticateStartResponse>, RouteError>
+where
+    M: TokenMinter + Send + Sync + 'static,
+    R: RefreshStore + Send + Sync + 'static,
+    U: UserStore + Send + Sync + 'static,
+    W: RevocationWriter + Send + Sync + 'static,
+    P: PasskeyCredentialStore + Send + Sync + 'static,
+    F: PasskeyFlowStore + Send + Sync + 'static,
+{
+    let (challenge, authentication) = state.relying_party.start_discoverable_authentication()?;
+    let flow_id = random_flow_id();
+    state
+        .flows
+        .put_discoverable_authentication(
+            &flow_id,
+            StashedDiscoverableAuthentication {
+                state: authentication,
+            },
+        )
+        .await
+        .map_err(RouteError::Store)?;
+    Ok(Json(AuthenticateStartResponse { flow_id, challenge }))
+}
+
+/// `POST /passkey/authenticate/discoverable/finish` — complete a username-less
+/// sign-in and mint a session for whichever account owns the answering
+/// credential. Body is the same shape as `authenticate_finish`.
+///
+/// Refuses with `UnknownCredential` when the credential id names no stored
+/// passkey, or when the assertion's `userHandle` is not that passkey owner's
+/// handle. Both checks run before the signature is verified; a bad signature
+/// is `Ceremony`, as in `authenticate_finish`.
+pub async fn discoverable_authenticate_finish<M, R, U, W, P, F>(
+    State(state): State<Arc<PasskeyAuthState<M, R, U, W, P, F>>>,
+    Json(req): Json<AuthenticateFinishRequest>,
+) -> Result<Json<SessionBody>, RouteError>
+where
+    M: TokenMinter + Send + Sync + 'static,
+    R: RefreshStore + Send + Sync + 'static,
+    U: UserStore + Send + Sync + 'static,
+    W: RevocationWriter + Send + Sync + 'static,
+    P: PasskeyCredentialStore + Send + Sync + 'static,
+    F: PasskeyFlowStore + Send + Sync + 'static,
+{
+    let stashed = state
+        .flows
+        .take_discoverable_authentication(&req.flow_id)
+        .await
+        .map_err(RouteError::Store)?
+        .ok_or(RouteError::UnknownFlow)?;
+
+    let (user_handle, cred_id) = state
+        .relying_party
+        .identify_discoverable_authentication(&req.credential)?;
+    let stored = state
+        .credentials
+        .find_by_credential_id(&cred_id)
+        .await?
+        .ok_or(RouteError::UnknownCredential)?;
+    if uuid_from_user_id(&stored.user_id) != user_handle {
+        return Err(RouteError::UnknownCredential);
+    }
+
+    let mut passkeys = vec![passkey_from_credential(&stored)?];
+    let result = state.relying_party.finish_discoverable_authentication(
+        &req.credential,
+        stashed.state,
+        &passkeys,
+    )?;
+    match apply_authentication_result(&mut passkeys, &result) {
+        PasskeyUpdate::Updated(updated) => {
+            let cred = passkey_to_credential(
+                stored.user_id.clone(),
+                stored.device_id.clone(),
+                updated,
+            )?;
+            state.credentials.update(&cred).await?;
+        }
+        PasskeyUpdate::Unchanged(_) => {}
+        PasskeyUpdate::UnknownCredential => return Err(RouteError::UnknownCredential),
+        other => return Err(RouteError::Ceremony(format!("{other:?}"))),
+    }
+
+    let now = now_unix();
+    let session = state
+        .authority
+        .establish(stored.user_id, stored.device_id, DeviceBinding::Passkey, now)
+        .await?;
+    state.recorder.record_new_session(&session).await?;
+    Ok(Json(SessionBody::from_new_session(session)))
+}
+
 /// WebAuthn user handles are opaque ≤64-byte UUIDs that must be stable per
 /// user and must not be PII. We derive one by hashing the cheers `UserId`
 /// into a v5 UUID so the same user always reaches the same handle without
 /// the product having to maintain a `UserId ↔ Uuid` table.
 ///
+/// The hash is one-way, and that is enough for username-less sign-in (R962):
+/// `discoverable_authenticate_finish` resolves the account from the
+/// credential id and only *compares* the asserted handle against this
+/// function of the owner's `UserId`. Changing the derivation would strand
+/// every credential already on a device — their stored handle is this one.
+///
 /// `webauthn-rs` re-exports `Uuid` but its transitive `uuid` dep doesn't
 /// enable the `v5` feature; we take a direct `uuid` dep (gated on the
 /// `passkey` feature) for the constructor and convert via `into()` — the
 /// concrete type is the same `uuid::Uuid`.
+///
+/// @yah:relay(R962, "Username-less (discoverable) passkey sign-in: credential lookup by id, discoverable assertion start/finish routes, and a userHandle the server can resolve to an account (noisetable R983-B2, operator form F1326)")
+/// @yah:status(review)
+/// @yah:at(2026-10-15T23:25:04Z)
+/// @yah:assignee(agent:bundle-anthropic-ashguard)
+/// @yah:next("Operator decision F1326 (2026-10-15): noisetable's account service issues a passkey challenge with no email and resolves the account from the credential's userHandle. The typed-email path, with its padded allowCredentials, stays as the fallback. Consumer: noisetable R983-B2 (account service handback + nt-session), which carries @yah:burst(devcrate:cheers) until this publishes. Sibling of R961 on the same noisetable redeem/handback surface.")
+/// @yah:next("(1) PasskeyCredentialStore (put / list_for_user / delete / update today) gains lookup by credential id, with the cheers-turso impl in passkey_store.rs. (2) Username-less assertion start and finish routes beside authenticate_start / authenticate_finish: start returns an empty allowCredentials and needs a challenge store not keyed by account. R983-B2's handoff names webauthn-rs's discoverable entry points (start / identify / finish_discoverable_authentication); not re-read for this filing.")
+/// @yah:next("(3) This function derives the userHandle as a one-way v5 hash of UserId, with no UserId-to-Uuid table, so a username-less assertion cannot be mapped back to an account. This ticket decides: store the mapping, or make the handle resolvable. Inference: credentials already on devices carry the v5 handle, so either choice must still resolve those (a stored mapping can be backfilled by hashing known user ids; a new handle shape cannot reach them).")
+/// @yah:next("cheers-providers register.rs:185 registers non-discoverable ('no resident key'). Apple platform passkeys are discoverable regardless (R983-B2 handoff). Decide whether registration should also request a resident key.")
+/// @yah:verify("Tests: a registered credential is found by its id; a username-less start returns a challenge with empty allowCredentials and touches no account; finish resolves the right account from the userHandle, including for a credential registered before this change; an unknown handle or credential id is refused.")
+/// @yah:handoff("Landed (uncommitted, git-policy=defer). STORE: PasskeyCredentialStore gains find_by_credential_id(&[u8]) (cheers-server/src/store.rs) plus helpers passkey_credential_id_key / passkey_material_credential_id (read /cred/cred_id from the serde_json'd Passkey and canonicalise it to base64url-unpadded). Impls: turso, sqlx pg + sqlite, and the in-memory test stores. put writes a unique credential_id column, so a duplicate credential id is a Conflict and material without one is refused. Migration 0018_passkey_credential_id.sql (sqlx pg/sqlite, turso) adds the column, backfills it from material in SQL, and adds a UNIQUE index.")
+/// @yah:handoff("RESOLUTION DECISION (3): neither a mapping table nor a new handle shape. At finish the credential id selects the row and that row's owner is the account. The asserted userHandle must equal uuid_from_user_id(owner), so it is a cross-check, not a lookup key. Every credential register_start ever made used that v5 handle, so pre-existing credentials resolve unchanged. Changing the derivation would strand them; the doc on uuid_from_user_id says so and the tests pin it via legacy_handle().")
+/// @yah:handoff("ROUTES (cheers-axum/src/passkey.rs): POST /passkey/authenticate/discoverable/start takes no body and stashes by flow_id only (StashedDiscoverableAuthentication; PasskeyFlowStore gains put/take_discoverable_authentication). POST /passkey/authenticate/discoverable/finish runs identify → find_by_credential_id → handle check → finish_discoverable → counter update → session. An unknown credential id or a mismatched handle returns 401 unknown_credential. cheers PasskeyRelyingParty gains start/identify/finish_discoverable_authentication, which needs webauthn-rs feature conditional-ui. start clears webauthn-rs's forced mediation=conditional: a browser given that with no autofill field waits forever, so the client opts in itself.")
+/// @yah:handoff("REGISTRATION DECISION (4): register.rs now sends residentKey=preferred (requireResidentKey stays false), so non-platform authenticators also create discoverable credentials where they can, and a full security key still registers. Reversal is one line. To name ResidentKeyRequirement, the passkey feature now pulls webauthn-rs-proto, which was already in the graph at =0.5.5.")
+/// @yah:handoff("COORDINATION: @Ashguard:citadel (CHE-R961, session:8bd9879a) and I both took migration 0018, then both renumbered at once. Settled in chat: passkey_credential_id=0018, magic_link_codes=0019. Their R961 edits share cheers-axum/tests/common/mod.rs; I touched only the passkey stores there.")
+/// @yah:verify("cargo test -p cheers-server -p cheers-turso: all green, including store::tests::material_credential_id_is_canonical_base64url, migrate::tests::passkey_credential_id_backfills_existing_rows (a row inserted pre-0018 is found by id after migrating), and passkey_store_round_trip (find by id, duplicate-id Conflict, id-less material refused, lookup after update/delete).")
+/// @yah:verify("cargo test -p cheers-providers --features passkey passkey: 14/14. cargo test -p cheers-sqlx --features sqlite --test sqlite: 30/30. The pg variant compiles; it was not run (needs Docker).")
+/// @yah:verify("cargo test -p cheers-axum --all-features --test main: 122/122. That includes the 5 new discoverable tests: start touches no account and returns empty allowCredentials with no mediation; the account resolves from the credential with two accounts registered, and the flow is single-use; a mismatched handle is refused; a deleted/unknown credential id is refused; a missing userHandle mints no session. SoftPasskey cannot answer an empty allowCredentials, so the tests fill in the cred id and inject userHandle; neither field is signature-covered. cargo check --workspace --all-features --tests: EXIT=0.")
+/// @yah:gotcha("Not mine, still red: cheers-axum lib test discovery::tests::scopes_supported_equals_the_registry fails 24 != 19. It compares against yah_scopes::NAMESPACES, so some scope registry grew. It does not touch passkeys and was left as found.")
+/// @yah:gotcha("PasskeyCredentialStore and PasskeyFlowStore gained required methods, which breaks any external implementor on upgrade. As of 2026-10-15 there are none in yah or noisetable/web (grep). noisetable R983-B2 consumes this only after a cheers publish, which is the operator's to run under git-policy=defer.")
+/// @yah:handoff("2026-10-16 (Glimmerstone, noisetable R983 courier). The working copy is intact: find_by_credential_id is present in cheers-server store.rs, cheers-turso and cheers-sqlx passkey_store.rs; cheers-axum passkey.rs has the discoverable routes; migration 0018_passkey_credential_id.sql exists for sqlx pg/sqlite and turso. All of it is still uncommitted and untracked. Re-ran: cheers-axum --all-features --test main 122/122; cheers-server/-turso/-core/-test-identity green; cheers-sqlx sqlite 30/30. NOT PUBLISHED: the operator will cut it in a full yah-camp release; see the R961 gotcha on committing the untracked files before oss-publish.sh.")
 fn uuid_from_user_id(user_id: &UserId) -> Uuid {
     let derived = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, user_id.as_str().as_bytes());
     // `webauthn_rs::prelude::Uuid` IS `uuid::Uuid` — explicit conversion in
