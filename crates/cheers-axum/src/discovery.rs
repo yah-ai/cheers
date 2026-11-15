@@ -263,7 +263,9 @@ mod tests {
             cfg.scopes_supported, from_registry,
             "scopes_supported must reflect the registry exactly (order and contents)",
         );
-        assert_eq!(cfg.scopes_supported.len(), 19);
+        // yah's set plus the one extra; derived, so adding a yah scope does
+        // not re-break this (a hard-coded 19 went stale at 24).
+        assert_eq!(cfg.scopes_supported.len(), yah_scopes::DEFS.len() + 1);
         assert_eq!(cfg.scopes_supported.last().map(String::as_str), Some("issues:triage"));
     }
 

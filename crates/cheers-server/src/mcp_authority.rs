@@ -52,6 +52,13 @@
 //! @yah:handoff("Tests: scope.rs unbound_or_empty_or_unused_bindings_fail_build; yah_scopes namespaces_cover_defs_and_unbound_fails and a_scope_is_valid_only_where_its_namespace_was_bound; tokens_basic's 403 test is back to its original shape. There a derived cloud:read tuple exists but is refused at the unbound https://not-granted.test (BOUND_AUDS). Product Only scopes behave as before (scope.rs, mcp.rs pinned test). Every test registry now binds the audiences it mints at.")
 //! @yah:verify("cargo test --workspace (oss/cheers) after the audience follow-up: 686 passed / 0 failed / 3 ignored (previous end state 683/0/3).")
 //! @yah:verify("Leader re-verify 2026-10-06, after the Audiences::Any removal: cargo test --workspace (oss/cheers) 686 pass / 0 fail / 3 ignored, no build skew; 0 remaining yah_scopes::registry() or Audiences::Any call sites across cheers, kamaji, passway, yubaba and the yah crates/app.")
+//!
+//! @yah:relay(R963, "cheers: a Retiring service-principal key still exchanges until its retire_at (key-rotation overlap); land and publish it so noisetable's self-rotating publisher key works off the devcrate burst")
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:at(2026-11-14T08:45:39Z)
+//! @yah:next("From the noisetable camp (R1043-F3, 2026-11-04). noisetable's svc:noisetable-publisher rotates its own signing key every 60 days with a 7-day overlap. Today cheers' mint_service refuses a Retiring key outright, so an in-flight publish signed with the previous key would fail the moment rotation happens. The change is already in this checkout, uncommitted: oss/cheers/crates/cheers-server/src/mcp_authority.rs (mint_service accepts a Retiring key until retire_at). The noisetable courier reports cheers-server 232/0 with it. Review it, add a cheers-side test if the courier's coverage lives only in noisetable (an exchange with a Retiring key before retire_at succeeds; after it, refused), commit, and publish a cheers release through yah's normal flow. Then tell the noisetable camp the version, so it can turn off `scripts/devcrate.sh off cheers` and bump web/services.")
+//! @yah:next("Pre-existing and unrelated: cheers-axum discovery::tests::scopes_supported_equals_the_registry fails on this tree; the noisetable courier didn't touch it. Fix it or file it before the release.")
+//! @yah:blocked_on(operator)
 
 use std::sync::Arc;
 
@@ -222,9 +229,9 @@ pub enum McpMintError {
     /// The footer `kid` names no service-principal key cheers holds.
     #[error("client assertion kid '{0}' is unknown")]
     AssertionUnknownKid(String),
-    /// The footer `kid` names a key that has been rotated out (`Retiring`).
-    /// Only an ACTIVE key may sign an assertion, even inside the overlap
-    /// window that still publishes it.
+    /// The footer `kid` names a key that has been rotated out (`Retiring`)
+    /// and whose overlap window has closed (`retire_at <= now`). Inside the
+    /// window a retiring key still signs assertions.
     #[error("client assertion kid '{0}' is a retired key")]
     AssertionRetiredKey(String),
     /// `iss` or `sub` is not the service principal that owns the signing key
@@ -909,7 +916,15 @@ where
             .into_iter()
             .find(|k| k.kid == kid)
             .ok_or_else(|| McpMintError::AssertionUnknownKid(kid.clone()))?;
-        if key.status != SigningKeyStatus::Active {
+        // A rotated-out key keeps signing assertions until its `retire_at`
+        // (the rotation's overlap window), so a run that read the credential
+        // before a rotation still exchanges. Past `retire_at` it is refused
+        // even if `prune_retired_keys` has not yet dropped the row.
+        let live = match key.status {
+            SigningKeyStatus::Active => true,
+            SigningKeyStatus::Retiring => key.retire_at.is_some_and(|t| t > now),
+        };
+        if !live {
             return Err(McpMintError::AssertionRetiredKey(kid));
         }
 
@@ -2712,9 +2727,21 @@ mod tests {
     fn mint_service_rejects_retired_key() {
         let r = svc_rig();
         seed_svc_scope(&r, yah_scopes::CLOUD_READ);
-        pollster::block_on(r.sps.rotate(&PrincipalId::service("yubaba"), 2)).unwrap();
+        // Overlap closes at 2 + 0 = 2, before the mint at 1010.
+        let sps = ServicePrincipalAuthority::new(r.sps.store().clone())
+            .with_policy(crate::OverlapPolicy::new(0));
+        pollster::block_on(sps.rotate(&PrincipalId::service("yubaba"), 2)).unwrap();
         let err = mint(&r, &good_assertion("j")).unwrap_err();
         assert!(matches!(err, McpMintError::AssertionRetiredKey(_)), "{err:?}");
+    }
+
+    #[test]
+    fn mint_service_accepts_a_retiring_key_inside_its_overlap() {
+        let r = svc_rig();
+        seed_svc_scope(&r, yah_scopes::CLOUD_READ);
+        // Default overlap (24 h) from t=2: still open at 1010.
+        pollster::block_on(r.sps.rotate(&PrincipalId::service("yubaba"), 2)).unwrap();
+        mint(&r, &good_assertion("j")).expect("a retiring key signs until retire_at");
     }
 
     #[test]
